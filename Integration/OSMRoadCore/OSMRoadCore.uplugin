@@ -1,0 +1,26 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1",
+	"FriendlyName": "OSMRoadCore",
+	"Description": "OSM road import + RoadBuilder integration for McpPcg (L1 layer)",
+	"Category": "Procedural",
+	"CreatedBy": "McpPcg",
+	"EngineVersion": "5.8.0",
+	"CanContainContent": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "OSMRoadCore",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{ "Name": "GeoReferencing",   "Enabled": true },
+		{ "Name": "RoadBuilder",      "Enabled": true },
+		{ "Name": "RoadNet",          "Enabled": true },
+		{ "Name": "PCG",              "Enabled": true },
+		{ "Name": "GeometryScripting", "Enabled": true }
+	]
+}
