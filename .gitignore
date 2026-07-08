@@ -1,0 +1,13 @@
+# Unreal Engine build artifacts
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# IDE / OS
+.vs/
+*.sln
+*.suo
+*.vcxproj*
+.idea/
+*.DS_Store

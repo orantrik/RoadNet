@@ -1,0 +1,33 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "RoadNet",
+	"Description": "Independent procedural road-network engine (Pipeline 4). Clean-room implementation of a staged rebuild pipeline + Clipper2 boolean-union junctions. Fully independent of RoadBLD / WorldBLD / CityBLD.",
+	"Category": "OSM",
+	"CreatedBy": "UltraPCG",
+	"CanContainContent": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "RoadNet",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "RoadNetEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "PCG",
+			"Enabled": true
+		},
+		{
+			"Name": "GeometryScripting",
+			"Enabled": true
+		}
+	]
+}
