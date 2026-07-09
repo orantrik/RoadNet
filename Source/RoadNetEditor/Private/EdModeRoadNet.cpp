@@ -271,36 +271,98 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
 			}
-			// Idle + point selection: delete the selected road point and rebuild.
-			if (SelRoad != INDEX_NONE && SelPoint != INDEX_NONE)
+			// Idle delete. Resolve a target from the explicit selection, else
+			// hover-pick under the cursor (mirrors the lane hotkeys so no prior
+			// click is needed — clicks were easy to lose to draft placement).
+			//   * nearest HAND-DRAWN control point within a tight radius → delete
+			//     just that point (point handles only exist for hand-drawn roads);
+			//   * else nearest road (any source) within a wider radius → delete
+			//     the whole road.
+			int32 DelRoad  = SelRoad;
+			int32 DelPoint = SelPoint;
+			if (DelRoad == INDEX_NONE && ViewportClient)
+			{
+				FVector Hit;
+				if (LineTraceCursor(ViewportClient, Hit))
+				{
+					if (URoadNetwork* Net = GetNetwork())
+					{
+						const TArray<FRoadDef>& Roads = Net->GetRoads();
+						double BestPtD2 = FMath::Square(500.0);   // 5 m: point pick
+						int32  PtRoad = INDEX_NONE, PtIdx = INDEX_NONE;
+						double BestRdD2 = FMath::Square(2000.0);  // 20 m: road pick
+						int32  RdRoad = INDEX_NONE;
+						for (int32 r = 0; r < Roads.Num(); ++r)
+						{
+							const FRoadDef& Rd = Roads[r];
+							if (Rd.Source == ERoadNetSource::HandDrawn)
+							{
+								for (int32 i = 0; i < Rd.Ref.Num(); ++i)
+								{
+									const double D2 = FVector::DistSquaredXY(Hit, Rd.Ref[i]);
+									if (D2 < BestPtD2) { BestPtD2 = D2; PtRoad = r; PtIdx = i; }
+								}
+							}
+							for (int32 i = 0; i + 1 < Rd.Ref.Num(); ++i)
+							{
+								const FVector C = FMath::ClosestPointOnSegment(Hit, Rd.Ref[i], Rd.Ref[i + 1]);
+								const double D2 = FVector::DistSquaredXY(Hit, C);
+								if (D2 < BestRdD2) { BestRdD2 = D2; RdRoad = r; }
+							}
+						}
+						if (PtRoad != INDEX_NONE)      { DelRoad = PtRoad; DelPoint = PtIdx; }
+						else if (RdRoad != INDEX_NONE) { DelRoad = RdRoad; DelPoint = INDEX_NONE; }
+					}
+				}
+			}
+
+			if (DelRoad != INDEX_NONE)
 			{
 				if (URoadNetwork* Net = GetNetwork())
 				{
-					const FScopedTransaction Transaction(LOCTEXT("RoadNetDeletePoint", "Delete RoadNet Point"));
-					if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
-					bool bRoadRemoved = false;
-					if (Net->DeleteRoadPoint(SelRoad, SelPoint, bRoadRemoved))
+					if (DelPoint != INDEX_NONE)
 					{
-						Net->Rebuild();
+						const FScopedTransaction Transaction(LOCTEXT("RoadNetDeletePoint", "Delete RoadNet Point"));
+						if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+						bool bRoadRemoved = false;
+						if (Net->DeleteRoadPoint(DelRoad, DelPoint, bRoadRemoved))
+						{
+							Net->Rebuild();
+							if (GEngine)
+							{
+								GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+									bRoadRemoved
+										? TEXT("RoadNet: point removed (road had too few points, road deleted)")
+										: TEXT("RoadNet: point deleted"));
+							}
+						}
+					}
+					else
+					{
+						const FScopedTransaction Transaction(LOCTEXT("RoadNetDeleteRoad", "Delete RoadNet Road"));
+						if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+						if (Net->RemoveRoad(DelRoad))
+						{
+							Net->Rebuild();
+							if (GEngine)
+							{
+								GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+									FString::Printf(TEXT("RoadNet: road %d deleted"), DelRoad));
+							}
+						}
 					}
 				}
 				ClearSelection();
 				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
 			}
-			// Idle + whole-road selection: delete the entire road and rebuild.
-			if (SelRoad != INDEX_NONE && SelPoint == INDEX_NONE)
+
+			if (GEngine)
 			{
-				if (URoadNetwork* Net = GetNetwork())
-				{
-					const FScopedTransaction Transaction(LOCTEXT("RoadNetDeleteRoad", "Delete RoadNet Road"));
-					if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
-					if (Net->RemoveRoad(SelRoad)) { Net->Rebuild(); }
-				}
-				ClearSelection();
-				if (ViewportClient) { ViewportClient->Invalidate(); }
-				return true;
+				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+					TEXT("RoadNet: nothing to delete — hover a road (or hand-drawn point), then press Delete"));
 			}
+			return true;
 		}
 
 		// Lane editing (draft not in progress):
