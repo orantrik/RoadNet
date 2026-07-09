@@ -49,12 +49,25 @@ namespace RoadNetMesh
 	// enabled and each vertex is coloured by VertexColorFn(X,Y) — used to bake
 	// per-lane shading into the SINGLE carriageway mesh (so lanes no longer need
 	// a separate lifted overlay that z-intersects the road). Linear colour.
+	//
+	// If bComputeUVs, a primary-UV overlay is written from each vertex's nearest
+	// centreline: U = lateral offset, V = arc length along the road, both scaled
+	// by 1/UVUnitCm (default 100 → 1 UV unit = 1 m) so a tiling material maps
+	// straight/along the road instead of stretching over the boolean footprint.
+	//
+	// If bGradientNormals, per-vertex normals are taken from the finite-difference
+	// gradient of the (blended) height field rather than averaged from the jittery
+	// Delaunay triangles — smooth, grade-following normals with no facet blotches.
+	// When set, the caller must NOT also run FinalizeNormals (it would overwrite).
 	ROADNET_API int32 AppendSurfaceMesh(
 		const TArray<UE::Geometry::FGeneralPolygon2d>& Polys,
 		const TArray<const TArray<FVector>*>& CenterLines,
 		double ZLiftCm,
 		UE::Geometry::FDynamicMesh3& OutMesh,
-		const TFunction<FVector3f(double, double)>* VertexColorFn = nullptr);
+		const TFunction<FVector3f(double, double)>* VertexColorFn = nullptr,
+		bool bComputeUVs = false,
+		double UVUnitCm = 100.0,
+		bool bGradientNormals = false);
 
 	// Enable attributes and compute per-vertex normals (call once, after all
 	// zones have been appended). No-op on an empty mesh.

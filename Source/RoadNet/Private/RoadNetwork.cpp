@@ -940,11 +940,14 @@ int32 URoadNetwork::CommitLayer(
 
 		Tris += RoadNetMesh::AppendSurfaceMesh(
 			ZonePolys[z], CenterLines, kRoadZLiftCm + ExtraLiftCm, Mesh,
-			bBake ? &ShadeFn : nullptr);
+			bBake ? &ShadeFn : nullptr,
+			/*bComputeUVs*/true, /*UVUnitCm*/100.0, /*bGradientNormals*/true);
 	}
 
 	if (Tris == 0) { return 0; }
-	RoadNetMesh::FinalizeNormals(Mesh);
+	// Normals are set from the height-field gradient inside AppendSurfaceMesh
+	// (smooth, grade-following) — recomputing here would overwrite them with the
+	// jittery per-triangle average that caused the facet blotches.
 
 	ADynamicMeshActor* Actor = Cast<ADynamicMeshActor>(ActorPtr.Get());
 	if (!Actor)
