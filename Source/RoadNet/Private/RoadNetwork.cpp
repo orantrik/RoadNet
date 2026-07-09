@@ -949,6 +949,7 @@ int32 URoadNetwork::CommitLayer(
 	// (smooth, grade-following) — recomputing here would overwrite them with the
 	// jittery per-triangle average that caused the facet blotches.
 
+	bool bNewActor = false;
 	ADynamicMeshActor* Actor = Cast<ADynamicMeshActor>(ActorPtr.Get());
 	if (!Actor)
 	{
@@ -960,27 +961,37 @@ int32 URoadNetwork::CommitLayer(
 		Actor->SetActorLabel(Label);
 #endif
 		ActorPtr = Actor;
+		bNewActor = true;
 	}
 
 	if (UDynamicMeshComponent* Comp = Actor->GetDynamicMeshComponent())
 	{
 		Comp->SetMesh(MoveTemp(Mesh));
-		if (Material)
+
+		// Keep the assigned material in sync every rebuild (cheap, idempotent).
+		if (Material) { Comp->SetMaterial(0, Material); }
+
+		// Choose the display mode ONCE, when the actor is first created. On later
+		// rebuilds (e.g. after adding a lane) we deliberately leave it alone so a
+		// manual Color Override chosen in the details panel isn't reverted.
+		if (bNewActor)
 		{
-			// Real material assigned: show it directly (no colour tint).
-			Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::None);
-			Comp->SetMaterial(0, Material);
-		}
-		else if (bBake)
-		{
-			// Baked per-lane shading lives in the mesh vertex colours — display them.
-			Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::VertexColors);
-		}
-		else
-		{
-			// No material: fall back to a flat colour so the layer is visible.
-			Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::Constant);
-			Comp->SetConstantOverrideColor(Color);
+			if (Material)
+			{
+				// Real material assigned: show it directly (no colour tint).
+				Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::None);
+			}
+			else if (bBake)
+			{
+				// Baked per-lane shading lives in the mesh vertex colours.
+				Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::VertexColors);
+			}
+			else
+			{
+				// No material: flat colour so the layer is visible.
+				Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::Constant);
+				Comp->SetConstantOverrideColor(Color);
+			}
 		}
 		Comp->NotifyMeshUpdated();
 	}
