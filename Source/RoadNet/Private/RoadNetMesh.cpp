@@ -56,6 +56,18 @@ namespace RoadNetMesh
 		const int32 CX = (int32)FMath::FloorToInt(X / CellCm);
 		const int32 CY = (int32)FMath::FloorToInt(Y / CellCm);
 
+		// Smooth inverse-distance blend of nearby centerlines (§8.5 plane/blend).
+		// The old code snapped Z to the single NEAREST centerline, so where two
+		// roads meet at a junction at different heights the surface stepped along
+		// the "which road is closest" seam and thin marking polygons scattered.
+		// Blending nearby segments makes the junction transition smoothly; on a
+		// lone road its own segments dominate so grade is preserved.
+		constexpr double SoftCm  = 120.0;              // softening (near-field flat weight)
+		constexpr double Soft2   = SoftCm * SoftCm;
+		constexpr double BlendCm = 700.0;              // only blend roads within this
+		constexpr double Blend2  = BlendCm * BlendCm;
+
+		double SumW = 0.0, SumWZ = 0.0;
 		double BestD2 = TNumericLimits<double>::Max();
 		double BestZ  = Fallback;
 
@@ -70,14 +82,19 @@ namespace RoadNetMesh
 				double T;
 				const FVector2D C = RoadNetMath::ClosestOnSegment(G.A, G.B, Q, T);
 				const double D2 = FVector2D::DistSquared(Q, C);
-				if (D2 < BestD2) { BestD2 = D2; BestZ = FMath::Lerp(G.Za, G.Zb, T); }
+				const double Z  = FMath::Lerp(G.Za, G.Zb, T);
+				if (D2 < BestD2) { BestD2 = D2; BestZ = Z; }
+				if (D2 <= Blend2)
+				{
+					const double W = 1.0 / (D2 + Soft2);
+					SumW += W; SumWZ += W * Z;
+				}
 			}
 		};
 
-		// Expand in square rings; stop once no closer segment can exist in an
-		// unsearched ring (its minimum reach exceeds the best distance found).
-		constexpr int32 MaxRing = 256;
-		for (int32 R = 0; R <= MaxRing; ++R)
+		// Cover every cell that can hold a segment within BlendCm of Q.
+		const int32 Rings = (int32)FMath::CeilToInt(BlendCm / CellCm) + 1;
+		for (int32 R = 0; R <= Rings; ++R)
 		{
 			if (R == 0) { TestCell(CX, CY); }
 			else
@@ -93,14 +110,10 @@ namespace RoadNetMesh
 					TestCell(CX + R, CY + dy);
 				}
 			}
-			// The nearest point in ring R+1 is at least R*CellCm away.
-			if (BestD2 < TNumericLimits<double>::Max())
-			{
-				const double MinNext = (double)R * CellCm;
-				if (MinNext * MinNext > BestD2) { break; }
-			}
 		}
-		return BestZ;
+
+		// Blended height when anything was within range, else the nearest hit.
+		return (SumW > 0.0) ? (SumWZ / SumW) : BestZ;
 	}
 
 	double FirstCenterlineZ(const TArray<const TArray<FVector>*>& CenterLines)
@@ -116,12 +129,18 @@ namespace RoadNetMesh
 		const TArray<FGeneralPolygon2d>& Polys,
 		const TArray<const TArray<FVector>*>& CenterLines,
 		double ZLiftCm,
-		FDynamicMesh3& OutMesh)
+		FDynamicMesh3& OutMesh,
+		const TFunction<FVector3f(double, double)>* VertexColorFn)
 	{
 		FCenterlineHeightField Field;
 		Field.Build(CenterLines);
 		const double FallbackZ = Field.FirstZ();
 		int32 TriCount = 0;
+
+		if (VertexColorFn && !OutMesh.HasVertexColors())
+		{
+			OutMesh.EnableVertexColors(FVector3f(0.15f, 0.15f, 0.16f));
+		}
 
 		for (const FGeneralPolygon2d& GP : Polys)
 		{
@@ -136,7 +155,9 @@ namespace RoadNetMesh
 			{
 				const FVector2d& P = Verts2D[i];
 				const double Z = Field.SampleHeight(P.X, P.Y, FallbackZ) + ZLiftCm;
-				VMap[i] = OutMesh.AppendVertex(FVector3d(P.X, P.Y, Z));
+				const int32 Vid = OutMesh.AppendVertex(FVector3d(P.X, P.Y, Z));
+				VMap[i] = Vid;
+				if (VertexColorFn) { OutMesh.SetVertexColor(Vid, (*VertexColorFn)(P.X, P.Y)); }
 			}
 
 			// Append triangles, forcing an upward (+Z) facing winding.

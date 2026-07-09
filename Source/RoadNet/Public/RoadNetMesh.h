@@ -44,11 +44,17 @@ namespace RoadNetMesh
 	// Triangulate Polys and APPEND into OutMesh (does not clear). Each output
 	// vertex takes the interpolated Z of the nearest CenterLine (XY projection),
 	// plus ZLiftCm. Returns the number of triangles appended.
+	//
+	// If VertexColorFn is provided, the mesh's per-vertex colour overlay is
+	// enabled and each vertex is coloured by VertexColorFn(X,Y) — used to bake
+	// per-lane shading into the SINGLE carriageway mesh (so lanes no longer need
+	// a separate lifted overlay that z-intersects the road). Linear colour.
 	ROADNET_API int32 AppendSurfaceMesh(
 		const TArray<UE::Geometry::FGeneralPolygon2d>& Polys,
 		const TArray<const TArray<FVector>*>& CenterLines,
 		double ZLiftCm,
-		UE::Geometry::FDynamicMesh3& OutMesh);
+		UE::Geometry::FDynamicMesh3& OutMesh,
+		const TFunction<FVector3f(double, double)>* VertexColorFn = nullptr);
 
 	// Enable attributes and compute per-vertex normals (call once, after all
 	// zones have been appended). No-op on an empty mesh.

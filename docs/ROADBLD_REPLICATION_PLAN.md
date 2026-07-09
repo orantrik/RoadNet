@@ -1261,6 +1261,32 @@ type** (drivable-to-drivable), producing either engine `ZoneShape`s (if we take 
 `ZoneGraph` plugin dependency) or our own graph struct exported to PCG. This is the
 main remaining design piece; RoadBLD offers the *inputs*, not the algorithm.
 
+### 12.4 IMPLEMENTED (compiles clean, `McpPcgEditor` exit 0)
+- **Lane data model** (`RoadNetTypes.h`): `ERoadNetLaneType` (Normal/Parking/
+  Border/Restricted/Shoulder/CenterTurn/Median), `ERoadNetSide` (Left/Right/
+  Center), `FRoadNetEdgeKnot` (dist→offset), `FRoadNetLaneWidthSeg` (taper),
+  `FRoadNetLane` (LaneId, type, side, centre offset, width, edge knots, width
+  segments, overlay material). `FRoadNetLaneSpec::DetailedLanes` overrides the
+  count model when authored; `ResolveLanes()` synthesizes a uniform per-side
+  lane set from the counts otherwise, so OSM import is unchanged and both paths
+  iterate real lanes.
+- **Lane geometry** (`RoadNetLanes.h/.cpp`): `LaneOffsetAt` (uniform or edge-knot
+  interpolated) + `BuildLaneCenterline` (per-vertex lateral offset of the
+  resampled reference).
+- **Lane graph** (`URoadNetwork::BuildLaneGraph`): at every joint with ≥2 arms,
+  each drivable lane entering the joint connects to each drivable lane leaving it
+  on a *different* arm (all turn movements); 2-arm seams also flagged `bThrough`.
+  Direction is side-based (Right = +arc, Left = −arc). Output:
+  `FRoadNetLaneConnection { From, To, Joint, Entry, Exit, bThrough }`.
+- **PCG export** (`CommitLaneGraph`): one spline per connection on a
+  `RoadNet_LaneGraph` actor — turns curve through the joint centre, seams stay
+  linear — tagged `RoadNetLaneGraph` + `RoadNetLaneTurn`/`RoadNetLaneThrough`.
+
+**Deferred refinement:** per-lane ribbon *rendering* (distinct meshed lane
+strips + per-lane overlay materials). The carriageway still renders as the merged
+boolean surface + baked markings; lane strips are a visual upgrade, not needed
+for the graph.
+
 ### 12.3 Per-commit conform coupling (already in our terrain doc)
 Each lane-edit commit re-runs the two-way conform on the modified road
 (`ConformReason_ModifiedRoad` + `MirrorSplineRefresh`). Mirror in RoadNet: any lane

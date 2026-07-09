@@ -82,7 +82,7 @@ namespace RoadNetSurface
 			if (PolygonsOffsets(
 					+InflateEpsilonCm, -InflateEpsilonCm,
 					OutMerged, Closed, /*bCopyInputOnFailure*/true,
-					/*MiterLimit*/2.0, EPolygonOffsetJoinType::Miter, EPolygonOffsetEndType::Polygon))
+					/*MiterLimit*/2.0, EPolygonOffsetJoinType::Round, EPolygonOffsetEndType::Polygon))
 			{
 				OutMerged = MoveTemp(Closed);
 			}
@@ -109,6 +109,42 @@ namespace RoadNetSurface
 		if (Poly.IsClockwise()) { Poly.Reverse(); }
 		Out.SetOuter(Poly);
 		return true;
+	}
+
+	bool BuildPathRibbon(const TArray<FVector>& Center, double HalfWidth,
+		TArray<FGeneralPolygon2d>& Out, double MaxStepsPerRadian)
+	{
+		Out.Reset();
+		if (Center.Num() < 2 || HalfWidth < 1.0) { return false; }
+
+		// Drop near-coincident vertices first: zero-length input segments are the
+		// usual source of offset spikes.
+		TArray<FVector2d> Pts;
+		Pts.Reserve(Center.Num());
+		for (const FVector& P : Center)
+		{
+			const FVector2d Q(P.X, P.Y);
+			if (Pts.Num() == 0 || FVector2d::DistSquared(Pts.Last(), Q) > 1.0) { Pts.Add(Q); }
+		}
+		if (Pts.Num() < 2) { return false; }
+
+		// Butt end-type => Clipper treats the ring as an OPEN path and thickens
+		// both sides by Offset; Round joins keep bends smooth. The internal
+		// NonZero union collapses any self-overlap into a simple boundary.
+		FOffsetPolygon2d Off;
+		Off.Polygons.Add(TArrayView<FVector2d>(Pts));
+		Off.Offset = HalfWidth;
+		Off.MiterLimit = 2.0;
+		Off.JoinType = EPolygonOffsetJoinType::Round;
+		Off.EndType = EPolygonOffsetEndType::Butt;
+		Off.MaxStepsPerRadian = (MaxStepsPerRadian > 0.0) ? MaxStepsPerRadian : 16.0;
+		if (!Off.ComputeResult()) { return false; }
+
+		for (FGeneralPolygon2d& GP : Off.Result)
+		{
+			if (FMath::Abs(GP.GetOuter().SignedArea()) >= 1.0) { Out.Add(MoveTemp(GP)); }
+		}
+		return Out.Num() > 0;
 	}
 
 	bool BuildSidewalkBands(

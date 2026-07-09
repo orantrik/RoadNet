@@ -292,6 +292,26 @@ not). Same O(N) growth we care about — a budgeted, multi‑frame commit
   TotalBoxes=448` → corner/overlap detection is spatially accelerated (mirrors
   our uniform‑grid broadphase in `BuildCrossings`).
 
+## 3b. Implemented in McpPcg (`SculptRoadCorridors`, OSMOverpassRoadImport.cpp)
+
+First parity pass landed (compiles clean, `McpPcgEditor` exit 0). New CVars:
+
+| CVar | Default | Effect |
+|---|---|---|
+| `osm.RoadDeformPolicy` | `0` | Per-cell cut/fill policy — `0` both, `1` fill-only (never cut hills), `2` cut-only (never fill valleys). RoadBLD `bRaiseTerrain`/`bLowerTerrain` parity. |
+| `osm.RoadDeformEndFalloffM` | `0` | Longitudinal end-falloff (m) at a road's **free** (non-junction) ends — corridor weight smoothsteps to 0 so dead-ends melt into terrain. RoadBLD `EndFalloff` parity. Node incidence (<3 = free end) gates it so joints never open a gap. |
+| `osm.RoadDeformDedicatedLayer` | `0` | `1` = sculpt into a dedicated non-destructive **"OSM Road Corridors"** edit layer (via `CreateLayer`/`GetLayerIndex`) instead of base layer 0. Opt-in — additive-layer delta/idempotency semantics still need an in-editor validation pass before it becomes default. |
+
+Also: **junction discs are now plane-fit** — a least-squares bed plane
+`z = a·dx + b·dy + c` is fitted through each junction's node + incident-arm
+vertices (tilt clamped to ≤20% grade across the pad), so intersection pads
+follow the arm grades on slopes instead of benching flat. Falls back to flat
+when under-determined. Log: `stamped N junction discs (M plane-fit tilted, K flat)`.
+
+Still TODO for full parity: native landscape-spline mirror (vs heightmap raster),
+per-side asymmetric falloff, junction `ULandscapeTexturePatch`, dirty-tracked
+per-road re-sculpt, and validating the dedicated-layer path as default.
+
 ## 4. Open questions to resolve back in MyProject5
 - Which **edit layer name** does RoadBLD create for the spline deform? (confirm
   it's a reserved Landscape layer, and whether it's per‑landscape.)

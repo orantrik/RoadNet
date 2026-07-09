@@ -40,6 +40,17 @@ namespace RoadNetSurface
 		double InnerOff, double OuterOff,
 		UE::Geometry::FGeneralPolygon2d& Out);
 
+	// Build clean strip polygon(s) by thickening an (open) centreline by HalfWidth
+	// on each side through Clipper (round joins, butt ends). Unlike BuildSideRibbon
+	// — which loops two raw miter offsets and can self-cross on the inside of a
+	// bend — Clipper dissolves self-intersections, so tight curves and junction
+	// approaches never emit folded/spiky triangles. May return >1 polygon if the
+	// strip pinches. Returns false if degenerate.
+	ROADNET_API bool BuildPathRibbon(
+		const TArray<FVector>& Center, double HalfWidth,
+		TArray<UE::Geometry::FGeneralPolygon2d>& Out,
+		double MaxStepsPerRadian = 16.0);
+
 	// Build sidewalk bands from per-road, per-side ribbons (§8.12): UNION the
 	// ribbons, then subtract the carriageway (RoadPolys) so sidewalks never sit on
 	// the road or cross a junction. Only the sides each road actually requests are

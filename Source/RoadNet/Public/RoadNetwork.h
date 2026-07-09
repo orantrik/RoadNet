@@ -71,11 +71,24 @@ struct FRoadNetRebuildContext
 	// §8.10 lane-marking ribbons, per zone (parallel to Zones), split by colour.
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMarkingWhitePolys;
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMarkingYellowPolys;
+	// §12.1 per-lane ribbons, per zone (parallel to Zones). Split into two banks
+	// by alternating lane index so adjacent lanes render in contrasting shades
+	// (an "additional" layer above the unified carriageway).
+	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneLaneEvenPolys;
+	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneLaneOddPolys;
+	// Per-zone junction CLIP region (§2.1 "שטח הצומת"): the true junction area
+	// bounded by the roads' edge lines and their imaginary extension — computed as
+	// the mutual overlap of crossing carriageways, then dilated by the stop-line
+	// setback. Markings and lane ribbons are subtracted against this so paint ends
+	// at the junction edge (not on a lazy circular disc).
+	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneJunctionClip;
 	// Flattened unions (for logging/QA only).
 	TArray<UE::Geometry::FGeneralPolygon2d> SurfacePolys;
 	TArray<UE::Geometry::FGeneralPolygon2d> SidewalkPolys;
 	// §10.11 perimeter loops (network outlines + block holes) for PCG export (§8.4).
 	TArray<FRoadNetLoop> PerimeterLoops;
+	// §12.2 lane-connectivity graph (derived from joints + resolved lanes).
+	TArray<FRoadNetLaneConnection> LaneConnections;
 	// Later phases populate: overlap masks, details.
 };
 
@@ -101,8 +114,64 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Materials")
 	TObjectPtr<UMaterialInterface> MarkingYellowMaterial;
 
+	// ---- sampling (§2.6) --------------------------------------------------
+	// Arc-length spacing (cm) used to resample every road's reference polyline
+	// before offsetting/meshing. Lower = more points per segment = smoother
+	// curves and tighter terrain conformance (at the cost of more geometry).
+	// Curvature knots are always preserved on top of this uniform spacing.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Sampling",
+		meta = (ClampMin = "25.0", UIMin = "50.0", UIMax = "500.0"))
+	double PolylineDensityCm = 200.0;
+
+	// ---- lanes (§12.1) ----------------------------------------------------
+	// Render each resolved lane as its own ribbon strip (alternating shades)
+	// layered above the carriageway. Reflects lane add/remove + authored widths.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
+	bool bShowLaneRibbons = true;
+
+	// Optional material for the per-lane ribbon layer (else a flat shade).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
+	TObjectPtr<UMaterialInterface> LaneMaterial;
+
+	// Build + export the lane-connectivity graph (§12.2) as tagged splines for
+	// PCG / traffic. Disable to skip the graph stages on large imports.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
+	bool bBuildLaneGraph = true;
+
+	// ---- junctions (§10.8/§10.9) ------------------------------------------
+	// Morphological "close" radius (cm) applied to the merged carriageway. Larger
+	// = rounder junction corners / more gap bridging. Adjustable live with the
+	// [ and ] hotkeys in the RoadNet Draw mode.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions",
+		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "300.0"))
+	double JunctionSmoothingCm = 20.0;
+
+	// Stop-line setback (cm): how far markings and lane ribbons stop BACK from the
+	// true junction area (§2.1 מבואות). Applied as a dilation of the edge-line
+	// junction polygon before clipping paint. 0 = paint right up to the edge.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions",
+		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "600.0"))
+	double JunctionClearanceCm = 60.0;
+
+	// Nudge JunctionSmoothingCm by DeltaCm (clamped ≥ 0). Returns the new value.
+	// Caller triggers Rebuild(). Wired to the [ / ] hotkeys.
+	double AdjustJunctionSmoothing(double DeltaCm);
+
 	// Register a road; returns its stable index. Assigns a GUID if unset.
 	int32 AddRoad(const FRoadDef& Road);
+
+	// ---- lane editing (§12.1) ---------------------------------------------
+	// Add one lane to a road on the given side (Left/Right). Grows the count
+	// model (Total + Forward/Backward). Returns false on bad index. Caller
+	// triggers Rebuild().
+	bool AddLane(int32 RoadIdx, ERoadNetSide Side);
+
+	// Remove the outermost lane on the given side. Keeps at least one lane on
+	// the road. Returns false on bad index or if nothing could be removed.
+	bool RemoveLane(int32 RoadIdx, ERoadNetSide Side);
+
+	// Number of lanes on a road (for HUD/debug).
+	int32 GetLaneCount(int32 RoadIdx) const;
 
 	// Clear all roads (e.g. before a fresh OSM import).
 	void ResetRoads();
@@ -151,6 +220,9 @@ private:
 	TWeakObjectPtr<AActor> GeoMarkingWhiteActor;  // white markings (edge + lane dividers)
 	TWeakObjectPtr<AActor> GeoMarkingYellowActor; // yellow markings (centre line)
 	TWeakObjectPtr<AActor> GeoPerimeterActor;     // §8.4 PCG spline loops (road edges + blocks)
+	TWeakObjectPtr<AActor> GeoLaneGraphActor;     // §12.2 lane-connectivity splines for PCG/traffic
+	TWeakObjectPtr<AActor> GeoLaneEvenActor;      // §12.1 per-lane ribbons (even bank)
+	TWeakObjectPtr<AActor> GeoLaneOddActor;       // §12.1 per-lane ribbons (odd bank)
 
 	// ---- pipeline stages (§10.18) --------------------------------------
 	void DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const;
@@ -160,14 +232,18 @@ private:
 	void BuildZones(FRoadNetRebuildContext& Ctx) const;          // §10.12 grade separation
 	void BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const;   // §10.9 per-zone union + §8.12 sidewalks
 	void BuildPerimeterLoops(FRoadNetRebuildContext& Ctx) const; // §10.11 loops for PCG export
+	void BuildLaneGraph(FRoadNetRebuildContext& Ctx) const;      // §12.2 lane connectivity
+	void BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const;    // §12.1 per-lane ribbon polys
 	void CommitGeometry(FRoadNetRebuildContext& Ctx);            // §10.15 mesh + spawn
 	void CommitPerimeters(FRoadNetRebuildContext& Ctx);          // §8.4 spline loops for PCG
+	void CommitLaneGraph(FRoadNetRebuildContext& Ctx);           // §12.2 lane-graph splines for PCG
 
 	// Mesh a set of per-zone polygons and spawn/update a colored actor. If
 	// Material is set it is applied to slot 0; otherwise the constant Color is
 	// used as a vertex-colour override so the layer is always visible.
 	int32 CommitLayer(TWeakObjectPtr<AActor>& ActorPtr, const TCHAR* Label,
 		const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
-		double ExtraLiftCm, FColor Color, UMaterialInterface* Material, FRoadNetRebuildContext& Ctx);
+		double ExtraLiftCm, FColor Color, UMaterialInterface* Material, FRoadNetRebuildContext& Ctx,
+		bool bBakeLaneColors = false);
 	// TODO: overlap masks (§10.10), per-road perimeter loops (§10.11), markings.
 };

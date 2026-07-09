@@ -101,6 +101,135 @@ namespace RoadNetMath
 		if (Out.Num() < 2) { Out.Reset(); Out.Add(In[0]); Out.Add(In.Last()); }
 	}
 
+	void SmoothCatmullRom(const TArray<FVector>& In, double MaxChordCm, TArray<FVector>& Out)
+	{
+		Out.Reset();
+		const int32 N = In.Num();
+		if (N < 3 || MaxChordCm <= KINDA_SMALL_NUMBER) { Out = In; return; }
+
+		auto Dist = [](const FVector& A, const FVector& B) { return FMath::Max(1.0e-4, FVector::Dist(A, B)); };
+		// Interpolate on the (t)-parametrised segment [A@ta, B@tb] at parameter t.
+		auto RemapLerp = [](const FVector& A, const FVector& B, double ta, double tb, double t)
+		{
+			const double d = tb - ta;
+			const double w = (FMath::Abs(d) > KINDA_SMALL_NUMBER) ? (t - ta) / d : 0.0;
+			return A + (B - A) * w;
+		};
+
+		Out.Reserve(N * 4);
+		Out.Add(In[0]);
+		for (int32 i = 0; i < N - 1; ++i)
+		{
+			// Centripetal Catmull-Rom (alpha = 0.5) is cusp/overshoot-free. End
+			// spans mirror the neighbour to synthesise a natural end tangent.
+			const FVector P0 = (i > 0)     ? In[i - 1] : (In[i] + (In[i] - In[i + 1]));
+			const FVector P1 = In[i];
+			const FVector P2 = In[i + 1];
+			const FVector P3 = (i + 2 < N) ? In[i + 2] : (In[i + 1] + (In[i + 1] - In[i]));
+
+			const double t0 = 0.0;
+			const double t1 = t0 + FMath::Sqrt(Dist(P0, P1));
+			const double t2 = t1 + FMath::Sqrt(Dist(P1, P2));
+			const double t3 = t2 + FMath::Sqrt(Dist(P2, P3));
+
+			const int32 Sub = FMath::Clamp((int32)FMath::CeilToInt(Dist(P1, P2) / MaxChordCm), 1, 64);
+			for (int32 k = 1; k <= Sub; ++k)
+			{
+				const double t = FMath::Lerp(t1, t2, (double)k / (double)Sub);
+				const FVector A1 = RemapLerp(P0, P1, t0, t1, t);
+				const FVector A2 = RemapLerp(P1, P2, t1, t2, t);
+				const FVector A3 = RemapLerp(P2, P3, t2, t3, t);
+				const FVector B1 = RemapLerp(A1, A2, t0, t2, t);
+				const FVector B2 = RemapLerp(A2, A3, t1, t3, t);
+				Out.Add(RemapLerp(B1, B2, t1, t2, t)); // k==Sub lands exactly on P2 (knot preserved)
+			}
+		}
+
+		if (Out.Num() < 2) { Out.Reset(); Out.Add(In[0]); Out.Add(In.Last()); }
+	}
+
+	// Natural cubic spline second derivatives (M) for samples Y at parameters T.
+	// Tridiagonal (Thomas) solve with natural end conditions M[0]=M[n-1]=0.
+	static void SolveNaturalCubic(const TArray<double>& T, const TArray<double>& Y, TArray<double>& M)
+	{
+		const int32 n = T.Num();
+		M.Init(0.0, n);
+		const int32 m = n - 2;                 // interior unknowns M[1..n-2]
+		if (m <= 0) { return; }
+
+		TArray<double> h; h.SetNum(n - 1);
+		for (int32 i = 0; i < n - 1; ++i) { h[i] = FMath::Max(1.0e-4, T[i + 1] - T[i]); }
+
+		TArray<double> b, c, d;
+		b.SetNum(m); c.SetNum(m); d.SetNum(m);
+		for (int32 k = 0; k < m; ++k)
+		{
+			const int32 i = k + 1;
+			b[k] = 2.0 * (h[i - 1] + h[i]);
+			c[k] = h[i];                       // super-diagonal
+			d[k] = 6.0 * ((Y[i + 1] - Y[i]) / h[i] - (Y[i] - Y[i - 1]) / h[i - 1]);
+		}
+		// Forward sweep (sub-diagonal a[k] = h[i-1] = h[k]).
+		for (int32 k = 1; k < m; ++k)
+		{
+			const double w = h[k] / b[k - 1];
+			b[k] -= w * c[k - 1];
+			d[k] -= w * d[k - 1];
+		}
+		// Back substitution.
+		TArray<double> x; x.SetNum(m);
+		x[m - 1] = d[m - 1] / b[m - 1];
+		for (int32 k = m - 2; k >= 0; --k) { x[k] = (d[k] - c[k] * x[k + 1]) / b[k]; }
+		for (int32 k = 0; k < m; ++k) { M[k + 1] = x[k]; }
+	}
+
+	void SmoothG2Spline(const TArray<FVector>& In, double MaxChordCm, TArray<FVector>& Out)
+	{
+		Out.Reset();
+		const int32 N = In.Num();
+		if (N < 3 || MaxChordCm <= KINDA_SMALL_NUMBER) { Out = In; return; }
+
+		// Chord-length parametrisation (3D distance).
+		TArray<double> T; T.SetNum(N); T[0] = 0.0;
+		for (int32 i = 1; i < N; ++i) { T[i] = T[i - 1] + FMath::Max(1.0e-3, FVector::Dist(In[i - 1], In[i])); }
+
+		TArray<double> X, Y, Z; X.SetNum(N); Y.SetNum(N); Z.SetNum(N);
+		for (int32 i = 0; i < N; ++i) { X[i] = In[i].X; Y[i] = In[i].Y; Z[i] = In[i].Z; }
+
+		TArray<double> Mx, My, Mz;
+		SolveNaturalCubic(T, X, Mx);
+		SolveNaturalCubic(T, Y, My);
+		SolveNaturalCubic(T, Z, Mz);
+
+		auto Eval = [&](int32 i, double t) -> FVector
+		{
+			const double h = FMath::Max(1.0e-4, T[i + 1] - T[i]);
+			const double A = (T[i + 1] - t) / h;
+			const double B = (t - T[i]) / h;
+			auto F = [&](const TArray<double>& yv, const TArray<double>& Mv)
+			{
+				return A * yv[i] + B * yv[i + 1]
+					+ ((A * A * A - A) * Mv[i] + (B * B * B - B) * Mv[i + 1]) * h * h / 6.0;
+			};
+			return FVector(F(X, Mx), F(Y, My), F(Z, Mz));
+		};
+
+		Out.Reserve(N * 4);
+		Out.Add(In[0]);
+		for (int32 i = 0; i < N - 1; ++i)
+		{
+			const double Seg = T[i + 1] - T[i];
+			const int32 Sub = FMath::Clamp((int32)FMath::CeilToInt(Seg / MaxChordCm), 1, 64);
+			for (int32 k = 1; k <= Sub; ++k)
+			{
+				const double t = FMath::Lerp(T[i], T[i + 1], (double)k / (double)Sub);
+				Out.Add(Eval(i, t)); // k==Sub lands exactly on In[i+1] (knot preserved)
+			}
+		}
+
+		if (Out.Num() < 2) { Out.Reset(); Out.Add(In[0]); Out.Add(In.Last()); }
+	}
+
 	void OffsetPolyline(const TArray<FVector>& In, double SignedOffset, TArray<FVector>& Out, double MiterLimit)
 	{
 		Out.Reset();

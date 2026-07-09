@@ -48,6 +48,118 @@ enum class ERoadNetJointKind : uint8
 	Intersection   // degree >= 3 — a real junction
 };
 
+// Lane semantic type — mirrors RoadBLD ELaneType (minus deprecated None; our
+// sidewalks are their own layer, not a lane type). See ROADBLD_FEATURES.md §4.
+UENUM(BlueprintType)
+enum class ERoadNetLaneType : uint8
+{
+	Normal,      // normal driving lane
+	Parking,     // street-side parking area
+	Border,      // border/edge lane
+	Restricted,  // restricted (bus/bike/HOV)
+	Shoulder,    // shoulder
+	CenterTurn,  // center two-way turn lane
+	Median       // median (non-drivable divider)
+};
+
+// Which side of the reference line a lane sits on. RoadBLD ERoadSide parity:
+// direction is side-based (left travels one way, right the other), not a
+// per-lane forward/back flag.
+UENUM(BlueprintType)
+enum class ERoadNetSide : uint8
+{
+	Left,    // −lateral offset off the road frame's right axis
+	Right,   // +lateral offset
+	Center   // straddles the centerline (center-turn / median)
+};
+
+// A single (distance-along-road, lateral-offset) knot of a lane boundary curve.
+// RoadBLD UEdgeCurve OffsetPoints parity. Distances are arc length along the
+// reference centerline (cm); Offset is signed lateral cm (+ = right).
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetEdgeKnot
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	double Distance = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	double Offset = 0.0;
+};
+
+// A variable-width section along a lane (turn bay / ramp taper / add-drop).
+// RoadBLD FLaneWidthSegment parity: the lane ramps to Width over TransitionIn at
+// StartDistance and back over TransitionOut at EndDistance.
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetLaneWidthSeg
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	double StartDistance = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	double EndDistance = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	double TransitionIn = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	double TransitionOut = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	float Width = 350.f;
+};
+
+// A first-class lane (RoadBLD UDynamicRoadLane parity). A lane is the ribbon
+// between two boundary curves. For a plain uniform lane, CenterOffset + Width
+// fully define it and the edge knot arrays are empty; authored variable lanes
+// carry Left/RightEdge knots that override the uniform strip. LaneId is stable
+// so the connectivity graph (§12.2) can reference it across rebuilds.
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetLane
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="RoadNet|Lanes")
+	FGuid LaneId;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	ERoadNetLaneType Type = ERoadNetLaneType::Normal;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	ERoadNetSide Side = ERoadNetSide::Right;
+
+	// Signed lateral offset (cm, +right) of the lane centre from the reference.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	double CenterOffset = 0.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	float Width = 350.f;
+
+	// Optional boundary curves (dist→offset). Empty ⇒ derive a uniform strip
+	// from CenterOffset ± Width/2.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	TArray<FRoadNetEdgeKnot> LeftEdge;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	TArray<FRoadNetEdgeKnot> RightEdge;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	TArray<FRoadNetLaneWidthSeg> WidthSegments;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	TObjectPtr<class UMaterialInterface> OverlayMaterial = nullptr;
+
+	bool bDrivable() const
+	{
+		return Type == ERoadNetLaneType::Normal
+		    || Type == ERoadNetLaneType::Restricted
+		    || Type == ERoadNetLaneType::CenterTurn;
+	}
+};
+
 // ---------------------------------------------------------------------------
 // Lane specification (directional, OSM-aware). Widths in centimetres.
 // ---------------------------------------------------------------------------
@@ -87,9 +199,28 @@ struct ROADNET_API FRoadNetLaneSpec
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
 	float SidewalkWidth = 200.f;      // 2 m
 
+	// Authored per-lane entities (RoadBLD-style). When non-empty these OVERRIDE
+	// the count model above; when empty, ResolveLanes() synthesizes lanes from
+	// the counts so downstream code always iterates real lanes. This is how the
+	// flat OSM lane count and hand-authored variable lanes share one path.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	TArray<FRoadNetLane> DetailedLanes;
+
+	bool HasDetailedLanes() const { return DetailedLanes.Num() > 0; }
+
 	// Total carriageway half-width (cm) = sum(lane widths)/2. Computed helper.
 	float HalfWidthCm() const
 	{
+		if (HasDetailedLanes())
+		{
+			double Lo = 0.0, Hi = 0.0;
+			for (const FRoadNetLane& L : DetailedLanes)
+			{
+				Lo = FMath::Min(Lo, L.CenterOffset - 0.5 * L.Width);
+				Hi = FMath::Max(Hi, L.CenterOffset + 0.5 * L.Width);
+			}
+			return 0.5f * (float)(Hi - Lo);
+		}
 		const int32 N = EffectiveLaneCount();
 		float W = 0.f;
 		for (int32 i = 0; i < N; ++i)
@@ -101,9 +232,66 @@ struct ROADNET_API FRoadNetLaneSpec
 
 	int32 EffectiveLaneCount() const
 	{
+		if (HasDetailedLanes()) { return DetailedLanes.Num(); }
 		const int32 Dir = Forward + Backward;
 		if (Dir > 0) { return Dir; }
 		return FMath::Max(1, Total);
+	}
+
+	// Resolve to concrete lane entities: return authored lanes when present, else
+	// synthesize a uniform lane set from the count model. Backward lanes land on
+	// the LEFT (−offset), forward on the RIGHT (+offset), stacked outward from
+	// the centerline (RoadBLD side-based direction; ROADBLD_FEATURES.md §4).
+	TArray<FRoadNetLane> ResolveLanes() const
+	{
+		if (HasDetailedLanes()) { return DetailedLanes; }
+
+		int32 Fwd = Forward, Bwd = Backward;
+		if (Fwd + Bwd <= 0)
+		{
+			const int32 N = FMath::Max(1, Total);
+			if (bOneway) { Fwd = N; Bwd = 0; }
+			else         { Fwd = (N + 1) / 2; Bwd = N - Fwd; }
+		}
+
+		auto WidthAt = [this](int32 GlobalIdx) -> float
+		{
+			return LaneWidths.IsValidIndex(GlobalIdx) ? LaneWidths[GlobalIdx] : LaneWidthDefault;
+		};
+
+		TArray<FRoadNetLane> Out;
+		Out.Reserve(Fwd + Bwd);
+		int32 GlobalIdx = 0;
+
+		// Forward (right) lanes stack from the centerline outward to +offset.
+		double RightEdge = 0.0;
+		for (int32 i = 0; i < Fwd; ++i)
+		{
+			const float LW = WidthAt(GlobalIdx++);
+			FRoadNetLane L;
+			L.LaneId = FGuid::NewGuid();
+			L.Type = ERoadNetLaneType::Normal;
+			L.Side = ERoadNetSide::Right;
+			L.Width = LW;
+			L.CenterOffset = RightEdge + 0.5 * LW;
+			RightEdge += LW;
+			Out.Add(L);
+		}
+		// Backward (left) lanes stack from the centerline outward to −offset.
+		double LeftEdge = 0.0;
+		for (int32 i = 0; i < Bwd; ++i)
+		{
+			const float LW = WidthAt(GlobalIdx++);
+			FRoadNetLane L;
+			L.LaneId = FGuid::NewGuid();
+			L.Type = ERoadNetLaneType::Normal;
+			L.Side = ERoadNetSide::Left;
+			L.Width = LW;
+			L.CenterOffset = -(LeftEdge + 0.5 * LW);
+			LeftEdge += LW;
+			Out.Add(L);
+		}
+		return Out;
 	}
 };
 
@@ -191,4 +379,50 @@ struct ROADNET_API FRoadDef
 	FString Name;
 
 	bool IsValid() const { return Ref.Num() >= 2; }
+};
+
+// ---------------------------------------------------------------------------
+// Lane-connectivity graph (§12.2). RoadBLD builds no routing graph, so this is
+// net-new: connections are derived from the welded endpoint joints + resolved
+// per-side lanes, then exported (spline components) for PCG / traffic. A
+// connection is a directed movement from one lane (entering a joint) to another
+// lane (leaving it).
+// ---------------------------------------------------------------------------
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetLaneRef
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	int32 Road = INDEX_NONE;   // index into URoadNetwork::Roads
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	int32 Lane = INDEX_NONE;   // index into that road's resolved lane set
+};
+
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetLaneConnection
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	FRoadNetLaneRef From;      // lane entering the joint
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	FRoadNetLaneRef To;        // lane leaving the joint
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	int32 Joint = INDEX_NONE;  // index into the rebuild's joint list
+
+	// World-space movement endpoints (cm): where From enters and To leaves.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	FVector Entry = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	FVector Exit = FVector::ZeroVector;
+
+	// True when From and To are the same travel line through a 2-arm seam
+	// (a straight-through movement, not a turn).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	bool bThrough = false;
 };

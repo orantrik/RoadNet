@@ -28,6 +28,7 @@ namespace
 	const FColor     kColorSnap  = FColor(255, 80, 80);
 	const FColor     kColorEditPt = FColor(120, 180, 255);
 	const FColor     kColorEditLine = FColor(90, 120, 160);
+	const FColor     kColorOsmLine = FColor(230, 150, 60);   // imported roads (selectable for lane edits)
 }
 
 void FEdModeRoadNet::Enter()
@@ -301,6 +302,112 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				return true;
 			}
 		}
+
+		// Lane editing (draft not in progress):
+		//   '=' / '+' / NumpadAdd      → add a lane        (Shift = left side)
+		//   '-' / '_' / NumpadSubtract → remove outer lane (Shift = left side)
+		// Targets the selected road, else auto-picks the road under the cursor.
+		if (DraftPoints.Num() == 0)
+		{
+			const bool bAdd = (Key == EKeys::Equals || Key == EKeys::Add);
+			const bool bRem = (Key == EKeys::Hyphen || Key == EKeys::Subtract);
+			if (bAdd || bRem)
+			{
+				URoadNetwork* Net = GetNetwork();
+				if (!Net) { return true; }
+
+				// Resolve a target road: current selection, else nearest road to
+				// the cursor within a pick radius so no explicit click is needed.
+				int32 Target = SelRoad;
+				if (Target == INDEX_NONE && ViewportClient)
+				{
+					FVector Hit;
+					if (LineTraceCursor(ViewportClient, Hit))
+					{
+						const TArray<FRoadDef>& Roads = Net->GetRoads();
+						double BestD2 = FMath::Square(2000.0); // 20 m pick radius
+						for (int32 r = 0; r < Roads.Num(); ++r)
+						{
+							const FRoadDef& Rd = Roads[r];
+							for (int32 i = 0; i + 1 < Rd.Ref.Num(); ++i)
+							{
+								const FVector C = FMath::ClosestPointOnSegment(Hit, Rd.Ref[i], Rd.Ref[i + 1]);
+								const double D2 = FVector::DistSquaredXY(Hit, C);
+								if (D2 < BestD2) { BestD2 = D2; Target = r; }
+							}
+						}
+					}
+				}
+
+				if (Target == INDEX_NONE)
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: no road under cursor — hover over (or click) a road, then press = / -"));
+					}
+					return true;
+				}
+
+				const bool bLeft = Viewport &&
+					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
+				const ERoadNetSide Side = bLeft ? ERoadNetSide::Left : ERoadNetSide::Right;
+
+				const FScopedTransaction Transaction(LOCTEXT("RoadNetEditLane", "Edit RoadNet Lane"));
+				if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+
+				const bool bOk = bAdd ? Net->AddLane(Target, Side) : Net->RemoveLane(Target, Side);
+				if (bOk)
+				{
+					SelRoad = Target;   // keep it selected for repeated edits
+					SelPoint = INDEX_NONE;
+					Net->Rebuild();
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+							FString::Printf(TEXT("RoadNet: road %d now has %d lanes (%s %s)"),
+								Target, Net->GetLaneCount(Target),
+								bAdd ? TEXT("added") : TEXT("removed"),
+								bLeft ? TEXT("left") : TEXT("right")));
+					}
+					if (ViewportClient) { ViewportClient->Invalidate(); }
+				}
+				else if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+						TEXT("RoadNet: lane edit not applied (already at min 1 lane, or road has authored DetailedLanes)."));
+				}
+				return true;
+			}
+
+			// Junction smoothing (draft not in progress):
+			//   '[' → less smoothing, ']' → more smoothing (Shift = ×5 step).
+			// Applies network-wide; rebuilds so all junctions refresh at once.
+			const bool bSmoothDown = (Key == EKeys::LeftBracket);
+			const bool bSmoothUp   = (Key == EKeys::RightBracket);
+			if (bSmoothDown || bSmoothUp)
+			{
+				URoadNetwork* Net = GetNetwork();
+				if (!Net) { return true; }
+
+				const bool bCoarse = Viewport &&
+					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
+				const double Step = (bCoarse ? 50.0 : 10.0) * (bSmoothUp ? 1.0 : -1.0);
+
+				const FScopedTransaction Transaction(LOCTEXT("RoadNetJunctionSmooth", "Adjust RoadNet Junction Smoothing"));
+				if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+
+				const double NewVal = Net->AdjustJunctionSmoothing(Step);
+				Net->Rebuild();
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+						FString::Printf(TEXT("RoadNet: junction smoothing = %.0f cm ( [ less / ] more, Shift = x5 )"), NewVal));
+				}
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
+		}
 	}
 	return FEdMode::InputKey(ViewportClient, Viewport, Key, Event);
 }
@@ -325,8 +432,11 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 {
 	FEdMode::Render(View, Viewport, PDI);
 
-	// EDIT overlay: while idle, draw hand-drawn roads' points as clickable
-	// handles (with hit proxies) plus faint centreline segments.
+	// EDIT overlay: while idle, draw every road's centreline segments as
+	// clickable handles so ANY road (imported OR hand-drawn) can be selected
+	// for lane editing. Per-point handles (for geometry edits) are drawn only
+	// for hand-drawn roads — OSM points are re-derived on import, so we don't
+	// invite dragging/deleting them. Imported roads use a distinct colour.
 	if (DraftPoints.Num() == 0)
 	{
 		if (const URoadNetwork* Net = GetNetwork())
@@ -335,21 +445,27 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 			for (int32 r = 0; r < Roads.Num(); ++r)
 			{
 				const FRoadDef& Road = Roads[r];
-				if (Road.Source != ERoadNetSource::HandDrawn || Road.Ref.Num() < 2) { continue; }
+				if (Road.Ref.Num() < 2) { continue; }
+				const bool bHand = (Road.Source == ERoadNetSource::HandDrawn);
 				const bool bWholeRoadSel = (r == SelRoad && SelPoint == INDEX_NONE);
+
 				for (int32 i = 0; i + 1 < Road.Ref.Num(); ++i)
 				{
 					PDI->SetHitProxy(new HRoadNetSegmentProxy(r, i));
-					PDI->DrawLine(Road.Ref[i], Road.Ref[i + 1],
-						bWholeRoadSel ? kColorSnap : kColorEditLine, SDPG_World, bWholeRoadSel ? 3.f : 1.5f);
+					const FColor Col = bWholeRoadSel ? kColorSnap : (bHand ? kColorEditLine : kColorOsmLine);
+					PDI->DrawLine(Road.Ref[i], Road.Ref[i + 1], Col, SDPG_World, bWholeRoadSel ? 3.f : 1.5f);
 					PDI->SetHitProxy(nullptr);
 				}
-				for (int32 i = 0; i < Road.Ref.Num(); ++i)
+
+				if (bHand)
 				{
-					const bool bSel = (r == SelRoad && i == SelPoint) || bWholeRoadSel;
-					PDI->SetHitProxy(new HRoadNetPointProxy(r, i));
-					PDI->DrawPoint(Road.Ref[i], bSel ? kColorSnap : kColorEditPt, kPointSize, SDPG_Foreground);
-					PDI->SetHitProxy(nullptr);
+					for (int32 i = 0; i < Road.Ref.Num(); ++i)
+					{
+						const bool bSel = (r == SelRoad && i == SelPoint) || bWholeRoadSel;
+						PDI->SetHitProxy(new HRoadNetPointProxy(r, i));
+						PDI->DrawPoint(Road.Ref[i], bSel ? kColorSnap : kColorEditPt, kPointSize, SDPG_Foreground);
+						PDI->SetHitProxy(nullptr);
+					}
 				}
 			}
 		}

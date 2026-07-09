@@ -31,6 +31,25 @@ namespace RoadNetMath
 		const TArray<FVector>& In, double Spacing, TArray<FVector>& Out,
 		double MaxTurnRad = 0.0 /* 0 = disabled */);
 
+	// Smooth a polyline with a centripetal Catmull-Rom spline that PASSES THROUGH
+	// every input point (so OSM/hand-drawn vertices are preserved as knots), then
+	// subdivides each span so no output chord exceeds MaxChordCm. Turns the
+	// piecewise-linear centreline into a smooth curve before offsetting/meshing,
+	// removing the faceting at every vertex. Z is interpolated the same way.
+	// NOTE: Catmull-Rom is only C1 (continuous tangent, DIScontinuous curvature),
+	// so curvature jumps at every knot — enough to still facet a wide carriageway.
+	ROADNET_API void SmoothCatmullRom(
+		const TArray<FVector>& In, double MaxChordCm, TArray<FVector>& Out);
+
+	// Smooth a polyline with a natural cubic spline (C2 → continuous curvature,
+	// the clothoid-equivalent for shading) that PASSES THROUGH every input knot.
+	// Parametrised by chord length; X/Y/Z fitted independently with natural
+	// (zero second-derivative) end conditions, then subdivided so no output chord
+	// exceeds MaxChordCm. Preferred over Catmull-Rom: curvature no longer jumps at
+	// knots, so offset edges and the meshed surface read smooth on curves.
+	ROADNET_API void SmoothG2Spline(
+		const TArray<FVector>& In, double MaxChordCm, TArray<FVector>& Out);
+
 	// ---- §10.4 Offset ------------------------------------------------------
 	// Offset a polyline laterally by SignedOffset (cm, +right). Uses miter joins
 	// clamped to MiterLimit*|offset|, falling back to the plain per-vertex offset
