@@ -1211,3 +1211,58 @@ compile clean (`McpPcgEditor`, exit 0) and are **zero-dependency on RoadBLD/Worl
   enough for PCG loops, but not yet per-road faces for incremental rebuild scoping / GUID reuse).
 - Details/props (§8.11), landscape paint-layer pass, per-road-material IDs. (Per-layer material
   overrides now exist; per-road/per-class material variation is the remaining refinement.)
+
+---
+
+## §12 Lanes & ZoneGraph — learnings from RoadBLD (drives the next phase)
+
+Reverse-engineered from RoadBLD's reflection (`RoadBLDRuntime` UHT gen) + a live
+`MyProject5` lane-editing session. Full capture in `ROADBLD_FEATURES.md §4`.
+This section is the **implementation brief** for RoadNet's lane + graph work.
+
+### 12.1 Lane data model to replicate
+- A lane is a **first-class object** (`UDynamicRoadLane`), not a per-road count.
+  Ours (`FRoadNetLaneSpec`) must grow from a flat lane count to per-lane entities.
+- Each lane is the **ribbon between two boundary curves** (`Left/RightEdgeCurve`,
+  `UEdgeCurve`). An `EdgeCurve` is a piecewise **`(distanceAlongRoad → lateralOffset)`
+  polyline** ("OffsetPoints"). Lane shape (widenings, turn bays, tapers) is authored
+  by editing these offset points — **not** a single scalar width.
+- **Variable width** via `FLaneWidthSegment { StartDistance, EndDistance,
+  TransitionIn, TransitionOut }` → a lane can ramp 0→full / full→0 over a transition
+  (this is the turn-bay / ramp-taper / lane add-drop mechanism).
+- **Lane type** = `ELaneType { Normal, Parking, Border, Restricted, Shoulder,
+  CenterTurn, Median }` (drop deprecated `None`; sidewalks are their own object).
+- **Direction is side-based**, not a per-lane flag: `ERoadSide { Left, Right, None }`.
+  Left lanes travel one way, right the other. Confirmed by `Added a new right side
+  lane` logging + the viewport arrows. RoadNet: left = −lateral, right = +lateral off
+  the road frame; travel direction = side.
+
+**RoadNet task:** replace `FRoadNetLaneSpec` count with `TArray<FRoadNetLane>` where
+`FRoadNetLane = { ERoadNetLaneType Type, ERoadSide Side, FEdgeOffsets Left, FEdgeOffsets
+Right, TArray<FLaneWidthSegment> WidthSegments, UMaterialInterface* Overlay }`, and
+`FEdgeOffsets = TArray<FVector2D /*dist, offset*/>`. Build lane ribbons by offsetting the
+reference curve per its edge-offset polylines (reuse `RoadNetMath::OffsetPolyline`).
+
+### 12.2 ZoneGraph — RoadBLD does NOT build one (net-new for us)
+**Confirmed** (reflection: no `AZoneShape`/`ZoneGraph` UCLASS authored by RoadBLD;
+logs: zero zone/connection lines). RoadBLD only **exposes** data for downstream
+consumers:
+- `USidewalkPartition { bWalkable, Material }` — described as feeding *"pedestrian
+  ZoneShapes and other walkability consumers."*
+- PCG nodes `PCGRoadBLDGetRoadEdges`, `PCGRoadBLDGetSidewalkPartitions`, and a
+  per-preset `RoadPCGGraph (UPCGGraph*)` run on each `ARoadGeo`.
+- Its rebuild builds **geometry** zones only (`RebuildPairwiseZoneBuilder` =
+  grade-sep/overlap, our `PartitionLayers` analogue) — **no routing/turn graph**.
+
+**RoadNet task (net-new):** build our own lane-connectivity graph from what we
+already have — per-side `ELaneType` lanes + `EdgeCurve` offset polylines + welded
+endpoint joints. At each welded joint, connect lane ends by **side + adjacency +
+type** (drivable-to-drivable), producing either engine `ZoneShape`s (if we take the
+`ZoneGraph` plugin dependency) or our own graph struct exported to PCG. This is the
+main remaining design piece; RoadBLD offers the *inputs*, not the algorithm.
+
+### 12.3 Per-commit conform coupling (already in our terrain doc)
+Each lane-edit commit re-runs the two-way conform on the modified road
+(`ConformReason_ModifiedRoad` + `MirrorSplineRefresh`). Mirror in RoadNet: any lane
+edit that changes the carriageway extent must re-drive the corridor sculpt for that
+road only (dirty-tracked), per `ROADBLD_TERRAIN_DEFORM.md`.

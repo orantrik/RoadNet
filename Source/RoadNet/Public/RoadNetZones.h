@@ -16,16 +16,19 @@
 struct FRoadCurves;
 struct FRoadDef;
 struct FRoadNetJoint;
+struct FRoadNetCrossing;
 
 namespace RoadNetZones
 {
 	// Partition RoadIndices into grade-separated groups. Curves/Roads are keyed
-	// by global road index; Joints supply shared-node connectivity.
+	// by global road index; Joints supply shared-node connectivity; Crossings are
+	// the precomputed 2-D centerline crossings (grade-separation edges).
 	ROADNET_API void PartitionLayers(
 		const TArray<int32>& RoadIndices,
 		const TMap<int32, FRoadCurves>& Curves,
 		const TArray<FRoadDef>& Roads,
 		const TArray<FRoadNetJoint>& Joints,
+		const TArray<FRoadNetCrossing>& Crossings,
 		double MaxZGapCm,
 		TArray<TArray<int32>>& OutGroups);
 }

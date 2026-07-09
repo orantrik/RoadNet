@@ -10,38 +10,94 @@ using namespace UE::Geometry;
 
 namespace RoadNetMesh
 {
-	// Interpolated elevation: project (X,Y) onto every centerline, keep the
-	// nearest, and lerp Z along that segment (§10.10). Continuous over slopes,
-	// unlike nearest-vertex. Linear scan — fine for moderate zones.
-	double SampleHeight(const TArray<const TArray<FVector>*>& CenterLines, double X, double Y, double Fallback)
+	void FCenterlineHeightField::Build(const TArray<const TArray<FVector>*>& CenterLines, double InCellCm)
 	{
-		const FVector2D Q(X, Y);
-		double BestD2 = TNumericLimits<double>::Max();
-		double BestZ  = Fallback;
+		Segs.Reset();
+		Grid.Reset();
+		CellCm = FMath::Max(1.0, InCellCm);
+		FallbackZ = FirstCenterlineZ(CenterLines);
 
+		int32 Count = 0;
+		for (const TArray<FVector>* CLPtr : CenterLines)
+		{
+			if (CLPtr) { Count += FMath::Max(0, CLPtr->Num() - 1); }
+		}
+		Segs.Reserve(Count);
 		for (const TArray<FVector>* CLPtr : CenterLines)
 		{
 			if (!CLPtr) { continue; }
 			const TArray<FVector>& CL = *CLPtr;
-			if (CL.Num() == 1)
-			{
-				const double dx = CL[0].X - X, dy = CL[0].Y - Y;
-				const double D2 = dx * dx + dy * dy;
-				if (D2 < BestD2) { BestD2 = D2; BestZ = CL[0].Z; }
-				continue;
-			}
 			for (int32 i = 0; i + 1 < CL.Num(); ++i)
 			{
-				const FVector2D A(CL[i].X, CL[i].Y);
-				const FVector2D B(CL[i + 1].X, CL[i + 1].Y);
+				Segs.Add({ FVector2D(CL[i].X, CL[i].Y), FVector2D(CL[i + 1].X, CL[i + 1].Y),
+					CL[i].Z, CL[i + 1].Z });
+			}
+		}
+		if (Segs.Num() == 0) { return; }
+
+		Grid.Reserve(Segs.Num() * 2);
+		auto Floor = [this](double V) { return (int32)FMath::FloorToInt(V / CellCm); };
+		for (int32 s = 0; s < Segs.Num(); ++s)
+		{
+			const FSeg& G = Segs[s];
+			const int32 X0 = Floor(FMath::Min(G.A.X, G.B.X)), X1 = Floor(FMath::Max(G.A.X, G.B.X));
+			const int32 Y0 = Floor(FMath::Min(G.A.Y, G.B.Y)), Y1 = Floor(FMath::Max(G.A.Y, G.B.Y));
+			for (int32 cx = X0; cx <= X1; ++cx)
+			{
+				for (int32 cy = Y0; cy <= Y1; ++cy) { Grid.Add(FIntPoint(cx, cy), s); }
+			}
+		}
+	}
+
+	double FCenterlineHeightField::SampleHeight(double X, double Y, double Fallback) const
+	{
+		if (Segs.Num() == 0) { return Fallback; }
+		const FVector2D Q(X, Y);
+		const int32 CX = (int32)FMath::FloorToInt(X / CellCm);
+		const int32 CY = (int32)FMath::FloorToInt(Y / CellCm);
+
+		double BestD2 = TNumericLimits<double>::Max();
+		double BestZ  = Fallback;
+
+		TArray<int32> Bucket;
+		auto TestCell = [&](int32 cx, int32 cy)
+		{
+			Bucket.Reset();
+			Grid.MultiFind(FIntPoint(cx, cy), Bucket);
+			for (int32 s : Bucket)
+			{
+				const FSeg& G = Segs[s];
 				double T;
-				const FVector2D C = RoadNetMath::ClosestOnSegment(A, B, Q, T);
+				const FVector2D C = RoadNetMath::ClosestOnSegment(G.A, G.B, Q, T);
 				const double D2 = FVector2D::DistSquared(Q, C);
-				if (D2 < BestD2)
+				if (D2 < BestD2) { BestD2 = D2; BestZ = FMath::Lerp(G.Za, G.Zb, T); }
+			}
+		};
+
+		// Expand in square rings; stop once no closer segment can exist in an
+		// unsearched ring (its minimum reach exceeds the best distance found).
+		constexpr int32 MaxRing = 256;
+		for (int32 R = 0; R <= MaxRing; ++R)
+		{
+			if (R == 0) { TestCell(CX, CY); }
+			else
+			{
+				for (int32 dx = -R; dx <= R; ++dx)
 				{
-					BestD2 = D2;
-					BestZ  = FMath::Lerp(CL[i].Z, CL[i + 1].Z, T);
+					TestCell(CX + dx, CY - R);
+					TestCell(CX + dx, CY + R);
 				}
+				for (int32 dy = -R + 1; dy <= R - 1; ++dy)
+				{
+					TestCell(CX - R, CY + dy);
+					TestCell(CX + R, CY + dy);
+				}
+			}
+			// The nearest point in ring R+1 is at least R*CellCm away.
+			if (BestD2 < TNumericLimits<double>::Max())
+			{
+				const double MinNext = (double)R * CellCm;
+				if (MinNext * MinNext > BestD2) { break; }
 			}
 		}
 		return BestZ;
@@ -62,7 +118,9 @@ namespace RoadNetMesh
 		double ZLiftCm,
 		FDynamicMesh3& OutMesh)
 	{
-		const double FallbackZ = FirstCenterlineZ(CenterLines);
+		FCenterlineHeightField Field;
+		Field.Build(CenterLines);
+		const double FallbackZ = Field.FirstZ();
 		int32 TriCount = 0;
 
 		for (const FGeneralPolygon2d& GP : Polys)
@@ -77,7 +135,7 @@ namespace RoadNetMesh
 			for (int32 i = 0; i < Verts2D.Num(); ++i)
 			{
 				const FVector2d& P = Verts2D[i];
-				const double Z = SampleHeight(CenterLines, P.X, P.Y, FallbackZ) + ZLiftCm;
+				const double Z = Field.SampleHeight(P.X, P.Y, FallbackZ) + ZLiftCm;
 				VMap[i] = OutMesh.AppendVertex(FVector3d(P.X, P.Y, Z));
 			}
 

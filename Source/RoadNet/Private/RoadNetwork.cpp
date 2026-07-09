@@ -108,17 +108,35 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified)
 		Ctx.Modified = TArray<int32>(Modified.GetData(), Modified.Num());
 	}
 
+	// Per-stage timing so large imports show where time goes (§10.18 profiling).
+	// For city-scale rebuilds we also log each stage AS it finishes, so a slow
+	// stage is visible immediately (the summary line only prints at the end).
+	const bool bTraceStages = Roads.Num() > 50;
+	auto Now = []() { return FPlatformTime::Seconds(); };
+	auto Trace = [&](const TCHAR* Name, double Dt)
+	{
+		if (bTraceStages)
+		{
+			UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   stage %-11s %8.1f ms"), Name, Dt * 1000.0);
+		}
+	};
+
+	const double tA = Now();
 	DeterminePendingRoads(Ctx);   // §10.17 scope
 	BuildCurves(Ctx);             // §10.2–§10.4 reference line + outer edges
+	const double tCurves = Now();  Trace(TEXT("curves"), tCurves - tA);
+	BuildCrossings(Ctx);          // §10.12 grid broadphase (shared by zones+surface)
+	const double tCross = Now();   Trace(TEXT("crossings"), tCross - tCurves);
 	BuildEndpointJoints(Ctx);     // §10.7 topology from shared node ids
+	const double tJoints = Now();  Trace(TEXT("joints"), tJoints - tCross);
 	BuildZones(Ctx);              // §10.12 grade-separation layering
+	const double tZones = Now();   Trace(TEXT("zones"), tZones - tJoints);
 	BuildSurfaceUnion(Ctx);       // §10.9 Clipper2 boolean-union per zone
+	const double tSurface = Now(); Trace(TEXT("surface"), tSurface - tZones);
 	BuildPerimeterLoops(Ctx);     // §10.11 perimeter loops (PCG export)
+	const double tPerim = Now();   Trace(TEXT("perimeters"), tPerim - tSurface);
 	CommitGeometry(Ctx);          // §10.15 triangulate + spawn surface actor
-
-	// ---- refinement stages still to implement ----
-	// §10.6 DetectCorners (fillet opening), §10.10 OverlapMasks,
-	// §10.11 PerimeterLoops (per-road split), sidewalks/markings/details.
+	const double tCommit = Now();  Trace(TEXT("commit"), tCommit - tPerim);
 
 	int32 Intersections = 0, Seams = 0;
 	for (const FRoadNetJoint& J : Ctx.Joints)
@@ -131,10 +149,15 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified)
 	const double WalkM2 = RoadNetSurface::TotalArea(Ctx.SidewalkPolys) / 1.0e4;
 	const double Ms = (FPlatformTime::Seconds() - T0) * 1000.0;
 	UE_LOG(LogRoadNet, Log,
-		TEXT("[RoadNet] Rebuild: %d roads (%d modified, %d pending), %d curves, %d joints (%d intersections, %d seams), %d grade zones, %d surface polys (%.0f m^2), %d sidewalk polys (%.0f m^2), %d perimeter loops in %.2f ms."),
-		Roads.Num(), Ctx.Modified.Num(), Ctx.Pending.Num(), Ctx.Curves.Num(),
+		TEXT("[RoadNet] Rebuild: %d roads (%d modified, %d pending), %d curves, %d crossings, %d joints (%d intersections, %d seams), %d grade zones, %d surface polys (%.0f m^2), %d sidewalk polys (%.0f m^2), %d perimeter loops in %.2f ms."),
+		Roads.Num(), Ctx.Modified.Num(), Ctx.Pending.Num(), Ctx.Curves.Num(), Ctx.Crossings.Num(),
 		Ctx.Joints.Num(), Intersections, Seams, Ctx.Zones.Num(),
 		Ctx.SurfacePolys.Num(), AreaM2, Ctx.SidewalkPolys.Num(), WalkM2, Ctx.PerimeterLoops.Num(), Ms);
+	UE_LOG(LogRoadNet, Log,
+		TEXT("[RoadNet] Rebuild stages (ms): curves %.1f, crossings %.1f, joints %.1f, zones %.1f, surface %.1f, perimeters %.1f, commit %.1f."),
+		(tCurves - tA) * 1000.0, (tCross - tCurves) * 1000.0, (tJoints - tCross) * 1000.0,
+		(tZones - tJoints) * 1000.0, (tSurface - tZones) * 1000.0, (tPerim - tSurface) * 1000.0,
+		(tCommit - tPerim) * 1000.0);
 }
 
 void URoadNetwork::DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const
@@ -165,6 +188,81 @@ void URoadNetwork::BuildCurves(FRoadNetRebuildContext& Ctx) const
 		C.Length = RoadNetMath::TotalLength(C.Sampled);
 
 		Ctx.Curves.Add(Idx, MoveTemp(C));
+	}
+}
+
+void URoadNetwork::BuildCrossings(FRoadNetRebuildContext& Ctx) const
+{
+	// All 2-D centerline crossings between DIFFERENT roads, via a uniform-grid
+	// broadphase. Replaces the two former O(N^2) pair loops (zones + surface) —
+	// at city scale (100s of roads, 10,000s of segments) that was the hang.
+	Ctx.Crossings.Reset();
+
+	struct FSeg { int32 Road; FVector2D P0, P1; double Z0, Z1; };
+	TArray<FSeg> Segs;
+	Segs.Reserve(Ctx.Curves.Num() * 16);
+	for (const TPair<int32, FRoadCurves>& Pair : Ctx.Curves)
+	{
+		const TArray<FVector>& S = Pair.Value.Sampled;
+		for (int32 i = 0; i + 1 < S.Num(); ++i)
+		{
+			Segs.Add({ Pair.Key,
+				FVector2D(S[i].X, S[i].Y), FVector2D(S[i + 1].X, S[i + 1].Y),
+				S[i].Z, S[i + 1].Z });
+		}
+	}
+	if (Segs.Num() < 2) { return; }
+
+	// Cell ~5x the sample density: few segments per cell, cheap neighbour tests.
+	constexpr double CellCm = 1000.0;
+	auto Floor = [](double V) { return (int32)FMath::FloorToInt(V / CellCm); };
+
+	TMultiMap<FIntPoint, int32> Grid;
+	Grid.Reserve(Segs.Num() * 2);
+	for (int32 s = 0; s < Segs.Num(); ++s)
+	{
+		const FSeg& G = Segs[s];
+		const int32 X0 = Floor(FMath::Min(G.P0.X, G.P1.X)), X1 = Floor(FMath::Max(G.P0.X, G.P1.X));
+		const int32 Y0 = Floor(FMath::Min(G.P0.Y, G.P1.Y)), Y1 = Floor(FMath::Max(G.P0.Y, G.P1.Y));
+		for (int32 cx = X0; cx <= X1; ++cx)
+		{
+			for (int32 cy = Y0; cy <= Y1; ++cy) { Grid.Add(FIntPoint(cx, cy), s); }
+		}
+	}
+
+	TArray<FIntPoint> Cells;
+	Grid.GetKeys(Cells);
+	TSet<uint64> Tested;
+	Tested.Reserve(Segs.Num() * 2);
+	TArray<int32> Bucket;
+	for (const FIntPoint& Cell : Cells)
+	{
+		Bucket.Reset();
+		Grid.MultiFind(Cell, Bucket);
+		for (int32 i = 0; i < Bucket.Num(); ++i)
+		{
+			for (int32 j = i + 1; j < Bucket.Num(); ++j)
+			{
+				int32 a = Bucket[i], b = Bucket[j];
+				if (Segs[a].Road == Segs[b].Road) { continue; }
+				const uint64 Key = ((uint64)FMath::Min(a, b) << 32) | (uint32)FMath::Max(a, b);
+				if (Tested.Contains(Key)) { continue; }
+				Tested.Add(Key);
+
+				const FSeg& A = Segs[a];
+				const FSeg& B = Segs[b];
+				FVector2D Hit; double Ta, Tb;
+				if (RoadNetMath::SegmentIntersect2D(A.P0, A.P1, B.P0, B.P1, Hit, Ta, Tb))
+				{
+					FRoadNetCrossing X;
+					X.RoadA = A.Road; X.RoadB = B.Road;
+					X.Point = Hit;
+					X.Za = FMath::Lerp(A.Z0, A.Z1, Ta);
+					X.Zb = FMath::Lerp(B.Z0, B.Z1, Tb);
+					Ctx.Crossings.Add(X);
+				}
+			}
+		}
 	}
 }
 
@@ -269,7 +367,7 @@ void URoadNetwork::BuildZones(FRoadNetRebuildContext& Ctx) const
 	WithCurves.Reserve(Ctx.Curves.Num());
 	for (const TPair<int32, FRoadCurves>& Pair : Ctx.Curves) { WithCurves.Add(Pair.Key); }
 
-	RoadNetZones::PartitionLayers(WithCurves, Ctx.Curves, Roads, Ctx.Joints, kMaxZGapCm, Ctx.Zones);
+	RoadNetZones::PartitionLayers(WithCurves, Ctx.Curves, Roads, Ctx.Joints, Ctx.Crossings, kMaxZGapCm, Ctx.Zones);
 }
 
 void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
@@ -367,44 +465,13 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 		}
 
 		// (b) centerline crossings between roads in this zone (X and touching-T).
-		// Precompute 2-D bounds for a cheap broadphase reject.
-		TArray<const FRoadCurves*> ZC;
-		TArray<FBox2D> ZB;
-		ZC.SetNum(ZoneRoads.Num());
-		ZB.SetNum(ZoneRoads.Num());
-		for (int32 i = 0; i < ZoneRoads.Num(); ++i)
+		// Uses the precomputed shared crossings (grid broadphase) instead of a
+		// per-zone O(N^2) segment sweep.
+		for (const FRoadNetCrossing& X : Ctx.Crossings)
 		{
-			ZC[i] = Ctx.Curves.Find(ZoneRoads[i]);
-			FBox2D Bx(ForceInit);
-			if (ZC[i]) { for (const FVector& P : ZC[i]->Sampled) { Bx += FVector2D(P.X, P.Y); } }
-			ZB[i] = Bx;
-		}
-
-		for (int32 a = 0; a < ZoneRoads.Num(); ++a)
-		{
-			const FRoadCurves* Ca = ZC[a];
-			if (!Ca || !ZB[a].bIsValid) { continue; }
-			for (int32 b = a + 1; b < ZoneRoads.Num(); ++b)
-			{
-				const FRoadCurves* Cb = ZC[b];
-				if (!Cb || !ZB[b].bIsValid || !ZB[a].Intersect(ZB[b])) { continue; }
-				const double R = FMath::Max(HalfWidth(ZoneRoads[a]), HalfWidth(ZoneRoads[b]));
-				for (int32 i = 0; i + 1 < Ca->Sampled.Num(); ++i)
-				{
-					const FVector2D A0(Ca->Sampled[i].X, Ca->Sampled[i].Y);
-					const FVector2D A1(Ca->Sampled[i + 1].X, Ca->Sampled[i + 1].Y);
-					for (int32 j = 0; j + 1 < Cb->Sampled.Num(); ++j)
-					{
-						const FVector2D B0(Cb->Sampled[j].X, Cb->Sampled[j].Y);
-						const FVector2D B1(Cb->Sampled[j + 1].X, Cb->Sampled[j + 1].Y);
-						FVector2D Hit; double Ta, Tb;
-						if (RoadNetMath::SegmentIntersect2D(A0, A1, B0, B1, Hit, Ta, Tb))
-						{
-							AddJPoint(Hit, R);
-						}
-					}
-				}
-			}
+			if (!ZoneSet.Contains(X.RoadA) || !ZoneSet.Contains(X.RoadB)) { continue; }
+			const double R = FMath::Max(HalfWidth(X.RoadA), HalfWidth(X.RoadB));
+			AddJPoint(X.Point, R);
 		}
 
 		TArray<UE::Geometry::FGeneralPolygon2d> Discs;
@@ -448,8 +515,8 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 				const bool bOff = PolygonsOffset(
 					MaxW, RoadPolys, Dilated, /*bCopyInputOnFailure*/true,
 					/*MiterLimit*/2.0, EPolygonOffsetJoinType::Round,
-					EPolygonOffsetEndType::Polygon, /*MaxStepsPerRadian*/-1.0,
-					/*DefaultStepsPerRadianScale*/1.0e-2);
+					EPolygonOffsetEndType::Polygon, /*MaxStepsPerRadian*/8.0,
+					/*DefaultStepsPerRadianScale*/1.0e-3);
 
 				TArray<FGeneralPolygon2d> Band;
 				if (bOff && PolygonsDifference(Dilated, RoadPolys, Band) && Band.Num() > 0)

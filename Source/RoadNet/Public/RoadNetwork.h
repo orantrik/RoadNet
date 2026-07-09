@@ -39,6 +39,18 @@ struct FRoadNetJoint
 	double Z = 0.0;
 };
 
+// ---- 2-D centerline crossing between two roads (§10.12 / §10.8) -------------
+// Computed once per rebuild with a spatial-grid broadphase and shared by the
+// zone partition (grade separation) and the surface union (junction discs).
+struct FRoadNetCrossing
+{
+	int32 RoadA = INDEX_NONE;   // global road index
+	int32 RoadB = INDEX_NONE;   // global road index
+	FVector2D Point = FVector2D::ZeroVector;
+	double Za = 0.0;            // Z on RoadA at the crossing
+	double Zb = 0.0;            // Z on RoadB at the crossing
+};
+
 // ---- Compute bus for one rebuild (§2 FRebuildContext) -----------------------
 struct FRoadNetRebuildContext
 {
@@ -47,6 +59,8 @@ struct FRoadNetRebuildContext
 	TArray<int32> TestAgainst;
 	TMap<int32, FRoadCurves> Curves;
 	TArray<FRoadNetJoint> Joints;
+	// §10.12/§10.8 all 2-D centerline crossings (computed once, shared).
+	TArray<FRoadNetCrossing> Crossings;
 	// §10.12 grade-separation zones: each group is a set of road indices that are
 	// at-grade with one another and get unioned + meshed independently.
 	TArray<TArray<int32>> Zones;
@@ -141,6 +155,7 @@ private:
 	// ---- pipeline stages (§10.18) --------------------------------------
 	void DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const;
 	void BuildCurves(FRoadNetRebuildContext& Ctx) const;
+	void BuildCrossings(FRoadNetRebuildContext& Ctx) const;      // §10.12 grid broadphase (shared)
 	void BuildEndpointJoints(FRoadNetRebuildContext& Ctx) const;
 	void BuildZones(FRoadNetRebuildContext& Ctx) const;          // §10.12 grade separation
 	void BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const;   // §10.9 per-zone union + §8.12 sidewalks

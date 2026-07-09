@@ -8,7 +8,7 @@ using namespace UE::Geometry;
 
 namespace RoadNetPerimeters
 {
-	static void RingToLoop(const FPolygon2d& Ring, const TArray<const TArray<FVector>*>& CenterLines,
+	static void RingToLoop(const FPolygon2d& Ring, const RoadNetMesh::FCenterlineHeightField& Field,
 		double FallbackZ, double ZLiftCm, bool bOuter, int32 Zone, TArray<FRoadNetLoop>& OutLoops)
 	{
 		const TArray<FVector2d>& V = Ring.GetVertices();
@@ -20,7 +20,7 @@ namespace RoadNetPerimeters
 		Loop.Points.Reserve(V.Num());
 		for (const FVector2d& P : V)
 		{
-			const double Z = RoadNetMesh::SampleHeight(CenterLines, P.X, P.Y, FallbackZ) + ZLiftCm;
+			const double Z = Field.SampleHeight(P.X, P.Y, FallbackZ) + ZLiftCm;
 			Loop.Points.Emplace(P.X, P.Y, Z);
 		}
 		OutLoops.Add(MoveTemp(Loop));
@@ -46,14 +46,16 @@ namespace RoadNetPerimeters
 					if (const FRoadCurves* C = Curves.Find(RoadIdx)) { CenterLines.Add(&C->Sampled); }
 				}
 			}
-			const double FallbackZ = RoadNetMesh::FirstCenterlineZ(CenterLines);
+			RoadNetMesh::FCenterlineHeightField Field;
+			Field.Build(CenterLines);
+			const double FallbackZ = Field.FirstZ();
 
 			for (const FGeneralPolygon2d& GP : ZonePolys[z])
 			{
-				RingToLoop(GP.GetOuter(), CenterLines, FallbackZ, ZLiftCm, /*bOuter*/true, z, OutLoops);
+				RingToLoop(GP.GetOuter(), Field, FallbackZ, ZLiftCm, /*bOuter*/true, z, OutLoops);
 				for (const FPolygon2d& Hole : GP.GetHoles())
 				{
-					RingToLoop(Hole, CenterLines, FallbackZ, ZLiftCm, /*bOuter*/false, z, OutLoops);
+					RingToLoop(Hole, Field, FallbackZ, ZLiftCm, /*bOuter*/false, z, OutLoops);
 				}
 			}
 		}
