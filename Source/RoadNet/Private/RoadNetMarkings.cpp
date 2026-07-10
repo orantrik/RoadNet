@@ -108,22 +108,56 @@ namespace RoadNetMarkings
 			}
 		};
 
-		// Centre line on two-way roads only (yellow, dividing opposing traffic).
-		if (!Road.Lanes.bOneway)
+		if (Road.Lanes.bMedian)
 		{
-			EmitSolid(0.0, OutYellow);
-		}
+			// Divided road: the median replaces the yellow centre line. Put a
+			// solid white line on each median edge and dashed dividers between
+			// the lanes of each carriageway (derived from resolved lane offsets).
+			// Solid edge lines sit just outside the raised slab so they stay on
+			// the carriageway (not hidden under the median top).
+			const double MedianHalf = (double)Road.Lanes.MedianHalfCm();
+			constexpr double kMedianEdgeLineInsetCm = 14.0;
+			EmitSolid(+(MedianHalf + kMedianEdgeLineInsetCm), OutWhite);
+			EmitSolid(-(MedianHalf + kMedianEdgeLineInsetCm), OutWhite);
 
-		// Dashed dividers at interior lane boundaries (white).
-		const int32 NLanes = FMath::Max(1, Road.Lanes.EffectiveLaneCount());
-		if (NLanes >= 2)
-		{
-			const double LaneW = (2.0 * Half) / NLanes;
-			for (int32 k = 1; k < NLanes; ++k)
+			const TArray<FRoadNetLane> Lanes = Road.Lanes.ResolveLanes();
+			auto EmitSideDividers = [&](bool bRightSide)
 			{
-				const double Offset = -Half + k * LaneW;
-				if (!Road.Lanes.bOneway && FMath::Abs(Offset) < 1.0) { continue; } // centre already solid
-				EmitDashed(Offset);
+				TArray<double> Edges;
+				for (const FRoadNetLane& L : Lanes)
+				{
+					const bool bRight = L.CenterOffset > 0.0;
+					if (bRight != bRightSide) { continue; }
+					Edges.Add(bRightSide ? (L.CenterOffset + 0.5 * L.Width)
+					                     : (L.CenterOffset - 0.5 * L.Width));
+				}
+				if (Edges.Num() < 2) { return; }                 // 1 lane → no interior divider
+				Edges.Sort([bRightSide](double A, double B) { return bRightSide ? A < B : A > B; });
+				Edges.Pop();                                     // drop the outer carriageway edge
+				for (double Off : Edges) { EmitDashed(Off); }
+			};
+			EmitSideDividers(true);
+			EmitSideDividers(false);
+		}
+		else
+		{
+			// Centre line on two-way roads only (yellow, dividing opposing traffic).
+			if (!Road.Lanes.bOneway)
+			{
+				EmitSolid(0.0, OutYellow);
+			}
+
+			// Dashed dividers at interior lane boundaries (white).
+			const int32 NLanes = FMath::Max(1, Road.Lanes.EffectiveLaneCount());
+			if (NLanes >= 2)
+			{
+				const double LaneW = (2.0 * Half) / NLanes;
+				for (int32 k = 1; k < NLanes; ++k)
+				{
+					const double Offset = -Half + k * LaneW;
+					if (!Road.Lanes.bOneway && FMath::Abs(Offset) < 1.0) { continue; } // centre already solid
+					EmitDashed(Offset);
+				}
 			}
 		}
 

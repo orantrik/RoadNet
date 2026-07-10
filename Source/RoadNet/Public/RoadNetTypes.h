@@ -60,6 +60,15 @@ enum class ERoadNetJunctionPreset : uint8
 	GiveWay            // give-way (yield) dashed bar
 };
 
+// Edge treatment for a central median strip.
+UENUM(BlueprintType)
+enum class ERoadNetMedianEdge : uint8
+{
+	Plantable,       // raised soil strip + centre spline for PCG tree scatter
+	CurbOnly,        // raised soil strip with a kerb on each edge
+	SidewalkAndCurb  // walkable (concrete) raised median with kerbs on each edge
+};
+
 // Persistent per-junction override, keyed by world location and matched by
 // proximity so it survives road-index shifts and minor re-smoothing between
 // rebuilds (joints themselves are recomputed every rebuild).
@@ -226,6 +235,24 @@ struct ROADNET_API FRoadNetLaneSpec
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
 	float SidewalkWidth = 200.f;      // 2 m
 
+	// ---- central median (divided road) -----------------------------------
+	// When bMedian, a raised central strip of MedianWidth splits the
+	// carriageway: driving lanes are pushed outward by MedianWidth/2 (a central
+	// gap), and the strip is meshed with the chosen edge treatment plus a centre
+	// spline for PCG tree scatter.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Median")
+	bool bMedian = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Median",
+		meta=(ClampMin="30.0", UIMin="30.0", UIMax="1000.0"))
+	float MedianWidth = 300.f;        // 3 m
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Median")
+	ERoadNetMedianEdge MedianEdge = ERoadNetMedianEdge::Plantable;
+
+	// Half the median gap (cm), or 0 when there is no median.
+	float MedianHalfCm() const { return bMedian ? 0.5f * FMath::Max(30.f, MedianWidth) : 0.f; }
+
 	// Authored per-lane entities (RoadBLD-style). When non-empty these OVERRIDE
 	// the count model above; when empty, ResolveLanes() synthesizes lanes from
 	// the counts so downstream code always iterates real lanes. This is how the
@@ -246,7 +273,7 @@ struct ROADNET_API FRoadNetLaneSpec
 				Lo = FMath::Min(Lo, L.CenterOffset - 0.5 * L.Width);
 				Hi = FMath::Max(Hi, L.CenterOffset + 0.5 * L.Width);
 			}
-			return 0.5f * (float)(Hi - Lo);
+			return 0.5f * (float)(Hi - Lo) + MedianHalfCm();
 		}
 		const int32 N = EffectiveLaneCount();
 		float W = 0.f;
@@ -254,7 +281,7 @@ struct ROADNET_API FRoadNetLaneSpec
 		{
 			W += LaneWidths.IsValidIndex(i) ? LaneWidths[i] : LaneWidthDefault;
 		}
-		return 0.5f * W;
+		return 0.5f * W + MedianHalfCm();
 	}
 
 	int32 EffectiveLaneCount() const
@@ -290,8 +317,12 @@ struct ROADNET_API FRoadNetLaneSpec
 		Out.Reserve(Fwd + Bwd);
 		int32 GlobalIdx = 0;
 
-		// Forward (right) lanes stack from the centerline outward to +offset.
-		double RightEdge = 0.0;
+		// A central median opens a gap of MedianHalf on each side of the
+		// reference line, so the innermost lanes start beyond the median.
+		const double MedianHalf = (double)MedianHalfCm();
+
+		// Forward (right) lanes stack from the centerline (or median edge) outward.
+		double RightEdge = MedianHalf;
 		for (int32 i = 0; i < Fwd; ++i)
 		{
 			const float LW = WidthAt(GlobalIdx++);
@@ -304,8 +335,8 @@ struct ROADNET_API FRoadNetLaneSpec
 			RightEdge += LW;
 			Out.Add(L);
 		}
-		// Backward (left) lanes stack from the centerline outward to −offset.
-		double LeftEdge = 0.0;
+		// Backward (left) lanes stack from the centerline (or median edge) outward.
+		double LeftEdge = MedianHalf;
 		for (int32 i = 0; i < Bwd; ++i)
 		{
 			const float LW = WidthAt(GlobalIdx++);

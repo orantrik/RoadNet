@@ -7,6 +7,7 @@
 #include "RoadNetJunctionMarks.h"
 #include "RoadNetZones.h"
 #include "Polygon2.h"
+#include "Algo/Reverse.h"
 #include "RoadNetMarkings.h"
 #include "RoadNetPerimeters.h"
 #include "RoadNetLanes.h"
@@ -155,6 +156,43 @@ int32 URoadNetwork::GetLaneCount(int32 RoadIdx) const
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return 0; }
 	return Roads[RoadIdx].Lanes.EffectiveLaneCount();
+}
+
+bool URoadNetwork::ToggleMedian(int32 RoadIdx)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return false; }
+	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+	L.bMedian = !L.bMedian;
+	return L.bMedian;
+}
+
+ERoadNetMedianEdge URoadNetwork::CycleMedianEdge(int32 RoadIdx, int32 Dir)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return ERoadNetMedianEdge::Plantable; }
+	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+	L.bMedian = true;   // cycling edge implies a median
+	constexpr int32 N = 3; // Plantable, CurbOnly, SidewalkAndCurb
+	int32 V = ((int32)L.MedianEdge + (Dir >= 0 ? 1 : N - 1)) % N;
+	L.MedianEdge = (ERoadNetMedianEdge)V;
+	return L.MedianEdge;
+}
+
+float URoadNetwork::AdjustMedianWidth(int32 RoadIdx, float DeltaCm)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return 0.f; }
+	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+	L.MedianWidth = FMath::Clamp(L.MedianWidth + DeltaCm, 30.f, 2000.f);
+	return L.MedianWidth;
+}
+
+bool URoadNetwork::IsMedian(int32 RoadIdx) const
+{
+	return Roads.IsValidIndex(RoadIdx) && Roads[RoadIdx].Lanes.bMedian;
+}
+
+float URoadNetwork::GetMedianWidth(int32 RoadIdx) const
+{
+	return Roads.IsValidIndex(RoadIdx) ? Roads[RoadIdx].Lanes.MedianWidth : 0.f;
 }
 
 double URoadNetwork::AdjustJunctionSmoothing(double DeltaCm)
@@ -468,6 +506,8 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 	Ctx.ZoneMarkingYellowPolys.SetNum(Ctx.Zones.Num());
 	Ctx.ZoneJunctionClip.Reset();
 	Ctx.ZoneJunctionClip.SetNum(Ctx.Zones.Num());
+	Ctx.ZoneMedianPolys.Reset();
+	Ctx.ZoneMedianPolys.SetNum(Ctx.Zones.Num());
 	Ctx.SurfacePolys.Reset();
 	Ctx.SidewalkPolys.Reset();
 
@@ -734,6 +774,24 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 					}
 					Ctx.SidewalkPolys.Append(Ctx.ZoneSidewalkPolys[z]);
 				}
+			}
+		}
+
+		// ---- central median strips (§ divided road) ---------------------------
+		// A raised block filling each median road's carriageway gap. Built by
+		// thickening the reference line by the median half-width, so it tracks
+		// curves and sits between the two carriageways.
+		for (int32 RoadIdx : ZoneRoads)
+		{
+			if (!Roads.IsValidIndex(RoadIdx) || !Roads[RoadIdx].Lanes.bMedian) { continue; }
+			const FRoadCurves* C = Ctx.Curves.Find(RoadIdx);
+			if (!C || C->Sampled.Num() < 2) { continue; }
+			const double MedianHalf = (double)Roads[RoadIdx].Lanes.MedianHalfCm();
+			if (MedianHalf < 10.0) { continue; }
+			TArray<UE::Geometry::FGeneralPolygon2d> Strip;
+			if (RoadNetSurface::BuildPathRibbon(C->Sampled, MedianHalf, Strip))
+			{
+				Ctx.ZoneMedianPolys[z].Append(MoveTemp(Strip));
 			}
 		}
 
@@ -1150,6 +1208,7 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 	// committed AFTER the sidewalk band exists (it reads Ctx.ZoneSidewalkPolys).
 	CommitCurbs(Ctx);
 	CommitJunctionSignals(Ctx);   // § traffic-signal placeholders at signalized junctions
+	CommitMedian(Ctx);            // § raised median strip + centre planting splines
 	CommitPerimeters(Ctx);
 	CommitLaneGraph(Ctx);
 }
@@ -1203,6 +1262,29 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 		RoadNetCurbs::BuildCurbInstancesForZone(
 			Ctx.ZoneSurfacePolys[z], Ctx.ZoneSidewalkPolys[z], Field,
 			CurbSpacingCm, kRoadZLiftCm, Insts);
+	}
+
+	// Median-edge kerbs (CurbOnly / SidewalkAndCurb): a kerb line on each side of
+	// the median gap, oriented so its raised face points at the carriageway.
+	for (int32 r = 0; r < Roads.Num(); ++r)
+	{
+		const FRoadNetLaneSpec& L = Roads[r].Lanes;
+		if (!L.bMedian || L.MedianEdge == ERoadNetMedianEdge::Plantable) { continue; }
+		const FRoadCurves* C = Ctx.Curves.Find(r);
+		if (!C || C->Sampled.Num() < 2) { continue; }
+		const double MedianHalf = (double)L.MedianHalfCm();
+		if (MedianHalf < 10.0) { continue; }
+
+		TArray<const TArray<FVector>*> CL; CL.Add(&C->Sampled);
+		RoadNetMesh::FCenterlineHeightField Field;
+		Field.Build(CL);
+
+		TArray<FVector> RightEdge, LeftEdge;
+		RoadNetMath::OffsetPolyline(C->Sampled, +MedianHalf, RightEdge);
+		RoadNetMath::OffsetPolyline(C->Sampled, -MedianHalf, LeftEdge);
+		Algo::Reverse(RightEdge);  // flip so the +side kerb also faces the carriageway
+		RoadNetCurbs::BuildCurbInstancesAlongLine(RightEdge, Field, CurbSpacingCm, kRoadZLiftCm, Insts);
+		RoadNetCurbs::BuildCurbInstancesAlongLine(LeftEdge,  Field, CurbSpacingCm, kRoadZLiftCm, Insts);
 	}
 
 	if (Insts.Num() == 0) { Retire(); return; }
@@ -1421,6 +1503,28 @@ void URoadNetwork::BuildJunctionMarkings(FRoadNetRebuildContext& Ctx)
 
 			auto InClip = [&GP](const FVector2D& P) { return GP.Contains(FVector2d(P.X, P.Y)); };
 
+			// Unit direction of the junction-boundary edge nearest a point (used to
+			// gauge how skewed an approach meets the junction).
+			auto NearestEdgeDir = [&OV](const FVector2D& P) -> FVector2D
+			{
+				double Best = TNumericLimits<double>::Max();
+				FVector2D Dir(1, 0);
+				const int32 N = OV.Num();
+				for (int32 i = 0; i < N; ++i)
+				{
+					const FVector2D E0(OV[i].X, OV[i].Y);
+					const FVector2D E1(OV[(i + 1) % N].X, OV[(i + 1) % N].Y);
+					const FVector2D Seg = E1 - E0;
+					const double L2 = Seg.SizeSquared();
+					if (L2 < 1.0) { continue; }
+					const double T = FMath::Clamp(FVector2D::DotProduct(P - E0, Seg) / L2, 0.0, 1.0);
+					const FVector2D Proj = E0 + Seg * T;
+					const double D = FVector2D::DistSquared(P, Proj);
+					if (D < Best) { Best = D; Dir = Seg / FMath::Sqrt(L2); }
+				}
+				return Dir;
+			};
+
 			// Approaches: each place a zone road's centreline crosses this
 			// polygon's boundary is one approach (stop-line pos + outward dir).
 			TArray<RoadNetJunctionMarks::FApproach> Approaches;
@@ -1449,8 +1553,29 @@ void URoadNetwork::BuildJunctionMarkings(FRoadNetRebuildContext& Ctx)
 						const FVector2D Boundary = 0.5 * (Lo + Hi);
 						// Outward = from inside toward outside.
 						FVector2D Outward = bPrevIn ? (B - A) : (A - B);
+						FVector2D OutN = Outward;
+						if (!OutN.Normalize()) { OutN = FVector2D(1, 0); }
+
+						// Skew setback: on a tilted approach the boundary is not
+						// perpendicular to travel, so a stop bar / crosswalk drawn
+						// square to the road would clip into the junction on the
+						// acute side. Push the stop position outward by the amount
+						// the worst lateral corner (±Half) overhangs the boundary:
+						//   extra = Half * |sin θ| / |cos θ|,  cos θ = Out·N.
+						const FVector2D EdgeDir = NearestEdgeDir(Boundary);
+						const FVector2D EdgeN(-EdgeDir.Y, EdgeDir.X);     // boundary normal
+						const double CosT = FMath::Abs(FVector2D::DotProduct(OutN, EdgeN));
+						double Extra = 30.0;                              // base clearance
+						if (CosT > 0.15)
+						{
+							const double SinT = FMath::Sqrt(FMath::Max(0.0, 1.0 - CosT * CosT));
+							Extra += Half * (SinT / CosT);
+						}
+						else { Extra += 1.5 * Half; }                    // near-grazing: cap
+						Extra = FMath::Min(Extra, 1.75 * Half + 30.0);
+
 						RoadNetJunctionMarks::FApproach Ap;
-						Ap.StopPos = Boundary;
+						Ap.StopPos = Boundary + OutN * Extra;
 						Ap.Outward = Outward;
 						Ap.HalfWidthCm = Half;
 						Approaches.Add(Ap);
@@ -1586,6 +1711,89 @@ void URoadNetwork::CommitJunctionSignals(FRoadNetRebuildContext& Ctx)
 
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitJunctionSignals: %d signal placeholders%s."),
 		Ctx.Signals.Num(), bUserMesh ? TEXT("") : TEXT(" [cylinder default]"));
+}
+
+void URoadNetwork::CommitMedian(FRoadNetRebuildContext& Ctx)
+{
+	UWorld* World = WorldPtr.Get();
+	if (!World) { return; }
+
+	// Mesh the raised median strips (green plantable colour by default). Reuse
+	// CommitLayer so the strip drapes on terrain with a curb-height lift.
+	bool bAnyMedian = false;
+	for (const TArray<UE::Geometry::FGeneralPolygon2d>& Z : Ctx.ZoneMedianPolys)
+	{
+		if (Z.Num() > 0) { bAnyMedian = true; break; }
+	}
+	if (bAnyMedian)
+	{
+		CommitLayer(GeoMedianActor, TEXT("RoadNet_Median"), Ctx.ZoneMedianPolys,
+			/*ExtraLift*/15.0, FColor(70, 110, 60), MedianMaterial, Ctx);
+	}
+	else if (AActor* A = GeoMedianActor.Get()) { A->Destroy(); GeoMedianActor = nullptr; }
+
+	// Centre planting splines (one open spline per median road) for PCG tree
+	// scatter. Tagged for discovery; lifted to the median top.
+	int32 SplineCount = 0;
+	{
+		AActor* Actor = GeoMedianSplineActor.Get();
+		bool bNeed = false;
+		for (const FRoadDef& R : Roads) { if (R.Lanes.bMedian) { bNeed = true; break; } }
+
+		if (!bNeed)
+		{
+			if (AActor* A = GeoMedianSplineActor.Get()) { A->Destroy(); GeoMedianSplineActor = nullptr; }
+			return;
+		}
+
+		if (!Actor)
+		{
+			FActorSpawnParameters Params;
+			Params.ObjectFlags |= RF_Transient;
+			Actor = World->SpawnActor<AActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
+			if (!Actor) { return; }
+			USceneComponent* Root = NewObject<USceneComponent>(Actor, TEXT("Root"));
+			Actor->SetRootComponent(Root);
+			Root->RegisterComponent();
+#if WITH_EDITOR
+			Actor->SetActorLabel(TEXT("RoadNet_MedianSplines"));
+#endif
+			GeoMedianSplineActor = Actor;
+		}
+
+		// Clear the previous rebuild's splines.
+		{
+			TArray<USplineComponent*> Existing;
+			Actor->GetComponents<USplineComponent>(Existing);
+			for (USplineComponent* Sp : Existing) { if (Sp) { Sp->DestroyComponent(); } }
+		}
+
+		USceneComponent* Root = Actor->GetRootComponent();
+		for (int32 r = 0; r < Roads.Num(); ++r)
+		{
+			if (!Roads[r].Lanes.bMedian) { continue; }
+			const FRoadCurves* C = Ctx.Curves.Find(r);
+			if (!C || C->Sampled.Num() < 2) { continue; }
+
+			TArray<FVector> Pts = C->Sampled;
+			for (FVector& P : Pts) { P.Z += kRoadZLiftCm + 15.0; } // sit on the median top
+
+			USplineComponent* Sp = NewObject<USplineComponent>(Actor);
+			if (!Sp) { continue; }
+			Sp->SetMobility(EComponentMobility::Movable);
+			Sp->AttachToComponent(Root, FAttachmentTransformRules::KeepRelativeTransform);
+			Sp->RegisterComponent();
+			Sp->ClearSplinePoints(false);
+			Sp->SetSplinePoints(Pts, ESplineCoordinateSpace::World, false);
+			Sp->SetClosedLoop(false, false);
+			Sp->UpdateSpline();
+			Sp->ComponentTags.Add(FName(TEXT("RoadNetMedianCenter")));
+			++SplineCount;
+		}
+	}
+
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitMedian: median strips=%s, %d centre spline(s)."),
+		bAnyMedian ? TEXT("yes") : TEXT("no"), SplineCount);
 }
 
 void URoadNetwork::CommitPerimeters(FRoadNetRebuildContext& Ctx)

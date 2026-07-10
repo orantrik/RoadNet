@@ -68,6 +68,9 @@ struct FRoadNetRebuildContext
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneSurfacePolys;
 	// §8.12 sidewalk bands, per zone (parallel to Zones).
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneSidewalkPolys;
+	// Central median strips, per zone (parallel to Zones) — raised plantable /
+	// walkable block in the carriageway gap of divided roads.
+	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMedianPolys;
 	// §8.10 lane-marking ribbons, per zone (parallel to Zones), split by colour.
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMarkingWhitePolys;
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMarkingYellowPolys;
@@ -183,6 +186,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions")
 	TObjectPtr<UStaticMesh> SignalMesh;
 
+	// ---- median (§ divided road) ------------------------------------------
+	// Material for the raised median strip. If unset a flat green (plantable)
+	// colour is used so the median is visible.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Median")
+	TObjectPtr<UMaterialInterface> MedianMaterial;
+
 	// ---- junctions (§10.8/§10.9) ------------------------------------------
 	// Morphological "close" radius (cm) applied to the merged carriageway. Larger
 	// = rounder junction corners / more gap bridging. Adjustable live with the
@@ -217,6 +226,22 @@ public:
 
 	// Number of lanes on a road (for HUD/debug).
 	int32 GetLaneCount(int32 RoadIdx) const;
+
+	// ---- median editing (RoadNet Draw hotkeys) ----------------------------
+	// Toggle the central median on a road. Returns the new bMedian state.
+	// Caller triggers Rebuild().
+	bool ToggleMedian(int32 RoadIdx);
+
+	// Cycle the median edge treatment (Plantable → CurbOnly → SidewalkAndCurb).
+	// Turns the median on if it was off. Returns the new edge treatment.
+	ERoadNetMedianEdge CycleMedianEdge(int32 RoadIdx, int32 Dir);
+
+	// Nudge the median width (cm, clamped). Returns the new width.
+	float AdjustMedianWidth(int32 RoadIdx, float DeltaCm);
+
+	// Median state accessors (for HUD/debug).
+	bool IsMedian(int32 RoadIdx) const;
+	float GetMedianWidth(int32 RoadIdx) const;
 
 	// Clear all roads (e.g. before a fresh OSM import).
 	void ResetRoads();
@@ -290,6 +315,8 @@ private:
 	TWeakObjectPtr<AActor> GeoLaneOddActor;       // §12.1 per-lane ribbons (odd bank)
 	TWeakObjectPtr<AActor> GeoCurbActor;          // §8.12 kerb-line HISM (road/sidewalk edge)
 	TWeakObjectPtr<AActor> GeoSignalActor;        // § junction traffic-signal placeholder HISM
+	TWeakObjectPtr<AActor> GeoMedianActor;        // § raised median strip mesh
+	TWeakObjectPtr<AActor> GeoMedianSplineActor;  // § median centre splines (PCG tree scatter)
 
 	// Persistent per-junction marking overrides (keyed by location).
 	UPROPERTY()
@@ -313,6 +340,7 @@ private:
 	void CommitGeometry(FRoadNetRebuildContext& Ctx);            // §10.15 mesh + spawn
 	void CommitCurbs(FRoadNetRebuildContext& Ctx);               // §8.12 kerb-line HISM
 	void CommitJunctionSignals(FRoadNetRebuildContext& Ctx);     // § signal placeholder HISM
+	void CommitMedian(FRoadNetRebuildContext& Ctx);              // § raised median strip + centre splines
 	void CommitPerimeters(FRoadNetRebuildContext& Ctx);          // §8.4 spline loops for PCG
 	void CommitLaneGraph(FRoadNetRebuildContext& Ctx);           // §12.2 lane-graph splines for PCG
 

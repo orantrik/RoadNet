@@ -541,6 +541,84 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
 			}
+
+			// Median editing (draft not in progress):
+			//   'M'         → toggle the central median on the target road
+			//   'Shift+M'   → cycle median edge (Plantable → CurbOnly → Sidewalk+Curb)
+			//   ',' / '.'   → narrow / widen the median (Shift = ×5 step)
+			// Targets the selected road, else the nearest road under the cursor.
+			if (Key == EKeys::M || Key == EKeys::Comma || Key == EKeys::Period)
+			{
+				URoadNetwork* Net = GetNetwork();
+				if (!Net) { return true; }
+
+				int32 Target = SelRoad;
+				if (Target == INDEX_NONE && ViewportClient)
+				{
+					FVector Hit;
+					if (LineTraceCursor(ViewportClient, Hit))
+					{
+						const TArray<FRoadDef>& Roads = Net->GetRoads();
+						double BestD2 = FMath::Square(2000.0); // 20 m pick radius
+						for (int32 r = 0; r < Roads.Num(); ++r)
+						{
+							const FRoadDef& Rd = Roads[r];
+							for (int32 i = 0; i + 1 < Rd.Ref.Num(); ++i)
+							{
+								const FVector C = FMath::ClosestPointOnSegment(Hit, Rd.Ref[i], Rd.Ref[i + 1]);
+								const double D2 = FVector::DistSquaredXY(Hit, C);
+								if (D2 < BestD2) { BestD2 = D2; Target = r; }
+							}
+						}
+					}
+				}
+				if (Target == INDEX_NONE)
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: no road under cursor — hover a road, then M (median) / , . (width)"));
+					}
+					return true;
+				}
+
+				const bool bShift = Viewport &&
+					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
+
+				const FScopedTransaction Transaction(LOCTEXT("RoadNetMedian", "Edit RoadNet Median"));
+				if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+
+				FString Msg;
+				if (Key == EKeys::M)
+				{
+					if (bShift)
+					{
+						const ERoadNetMedianEdge E = Net->CycleMedianEdge(Target, +1);
+						const TCHAR* EN = (E == ERoadNetMedianEdge::Plantable) ? TEXT("Plantable")
+							: (E == ERoadNetMedianEdge::CurbOnly) ? TEXT("Curb only") : TEXT("Sidewalk + Curb");
+						Msg = FString::Printf(TEXT("RoadNet: median edge = %s"), EN);
+					}
+					else
+					{
+						const bool bOn = Net->ToggleMedian(Target);
+						Msg = FString::Printf(TEXT("RoadNet: median %s on road %d  ( Shift+M edge, , . width )"),
+							bOn ? TEXT("ON") : TEXT("OFF"), Target);
+					}
+				}
+				else // ',' narrow / '.' widen
+				{
+					const float Step = (bShift ? 100.f : 20.f) * (Key == EKeys::Period ? 1.f : -1.f);
+					const float W = Net->AdjustMedianWidth(Target, Step);
+					Msg = FString::Printf(TEXT("RoadNet: median width = %.0f cm"), W);
+				}
+
+				SelRoad = Target;
+				SelPoint = INDEX_NONE;
+				Net->Rebuild();
+				if (GEngine) { GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan, Msg); }
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
 		}
 	}
 	return FEdMode::InputKey(ViewportClient, Viewport, Key, Event);

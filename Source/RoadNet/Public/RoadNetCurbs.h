@@ -45,4 +45,15 @@ namespace RoadNetCurbs
 		double SpacingCm,
 		double ZLiftCm,
 		TArray<FCurbInstance>& OutInstances);
+
+	// Place kerb pieces along an OPEN polyline (e.g. a median edge). Same
+	// adaptive, curve-hugging chunking as the boundary path; Z from the height
+	// field. Sidewalk-side orientation matches the polyline's travel LEFT.
+	// Instances are APPENDED to OutInstances.
+	ROADNET_API void BuildCurbInstancesAlongLine(
+		const TArray<FVector>& Line,
+		const RoadNetMesh::FCenterlineHeightField& Height,
+		double SpacingCm,
+		double ZLiftCm,
+		TArray<FCurbInstance>& OutInstances);
 }

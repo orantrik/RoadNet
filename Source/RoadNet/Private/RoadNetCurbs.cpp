@@ -181,4 +181,19 @@ namespace RoadNetCurbs
 			}
 		}
 	}
+
+	void BuildCurbInstancesAlongLine(
+		const TArray<FVector>& Line,
+		const FCenterlineHeightField& Height,
+		double SpacingCm,
+		double ZLiftCm,
+		TArray<FCurbInstance>& OutInstances)
+	{
+		if (Line.Num() < 2) { return; }
+		SpacingCm = FMath::Max(50.0, SpacingCm);
+		TArray<FVector2D> Pts;
+		Pts.Reserve(Line.Num());
+		for (const FVector& P : Line) { Pts.Emplace(P.X, P.Y); }
+		EmitRun(Pts, Height, SpacingCm, ZLiftCm, OutInstances);
+	}
 }
