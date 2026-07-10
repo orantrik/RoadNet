@@ -112,7 +112,7 @@ namespace RoadNetSurface
 	}
 
 	bool BuildPathRibbon(const TArray<FVector>& Center, double HalfWidth,
-		TArray<FGeneralPolygon2d>& Out, double MaxStepsPerRadian)
+		TArray<FGeneralPolygon2d>& Out, double MaxStepsPerRadian, bool bRoundEnds)
 	{
 		Out.Reset();
 		if (Center.Num() < 2 || HalfWidth < 1.0) { return false; }
@@ -136,7 +136,7 @@ namespace RoadNetSurface
 		Off.Offset = HalfWidth;
 		Off.MiterLimit = 2.0;
 		Off.JoinType = EPolygonOffsetJoinType::Round;
-		Off.EndType = EPolygonOffsetEndType::Butt;
+		Off.EndType = bRoundEnds ? EPolygonOffsetEndType::Round : EPolygonOffsetEndType::Butt;
 		Off.MaxStepsPerRadian = (MaxStepsPerRadian > 0.0) ? MaxStepsPerRadian : 16.0;
 		if (!Off.ComputeResult()) { return false; }
 
@@ -178,6 +178,14 @@ namespace RoadNetSurface
 		if (Subject.Num() == 0) { return true; }
 		if (Clip.Num() == 0) { Out = Subject; return true; }
 		return PolygonsDifference(Subject, Clip, Out);
+	}
+
+	bool Union(const TArray<FGeneralPolygon2d>& Polys, TArray<FGeneralPolygon2d>& Out)
+	{
+		Out.Reset();
+		if (Polys.Num() == 0) { return true; }
+		if (Polys.Num() == 1) { Out = Polys; return true; }
+		return PolygonsUnion(Polys, Out, /*bCopyInputOnFailure*/true);
 	}
 
 	double TotalArea(const TArray<FGeneralPolygon2d>& Polys)

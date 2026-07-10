@@ -64,9 +64,10 @@ enum class ERoadNetJunctionPreset : uint8
 UENUM(BlueprintType)
 enum class ERoadNetMedianEdge : uint8
 {
-	Plantable,       // raised soil strip + centre spline for PCG tree scatter
-	CurbOnly,        // raised soil strip with a kerb on each edge
-	SidewalkAndCurb  // walkable (concrete) raised median with kerbs on each edge
+	Plantable,          // raised soil strip + centre spline for PCG tree scatter
+	CurbOnly,           // raised soil strip with a kerb on each edge
+	SidewalkAndCurb,    // walkable (concrete) raised median with kerbs on each edge
+	PlantableWalkCurb   // outer kerb + walkable concrete band + kerbed green planter centre
 };
 
 // Persistent per-junction override, keyed by world location and matched by
@@ -82,6 +83,11 @@ struct ROADNET_API FRoadNetJunctionConfig
 
 	UPROPERTY()
 	ERoadNetJunctionPreset Preset = ERoadNetJunctionPreset::None;
+
+	// Raise curbed grass channelizing islands in this junction's unused corner
+	// areas (the pavement wedges between adjacent arms). Toggled per junction.
+	UPROPERTY()
+	bool bCornerIslands = false;
 };
 
 // Lane semantic type — mirrors RoadBLD ELaneType (minus deprecated None; our

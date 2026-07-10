@@ -50,9 +50,18 @@ namespace RoadNetCurbs
 				const FVector2D M = 0.5 * (S + E);
 				FVector2D Dir = E - S;
 				if (!Dir.Normalize()) { return; }
+
+				// Sample terrain at BOTH ends so the piece follows the longitudinal
+				// grade instead of sitting flat at its mid-height (which staircases
+				// on a slope). Seat it at the mean height and pitch it to span the
+				// end-to-end rise over its horizontal length.
+				const double Zs = Height.SampleHeight(S.X, S.Y, Fallback) + ZLiftCm;
+				const double Ze = Height.SampleHeight(E.X, E.Y, Fallback) + ZLiftCm;
+
 				FCurbInstance CI;
-				CI.Location = FVector(M.X, M.Y, Height.SampleHeight(M.X, M.Y, Fallback) + ZLiftCm);
+				CI.Location = FVector(M.X, M.Y, 0.5 * (Zs + Ze));
 				CI.YawDeg   = (float)FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X));
+				CI.PitchDeg = (float)FMath::RadiansToDegrees(FMath::Atan2(Ze - Zs, L));
 				CI.LengthCm = (float)L;
 				Out.Add(CI);
 			};

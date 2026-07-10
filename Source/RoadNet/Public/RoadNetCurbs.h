@@ -27,8 +27,9 @@ namespace RoadNetCurbs
 	// −Y (road side) reads correctly all the way round.
 	struct FCurbInstance
 	{
-		FVector Location = FVector::ZeroVector;  // road-top height at the kerb line
-		float   YawDeg   = 0.f;                  // travel direction (degrees)
+		FVector Location = FVector::ZeroVector;  // kerb-line point, seated at the piece's mean height
+		float   YawDeg   = 0.f;                  // travel direction in plan (degrees)
+		float   PitchDeg = 0.f;                  // longitudinal grade of this piece (+ climbs along travel)
 		float   LengthCm = 100.f;                // along-run length this piece spans
 	};
 

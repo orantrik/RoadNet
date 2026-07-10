@@ -32,6 +32,46 @@ namespace
 	constexpr double kRoadZLiftCm       = 12.0;    // lift above landscape (anti z-fight)
 	constexpr double kMaxZGapCm         = 350.0;   // §10.12 at-grade crossing threshold
 	constexpr double kEndpointWeldCm    = 400.0;   // §10.7 spatial endpoint weld radius
+
+	// Trim Dist (cm, XY arc length) off one end of a polyline, moving the end
+	// vertex inward and dropping any fully-consumed vertices. Used to pull a
+	// median back from a junction so its rounded nose sits short of the crossing.
+	void TrimPolylineEnd(TArray<FVector>& Pts, bool bFromStart, double Dist)
+	{
+		if (Pts.Num() < 2 || Dist <= 0.0) { return; }
+		if (bFromStart)
+		{
+			double Acc = 0.0; int32 i = 0;
+			for (; i + 1 < Pts.Num(); ++i)
+			{
+				const double Seg = FVector::Dist2D(Pts[i], Pts[i + 1]);
+				if (Acc + Seg >= Dist)
+				{
+					const double T = (Dist - Acc) / FMath::Max(Seg, 1.0e-3);
+					Pts[i] = FMath::Lerp(Pts[i], Pts[i + 1], T);
+					break;
+				}
+				Acc += Seg;
+			}
+			if (i > 0) { Pts.RemoveAt(0, i); }
+		}
+		else
+		{
+			double Acc = 0.0; int32 i = Pts.Num() - 1;
+			for (; i - 1 >= 0; --i)
+			{
+				const double Seg = FVector::Dist2D(Pts[i], Pts[i - 1]);
+				if (Acc + Seg >= Dist)
+				{
+					const double T = (Dist - Acc) / FMath::Max(Seg, 1.0e-3);
+					Pts[i] = FMath::Lerp(Pts[i], Pts[i - 1], T);
+					break;
+				}
+				Acc += Seg;
+			}
+			if (i < Pts.Num() - 1) { Pts.RemoveAt(i + 1, Pts.Num() - 1 - i); }
+		}
+	}
 }
 
 int32 URoadNetwork::AddRoad(const FRoadDef& Road)
@@ -171,7 +211,7 @@ ERoadNetMedianEdge URoadNetwork::CycleMedianEdge(int32 RoadIdx, int32 Dir)
 	if (!Roads.IsValidIndex(RoadIdx)) { return ERoadNetMedianEdge::Plantable; }
 	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
 	L.bMedian = true;   // cycling edge implies a median
-	constexpr int32 N = 3; // Plantable, CurbOnly, SidewalkAndCurb
+	constexpr int32 N = 4; // Plantable, CurbOnly, SidewalkAndCurb, PlantableWalkCurb
 	int32 V = ((int32)L.MedianEdge + (Dir >= 0 ? 1 : N - 1)) % N;
 	L.MedianEdge = (ERoadNetMedianEdge)V;
 	return L.MedianEdge;
@@ -242,6 +282,7 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified)
 	BuildSurfaceUnion(Ctx);       // §10.9 Clipper2 boolean-union per zone
 	const double tSurface = Now(); Trace(TEXT("surface"), tSurface - tZones);
 	BuildJunctionMarkings(Ctx);   // §2 junction paint (stop/crosswalk) + signals
+	BuildJunctionIslands(Ctx);    // § corner channelizing grass islands (per-junction)
 	const double tJunc = Now();    Trace(TEXT("junctionmarks"), tJunc - tSurface);
 	BuildPerimeterLoops(Ctx);     // §10.11 perimeter loops (PCG export)
 	const double tPerim = Now();   Trace(TEXT("perimeters"), tPerim - tJunc);
@@ -508,6 +549,8 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 	Ctx.ZoneJunctionClip.SetNum(Ctx.Zones.Num());
 	Ctx.ZoneMedianPolys.Reset();
 	Ctx.ZoneMedianPolys.SetNum(Ctx.Zones.Num());
+	Ctx.ZoneMedianWalkPolys.Reset();
+	Ctx.ZoneMedianWalkPolys.SetNum(Ctx.Zones.Num());
 	Ctx.SurfacePolys.Reset();
 	Ctx.SidewalkPolys.Reset();
 
@@ -777,22 +820,124 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 			}
 		}
 
-		// ---- central median strips (§ divided road) ---------------------------
-		// A raised block filling each median road's carriageway gap. Built by
-		// thickening the reference line by the median half-width, so it tracks
-		// curves and sits between the two carriageways.
-		for (int32 RoadIdx : ZoneRoads)
+		// ---- central median islands (§ divided road) -------------------------
+		// A raised grass island filling the carriageway gap: green fill bordered
+		// by a constant-width kerb (emitted in CommitCurbs from this outline).
+		// The reference line is split into runs OUTSIDE the junction region and
+		// each run is pulled back + capped with a rounded nose, so the island
+		// closes cleanly short of every intersection instead of ploughing
+		// through. Routed to the soil (grass) or walkable (concrete) layer.
 		{
-			if (!Roads.IsValidIndex(RoadIdx) || !Roads[RoadIdx].Lanes.bMedian) { continue; }
-			const FRoadCurves* C = Ctx.Curves.Find(RoadIdx);
-			if (!C || C->Sampled.Num() < 2) { continue; }
-			const double MedianHalf = (double)Roads[RoadIdx].Lanes.MedianHalfCm();
-			if (MedianHalf < 10.0) { continue; }
-			TArray<UE::Geometry::FGeneralPolygon2d> Strip;
-			if (RoadNetSurface::BuildPathRibbon(C->Sampled, MedianHalf, Strip))
+			using namespace UE::Geometry;
+			const TArray<FGeneralPolygon2d>& Clip = Ctx.ZoneJunctionClip[z];
+			auto InClip = [&Clip](const FVector& P)
 			{
-				Ctx.ZoneMedianPolys[z].Append(MoveTemp(Strip));
+				const FVector2d Q(P.X, P.Y);
+				for (const FGeneralPolygon2d& GP : Clip) { if (GP.Contains(Q)) { return true; } }
+				return false;
+			};
+			for (int32 RoadIdx : ZoneRoads)
+			{
+				if (!Roads.IsValidIndex(RoadIdx) || !Roads[RoadIdx].Lanes.bMedian) { continue; }
+				const FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+				const FRoadCurves* C = Ctx.Curves.Find(RoadIdx);
+				if (!C || C->Sampled.Num() < 2) { continue; }
+				const double MedianHalf = (double)L.MedianHalfCm();
+				if (MedianHalf < 10.0) { continue; }
+				const double Pullback = MedianHalf + 60.0;   // nose clearance from junction
+
+				const TArray<FVector>& S = C->Sampled;
+				const ERoadNetMedianEdge Edge = L.MedianEdge;
+				const bool bWalk = (Edge == ERoadNetMedianEdge::SidewalkAndCurb);
+
+				// PlantableWalkCurb builds a concentric island: an outer concrete
+				// walk band (donut) + a kerbed green planter in the centre. Only
+				// attempt it if the median is wide enough for a real walk band
+				// plus a planter; otherwise fall back to a plain concrete median.
+				constexpr double kMedianWalkBandCm   = 130.0; // concrete walk band width
+				constexpr double kMinPlanterHalfCm   = 40.0;  // min planter half-width
+				const bool bWalkPlanter = (Edge == ERoadNetMedianEdge::PlantableWalkCurb) &&
+					(MedianHalf - kMedianWalkBandCm >= kMinPlanterHalfCm);
+
+				TArray<FGeneralPolygon2d>& Dst = bWalk ? Ctx.ZoneMedianWalkPolys[z] : Ctx.ZoneMedianPolys[z];
+
+				int32 i = 0;
+				while (i < S.Num())
+				{
+					while (i < S.Num() && InClip(S[i])) { ++i; }
+					const int32 RunStart = i;
+					while (i < S.Num() && !InClip(S[i])) { ++i; }
+					const int32 RunEnd = i;               // exclusive
+					if (RunEnd - RunStart < 2) { continue; }
+
+					// A run end that was cut by the junction region gets pulled back
+					// and closed with a rounded nose. A FREE road end (nothing clipped
+					// before/after) is capped flat (butt) so the median ends naturally
+					// flush with the sidewalks at the end of the road, not as a bulge.
+					const bool bStartAtJunction = (RunStart > 0);
+					const bool bEndAtJunction   = (RunEnd < S.Num());
+					const bool bRoundEnds       = bStartAtJunction || bEndAtJunction;
+
+					TArray<FVector> Run(&S[RunStart], RunEnd - RunStart);
+					if (bStartAtJunction) { TrimPolylineEnd(Run, /*fromStart*/true,  Pullback); }
+					if (bEndAtJunction)   { TrimPolylineEnd(Run, /*fromStart*/false, Pullback); }
+					if (Run.Num() < 2) { continue; }
+
+					TArray<FGeneralPolygon2d> Outer;
+					if (!RoadNetSurface::BuildPathRibbon(Run, MedianHalf, Outer, 16.0, bRoundEnds))
+					{
+						continue;
+					}
+
+					if (bWalkPlanter)
+					{
+						// Inner green planter (matching end caps, inset by the band).
+						TArray<FGeneralPolygon2d> Inner;
+						const bool bInner = RoadNetSurface::BuildPathRibbon(
+							Run, MedianHalf - kMedianWalkBandCm, Inner, 16.0, bRoundEnds);
+
+						// Concrete walk = outer MINUS planter → a curbed ring band.
+						TArray<FGeneralPolygon2d> Band;
+						if (bInner && Inner.Num() > 0 &&
+							RoadNetSurface::Difference(Outer, Inner, Band) && Band.Num() > 0)
+						{
+							Ctx.ZoneMedianWalkPolys[z].Append(MoveTemp(Band));
+							Ctx.ZoneMedianPolys[z].Append(MoveTemp(Inner)); // green centre
+						}
+						else
+						{
+							// Planter failed/degenerate → keep the whole island as walk.
+							Ctx.ZoneMedianWalkPolys[z].Append(MoveTemp(Outer));
+						}
+					}
+					else
+					{
+						Dst.Append(MoveTemp(Outer));
+					}
+				}
 			}
+		}
+
+		// Safety net: subtract the junction region from the finished median polys
+		// on EVERY side. The run-split + pull-back already keeps the rounded nose
+		// clear of the junction, but coarse centreline sampling can let the
+		// point-in-polygon split miss one approach, leaving the median poking into
+		// the crossing on that side. This boolean clip guarantees symmetric
+		// clearance (it is a no-op where the nose is already pulled back).
+		if (Ctx.ZoneJunctionClip[z].Num() > 0)
+		{
+			using namespace UE::Geometry;
+			auto ClipToJunction = [&](TArray<FGeneralPolygon2d>& Polys)
+			{
+				if (Polys.Num() == 0) { return; }
+				TArray<FGeneralPolygon2d> Trimmed;
+				if (RoadNetSurface::Difference(Polys, Ctx.ZoneJunctionClip[z], Trimmed))
+				{
+					Polys = MoveTemp(Trimmed);
+				}
+			};
+			ClipToJunction(Ctx.ZoneMedianPolys[z]);
+			ClipToJunction(Ctx.ZoneMedianWalkPolys[z]);
 		}
 
 		// ---- lane markings (§8.10): per-road stripes within this zone ----------
@@ -985,7 +1130,7 @@ int32 URoadNetwork::CommitLayer(
 	TWeakObjectPtr<AActor>& ActorPtr, const TCHAR* Label,
 	const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
 	double ExtraLiftCm, FColor Color, UMaterialInterface* Material, FRoadNetRebuildContext& Ctx,
-	bool bBakeLaneColors)
+	bool bBakeLaneColors, bool bWorldUVs)
 {
 	UWorld* World = WorldPtr.Get();
 	if (!World) { return 0; }
@@ -1045,7 +1190,8 @@ int32 URoadNetwork::CommitLayer(
 		Tris += RoadNetMesh::AppendSurfaceMesh(
 			ZonePolys[z], CenterLines, kRoadZLiftCm + ExtraLiftCm, Mesh,
 			bBake ? &ShadeFn : nullptr,
-			/*bComputeUVs*/true, /*UVUnitCm*/100.0, /*bGradientNormals*/true);
+			/*bComputeUVs*/true, /*UVUnitCm*/100.0, /*bGradientNormals*/true,
+			/*bWorldUVs*/bWorldUVs);
 	}
 
 	if (Tris == 0) { return 0; }
@@ -1072,27 +1218,32 @@ int32 URoadNetwork::CommitLayer(
 	{
 		Comp->SetMesh(MoveTemp(Mesh));
 
+		// Render every road element two-sided so thin ribbons / island edges and
+		// any downward-facing triangles are never culled to a hole.
+		Comp->SetTwoSided(true);
+
 		// Keep the assigned material in sync every rebuild (cheap, idempotent).
 		if (Material) { Comp->SetMaterial(0, Material); }
 
-		// Choose the display mode ONCE, when the actor is first created. On later
-		// rebuilds (e.g. after adding a lane) we deliberately leave it alone so a
-		// manual Color Override chosen in the details panel isn't reverted.
-		if (bNewActor)
+		if (Material)
 		{
-			if (Material)
-			{
-				// Real material assigned: show it directly (no colour tint).
-				Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::None);
-			}
-			else if (bBake)
+			// A real material ALWAYS wins: force Color Override to None every
+			// rebuild, so assigning a default material re-skins the layer and
+			// clears any tint — whether it was Constant OR baked VertexColors.
+			Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::None);
+		}
+		else if (bNewActor)
+		{
+			// No material: pick the visible fallback ONCE, on creation, so a
+			// manual Color Override chosen later in the details panel is kept.
+			if (bBake)
 			{
 				// Baked per-lane shading lives in the mesh vertex colours.
 				Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::VertexColors);
 			}
 			else
 			{
-				// No material: flat colour so the layer is visible.
+				// Flat colour so the layer is visible.
 				Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::Constant);
 				Comp->SetConstantOverrideColor(Color);
 			}
@@ -1264,27 +1415,55 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 			CurbSpacingCm, kRoadZLiftCm, Insts);
 	}
 
-	// Median-edge kerbs (CurbOnly / SidewalkAndCurb): a kerb line on each side of
-	// the median gap, oriented so its raised face points at the carriageway.
-	for (int32 r = 0; r < Roads.Num(); ++r)
+	// Median-island kerbs: a constant-width kerb wrapping ONLY the OUTER perimeter
+	// of each island (the carriageway side). We union the grass + concrete-band
+	// polygons per zone and trace just the union's outer ring, so there is never
+	// an inner kerb between the grass and its sidewalk band — the grass meets the
+	// walk flush. The outline is already junction-clipped and round-capped, so the
+	// kerb follows the nose and stops with the strip. Walking the ring counter-
+	// clockwise puts the carriageway on the kerb's right (what the builder wants).
+	for (int32 z = 0; z < Ctx.Zones.Num(); ++z)
 	{
-		const FRoadNetLaneSpec& L = Roads[r].Lanes;
-		if (!L.bMedian || L.MedianEdge == ERoadNetMedianEdge::Plantable) { continue; }
-		const FRoadCurves* C = Ctx.Curves.Find(r);
-		if (!C || C->Sampled.Num() < 2) { continue; }
-		const double MedianHalf = (double)L.MedianHalfCm();
-		if (MedianHalf < 10.0) { continue; }
+		const bool bHasSoil = Ctx.ZoneMedianPolys.IsValidIndex(z)     && Ctx.ZoneMedianPolys[z].Num()     > 0;
+		const bool bHasWalk = Ctx.ZoneMedianWalkPolys.IsValidIndex(z) && Ctx.ZoneMedianWalkPolys[z].Num() > 0;
+		if (!bHasSoil && !bHasWalk) { continue; }
 
-		TArray<const TArray<FVector>*> CL; CL.Add(&C->Sampled);
+		TArray<const TArray<FVector>*> CenterLines;
+		for (int32 RoadIdx : Ctx.Zones[z])
+		{
+			if (const FRoadCurves* C = Ctx.Curves.Find(RoadIdx)) { CenterLines.Add(&C->Sampled); }
+		}
 		RoadNetMesh::FCenterlineHeightField Field;
-		Field.Build(CL);
+		Field.Build(CenterLines);
 
-		TArray<FVector> RightEdge, LeftEdge;
-		RoadNetMath::OffsetPolyline(C->Sampled, +MedianHalf, RightEdge);
-		RoadNetMath::OffsetPolyline(C->Sampled, -MedianHalf, LeftEdge);
-		Algo::Reverse(RightEdge);  // flip so the +side kerb also faces the carriageway
-		RoadNetCurbs::BuildCurbInstancesAlongLine(RightEdge, Field, CurbSpacingCm, kRoadZLiftCm, Insts);
-		RoadNetCurbs::BuildCurbInstancesAlongLine(LeftEdge,  Field, CurbSpacingCm, kRoadZLiftCm, Insts);
+		// Merge grass + walk band into the full island footprint(s).
+		TArray<UE::Geometry::FGeneralPolygon2d> Island;
+		{
+			TArray<UE::Geometry::FGeneralPolygon2d> All;
+			if (bHasSoil) { All.Append(Ctx.ZoneMedianPolys[z]); }
+			if (bHasWalk) { All.Append(Ctx.ZoneMedianWalkPolys[z]); }
+			if (!RoadNetSurface::Union(All, Island)) { Island = MoveTemp(All); }
+		}
+
+		for (const UE::Geometry::FGeneralPolygon2d& Poly : Island)
+		{
+			const UE::Geometry::FPolygon2d& Outer = Poly.GetOuter();
+			const TArray<FVector2d>& V = Outer.GetVertices();
+			const int32 N = V.Num();
+			if (N < 3) { continue; }
+			TArray<FVector> Ring;
+			Ring.Reserve(N + 1);
+			// Ensure CCW so the kerb face turns outward toward the carriageway.
+			const bool bCCW = (Outer.SignedArea() > 0.0);
+			for (int32 v = 0; v < N; ++v)
+			{
+				const FVector2d& P = V[bCCW ? v : (N - 1 - v)];
+				Ring.Add(FVector(P.X, P.Y, 0.0));
+			}
+			const FVector First = Ring[0];   // copy out: Add() may reallocate
+			Ring.Add(First);                 // close the loop
+			RoadNetCurbs::BuildCurbInstancesAlongLine(Ring, Field, CurbSpacingCm, kRoadZLiftCm, Insts);
+		}
 	}
 
 	if (Insts.Num() == 0) { Retire(); return; }
@@ -1371,12 +1550,21 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 		const FVector Scale = bLongIsX ? FVector(sLong, sWide, sTall) : FVector(sWide, sLong, sTall);
 		const float Yaw = CI.YawDeg + (bLongIsX ? 0.f : 90.f) + (float)kCurbYawOffsetDeg;
 
+		// Tilt the piece to follow the longitudinal grade. Applied in WORLD space
+		// about the horizontal axis perpendicular to travel, so the whole oriented
+		// kerb (whatever its local long axis) rotates as one — its ends then land
+		// on the sloped ground instead of the run staircasing. Composed AFTER the
+		// in-plane yaw (Q = pitch * yaw).
+		const double PlaceYawRad = FMath::DegreesToRadians((double)CI.YawDeg);
+		const FVector PitchAxis(FMath::Sin(PlaceYawRad), -FMath::Cos(PlaceYawRad), 0.0);
+		const FQuat QPitch(PitchAxis, FMath::DegreesToRadians((double)CI.PitchDeg));
+		const FQuat QRot = QPitch * FRotator(0.f, Yaw, 0.f).Quaternion();
+
 		// Seat the mesh's bottom-centre (in local space) onto the target world
 		// point: TransformVector applies scale+rotation only (no translation).
-		FTransform Inst(FRotator(0.f, Yaw, 0.f), FVector::ZeroVector, Scale);
+		FTransform Inst(QRot, FVector::ZeroVector, Scale);
 		const FVector AnchorWorld = Inst.TransformVector(FVector(Ctr.X, Ctr.Y, Box.Min.Z));
 
-		const double PlaceYawRad = FMath::DegreesToRadians((double)CI.YawDeg);
 		const FVector LeftN(-FMath::Sin(PlaceYawRad), FMath::Cos(PlaceYawRad), 0.0); // sidewalk side
 		const FVector Target = CI.Location + LeftN * kCurbLateralNudgeCm;
 		Inst.SetTranslation(Target - AnchorWorld);
@@ -1463,6 +1651,116 @@ ERoadNetJunctionPreset URoadNetwork::CycleJunctionPresetNear(const FVector2D& Lo
 	C.Location = Loc; // re-anchor to the live junction position
 	C.Preset = CyclePreset(C.Preset, Dir);
 	return C.Preset;
+}
+
+bool URoadNetwork::ResolveJunctionIslandsNear(const FVector2D& Loc) const
+{
+	double BestD2 = FMath::Square(kJunctionMatchCm);
+	bool bBest = false;
+	for (const FRoadNetJunctionConfig& Cfg : JunctionConfigs)
+	{
+		const double D2 = FVector2D::DistSquared(Cfg.Location, Loc);
+		if (D2 < BestD2) { BestD2 = D2; bBest = Cfg.bCornerIslands; }
+	}
+	return bBest;
+}
+
+bool URoadNetwork::ToggleJunctionIslandsNear(const FVector2D& Loc)
+{
+	Modify();
+	int32 BestIdx = INDEX_NONE;
+	double BestD2 = FMath::Square(kJunctionMatchCm);
+	for (int32 i = 0; i < JunctionConfigs.Num(); ++i)
+	{
+		const double D2 = FVector2D::DistSquared(JunctionConfigs[i].Location, Loc);
+		if (D2 < BestD2) { BestD2 = D2; BestIdx = i; }
+	}
+	if (BestIdx == INDEX_NONE)
+	{
+		FRoadNetJunctionConfig Cfg;
+		Cfg.Location = Loc;
+		BestIdx = JunctionConfigs.Add(Cfg);
+	}
+	FRoadNetJunctionConfig& C = JunctionConfigs[BestIdx];
+	C.Location = Loc; // re-anchor to the live junction position
+	C.bCornerIslands = !C.bCornerIslands;
+	return C.bCornerIslands;
+}
+
+void URoadNetwork::BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const
+{
+	using namespace UE::Geometry;
+
+	// A channelizing island is the junction PAVEMENT between two angularly
+	// adjacent arms, minus the arm corridors themselves, eroded inward so
+	// turning traffic passes around it. Built per junction (one clip polygon)
+	// and appended to the median layer so it inherits the grass mesh + kerb ring
+	// + world-planar UVs automatically. Only junctions with the toggle set emit.
+	const double Inset = FMath::Max(10.0, JunctionIslandInsetCm);
+	constexpr double kMinIslandAreaCm2 = 3.0e4; // ~3 m² — drop slivers
+
+	for (int32 z = 0; z < Ctx.ZoneJunctionClip.Num(); ++z)
+	{
+		if (!Ctx.Zones.IsValidIndex(z) || !Ctx.ZoneSurfacePolys.IsValidIndex(z)) { continue; }
+		if (Ctx.ZoneJunctionClip[z].Num() == 0 || Ctx.ZoneSurfacePolys[z].Num() == 0) { continue; }
+		if (!Ctx.ZoneMedianPolys.IsValidIndex(z)) { continue; }
+
+		// Arm corridors for this zone (each road's straight carriageway outline).
+		TArray<FGeneralPolygon2d> Arms;
+		for (int32 r : Ctx.Zones[z])
+		{
+			const FRoadCurves* C = Ctx.Curves.Find(r);
+			if (!C) { continue; }
+			FGeneralPolygon2d O;
+			if (RoadNetSurface::BuildRoadOutline(*C, O)) { Arms.Add(MoveTemp(O)); }
+		}
+		if (Arms.Num() == 0) { continue; }
+		TArray<FGeneralPolygon2d> ArmsU;
+		if (!RoadNetSurface::Union(Arms, ArmsU)) { ArmsU = MoveTemp(Arms); }
+
+		for (const FGeneralPolygon2d& GP : Ctx.ZoneJunctionClip[z])
+		{
+			const TArray<FVector2d>& OV = GP.GetOuter().GetVertices();
+			if (OV.Num() < 3) { continue; }
+			FVector2D Centre(0, 0);
+			for (const FVector2d& V : OV) { Centre += FVector2D(V.X, V.Y); }
+			Centre /= (double)OV.Num();
+			if (!ResolveJunctionIslandsNear(Centre)) { continue; }
+
+			// Pavement inside this junction = merged surface ∩ clip polygon.
+			const TArray<FGeneralPolygon2d> GPArr = { GP };
+			TArray<FGeneralPolygon2d> Paved;
+			if (!PolygonsIntersection(Ctx.ZoneSurfacePolys[z], GPArr, Paved) || Paved.Num() == 0)
+			{
+				continue;
+			}
+
+			// Corner negative space = junction pavement MINUS the arm corridors.
+			TArray<FGeneralPolygon2d> Corners;
+			if (!RoadNetSurface::Difference(Paved, ArmsU, Corners) || Corners.Num() == 0)
+			{
+				continue;
+			}
+
+			// Erode for the kerb/grass setback so the island sits off the lanes.
+			TArray<FGeneralPolygon2d> Islands;
+			if (!PolygonsOffset(-Inset, Corners, Islands, /*bCopyInputOnFailure*/false,
+					/*MiterLimit*/2.0, EPolygonOffsetJoinType::Round,
+					EPolygonOffsetEndType::Polygon, /*MaxStepsPerRadian*/16.0,
+					/*DefaultStepsPerRadianScale*/1.0e-3))
+			{
+				continue;
+			}
+
+			for (FGeneralPolygon2d& Isl : Islands)
+			{
+				if (FMath::Abs(Isl.GetOuter().SignedArea()) >= kMinIslandAreaCm2)
+				{
+					Ctx.ZoneMedianPolys[z].Add(MoveTemp(Isl));
+				}
+			}
+		}
+	}
 }
 
 void URoadNetwork::BuildJunctionMarkings(FRoadNetRebuildContext& Ctx)
@@ -1718,19 +2016,34 @@ void URoadNetwork::CommitMedian(FRoadNetRebuildContext& Ctx)
 	UWorld* World = WorldPtr.Get();
 	if (!World) { return; }
 
-	// Mesh the raised median strips (green plantable colour by default). Reuse
-	// CommitLayer so the strip drapes on terrain with a curb-height lift.
-	bool bAnyMedian = false;
-	for (const TArray<UE::Geometry::FGeneralPolygon2d>& Z : Ctx.ZoneMedianPolys)
+	// Mesh the raised median strips. Reuse CommitLayer so the strip drapes on
+	// terrain with a curb-height lift. Two layers: soil (green, plantable) and
+	// walkable (concrete, SidewalkAndCurb → uses the sidewalk material).
+	auto AnyPolys = [](const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& Z)
 	{
-		if (Z.Num() > 0) { bAnyMedian = true; break; }
-	}
-	if (bAnyMedian)
+		for (const TArray<UE::Geometry::FGeneralPolygon2d>& P : Z) { if (P.Num() > 0) { return true; } }
+		return false;
+	};
+
+	const bool bAnySoil = AnyPolys(Ctx.ZoneMedianPolys);
+	if (bAnySoil)
 	{
 		CommitLayer(GeoMedianActor, TEXT("RoadNet_Median"), Ctx.ZoneMedianPolys,
-			/*ExtraLift*/15.0, FColor(70, 110, 60), MedianMaterial, Ctx);
+			/*ExtraLift*/15.0, FColor(70, 110, 60), MedianMaterial, Ctx,
+			/*bBakeLaneColors*/false, /*bWorldUVs*/true);
 	}
 	else if (AActor* A = GeoMedianActor.Get()) { A->Destroy(); GeoMedianActor = nullptr; }
+
+	const bool bAnyWalk = AnyPolys(Ctx.ZoneMedianWalkPolys);
+	if (bAnyWalk)
+	{
+		CommitLayer(GeoMedianWalkActor, TEXT("RoadNet_MedianWalk"), Ctx.ZoneMedianWalkPolys,
+			/*ExtraLift*/15.0, FColor(165, 162, 155), SidewalkMaterial, Ctx,
+			/*bBakeLaneColors*/false, /*bWorldUVs*/true);
+	}
+	else if (AActor* A = GeoMedianWalkActor.Get()) { A->Destroy(); GeoMedianWalkActor = nullptr; }
+
+	const bool bAnyMedian = bAnySoil || bAnyWalk;
 
 	// Centre planting splines (one open spline per median road) for PCG tree
 	// scatter. Tagged for discovery; lifted to the median top.

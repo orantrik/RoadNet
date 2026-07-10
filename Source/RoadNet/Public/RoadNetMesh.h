@@ -59,6 +59,11 @@ namespace RoadNetMesh
 	// gradient of the (blended) height field rather than averaged from the jittery
 	// Delaunay triangles — smooth, grade-following normals with no facet blotches.
 	// When set, the caller must NOT also run FinalizeNormals (it would overwrite).
+	//
+	// If bWorldUVs, UVs are world-planar (U = X, V = Y, scaled by 1/UVUnitCm)
+	// instead of centreline offset/arc-length. Use for grass islands (medians)
+	// so a tiling ground texture reads world-aligned with no mirror seam down the
+	// centre (offset UVs flip sign across the reference line = a mirrored look).
 	ROADNET_API int32 AppendSurfaceMesh(
 		const TArray<UE::Geometry::FGeneralPolygon2d>& Polys,
 		const TArray<const TArray<FVector>*>& CenterLines,
@@ -67,7 +72,8 @@ namespace RoadNetMesh
 		const TFunction<FVector3f(double, double)>* VertexColorFn = nullptr,
 		bool bComputeUVs = false,
 		double UVUnitCm = 100.0,
-		bool bGradientNormals = false);
+		bool bGradientNormals = false,
+		bool bWorldUVs = false);
 
 	// Enable attributes and compute per-vertex normals (call once, after all
 	// zones have been appended). No-op on an empty mesh.

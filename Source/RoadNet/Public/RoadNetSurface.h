@@ -46,10 +46,13 @@ namespace RoadNetSurface
 	// bend — Clipper dissolves self-intersections, so tight curves and junction
 	// approaches never emit folded/spiky triangles. May return >1 polygon if the
 	// strip pinches. Returns false if degenerate.
+	// bRoundEnds: cap the strip ends with a semicircle (a rounded "nose",
+	// e.g. a raised median island) instead of a flat butt.
 	ROADNET_API bool BuildPathRibbon(
 		const TArray<FVector>& Center, double HalfWidth,
 		TArray<UE::Geometry::FGeneralPolygon2d>& Out,
-		double MaxStepsPerRadian = 16.0);
+		double MaxStepsPerRadian = 16.0,
+		bool bRoundEnds = false);
 
 	// Build sidewalk bands from per-road, per-side ribbons (§8.12): UNION the
 	// ribbons, then subtract the carriageway (RoadPolys) so sidewalks never sit on
@@ -65,6 +68,13 @@ namespace RoadNetSurface
 	ROADNET_API bool Difference(
 		const TArray<UE::Geometry::FGeneralPolygon2d>& Subject,
 		const TArray<UE::Geometry::FGeneralPolygon2d>& Clip,
+		TArray<UE::Geometry::FGeneralPolygon2d>& Out);
+
+	// Boolean union of a polygon set (dissolves overlaps into merged outlines +
+	// holes). Used to trace a median island's OUTER perimeter (grass + concrete
+	// band) as a single ring so kerbs wrap only the outside, never an inner seam.
+	ROADNET_API bool Union(
+		const TArray<UE::Geometry::FGeneralPolygon2d>& Polys,
 		TArray<UE::Geometry::FGeneralPolygon2d>& Out);
 
 	// Sum of |outer area| across polygons (cm^2) — for logging/QA.

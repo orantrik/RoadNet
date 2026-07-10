@@ -134,7 +134,8 @@ namespace RoadNetMesh
 		const TFunction<FVector3f(double, double)>* VertexColorFn,
 		bool bComputeUVs,
 		double UVUnitCm,
-		bool bGradientNormals)
+		bool bGradientNormals,
+		bool bWorldUVs)
 	{
 		FCenterlineHeightField Field;
 		Field.Build(CenterLines);
@@ -205,9 +206,18 @@ namespace RoadNetMesh
 
 				if (UVo)
 				{
-					const RoadNetMath::FProjectResult PR = ProjectNearest(FVector2D(P.X, P.Y));
-					UVMap[i] = UVo->AppendElement(FVector2f(
-						(float)(PR.Offset * UVScale), (float)(PR.AlongDist * UVScale)));
+					if (bWorldUVs)
+					{
+						// World-planar tiling (grass islands): no centreline mirror seam.
+						UVMap[i] = UVo->AppendElement(FVector2f(
+							(float)(P.X * UVScale), (float)(P.Y * UVScale)));
+					}
+					else
+					{
+						const RoadNetMath::FProjectResult PR = ProjectNearest(FVector2D(P.X, P.Y));
+						UVMap[i] = UVo->AppendElement(FVector2f(
+							(float)(PR.Offset * UVScale), (float)(PR.AlongDist * UVScale)));
+					}
 				}
 				if (No) { NMap[i] = No->AppendElement(GradientNormal(P.X, P.Y)); }
 			}

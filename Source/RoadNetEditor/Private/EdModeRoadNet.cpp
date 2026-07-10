@@ -542,9 +542,54 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				return true;
 			}
 
+			// Junction corner islands (draft not in progress):
+			//   'K' → toggle curbed grass channelizing islands in the corner
+			//         (negative-space) areas of the junction nearest the cursor.
+			if (Key == EKeys::K)
+			{
+				URoadNetwork* Net = GetNetwork();
+				if (!Net) { return true; }
+
+				FVector2D Loc = FVector2D::ZeroVector;
+				bool bFound = false;
+				double BestD2 = FMath::Square(3000.0); // 30 m junction pick radius
+				FVector Hit;
+				if (ViewportClient && LineTraceCursor(ViewportClient, Hit))
+				{
+					for (const URoadNetwork::FRoadNetJunctionView& V : Net->GetJunctionViews())
+					{
+						const double D2 = FVector::DistSquaredXY(Hit, V.Location);
+						if (D2 < BestD2) { BestD2 = D2; Loc = FVector2D(V.Location.X, V.Location.Y); bFound = true; }
+					}
+				}
+				if (!bFound)
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: no junction under cursor — hover a junction (3+ roads), then press K"));
+					}
+					return true;
+				}
+
+				const FScopedTransaction Transaction(LOCTEXT("RoadNetJunctionIsland", "Toggle RoadNet Junction Islands"));
+				if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+
+				const bool bOn = Net->ToggleJunctionIslandsNear(Loc);
+				Net->Rebuild();
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+						FString::Printf(TEXT("RoadNet: corner islands = %s  ( press K to toggle )"),
+							bOn ? TEXT("ON") : TEXT("OFF")));
+				}
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
+
 			// Median editing (draft not in progress):
 			//   'M'         → toggle the central median on the target road
-			//   'Shift+M'   → cycle median edge (Plantable → CurbOnly → Sidewalk+Curb)
+			//   'Shift+M'   → cycle median edge (Plantable → CurbOnly → Sidewalk+Curb → Plantable+Sidewalk+Curb)
 			//   ',' / '.'   → narrow / widen the median (Shift = ×5 step)
 			// Targets the selected road, else the nearest road under the cursor.
 			if (Key == EKeys::M || Key == EKeys::Comma || Key == EKeys::Period)
@@ -595,7 +640,9 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					{
 						const ERoadNetMedianEdge E = Net->CycleMedianEdge(Target, +1);
 						const TCHAR* EN = (E == ERoadNetMedianEdge::Plantable) ? TEXT("Plantable")
-							: (E == ERoadNetMedianEdge::CurbOnly) ? TEXT("Curb only") : TEXT("Sidewalk + Curb");
+							: (E == ERoadNetMedianEdge::CurbOnly) ? TEXT("Curb only")
+							: (E == ERoadNetMedianEdge::SidewalkAndCurb) ? TEXT("Sidewalk + Curb")
+							: TEXT("Plantable + Sidewalk + Curb");
 						Msg = FString::Printf(TEXT("RoadNet: median edge = %s"), EN);
 					}
 					else

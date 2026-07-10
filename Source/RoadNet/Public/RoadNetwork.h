@@ -68,9 +68,11 @@ struct FRoadNetRebuildContext
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneSurfacePolys;
 	// §8.12 sidewalk bands, per zone (parallel to Zones).
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneSidewalkPolys;
-	// Central median strips, per zone (parallel to Zones) — raised plantable /
-	// walkable block in the carriageway gap of divided roads.
+	// Central median strips, per zone (parallel to Zones) — raised block in the
+	// carriageway gap of divided roads. Soil = Plantable/CurbOnly (green);
+	// Walk = SidewalkAndCurb (concrete, walkable).
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMedianPolys;
+	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMedianWalkPolys;
 	// §8.10 lane-marking ribbons, per zone (parallel to Zones), split by colour.
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMarkingWhitePolys;
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMarkingYellowPolys;
@@ -207,6 +209,14 @@ public:
 		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "600.0"))
 	double JunctionClearanceCm = 60.0;
 
+	// Corner-island setback (cm): how far a channelizing island is eroded inward
+	// from the junction pavement edges, so turning traffic passes around it. The
+	// island is the corner pavement between adjacent arms; enable it per junction
+	// (RoadNet Draw: click a junction, press K).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions",
+		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "400.0"))
+	double JunctionIslandInsetCm = 90.0;
+
 	// Nudge JunctionSmoothingCm by DeltaCm (clamped ≥ 0). Returns the new value.
 	// Caller triggers Rebuild(). Wired to the [ / ] hotkeys.
 	double AdjustJunctionSmoothing(double DeltaCm);
@@ -292,6 +302,13 @@ public:
 	// triggers Rebuild().
 	ERoadNetJunctionPreset CycleJunctionPresetNear(const FVector2D& Loc, int32 Dir);
 
+	// Are corner (channelizing) islands enabled on the junction nearest Loc?
+	bool ResolveJunctionIslandsNear(const FVector2D& Loc) const;
+
+	// Toggle corner islands on the junction nearest Loc (creating an override
+	// entry if needed). Returns the new state. Caller triggers Rebuild().
+	bool ToggleJunctionIslandsNear(const FVector2D& Loc);
+
 	// Staged rebuild entry point (§10.18). Empty Modified = rebuild everything.
 	void Rebuild(TArrayView<const int32> Modified = TArrayView<const int32>());
 
@@ -315,7 +332,8 @@ private:
 	TWeakObjectPtr<AActor> GeoLaneOddActor;       // §12.1 per-lane ribbons (odd bank)
 	TWeakObjectPtr<AActor> GeoCurbActor;          // §8.12 kerb-line HISM (road/sidewalk edge)
 	TWeakObjectPtr<AActor> GeoSignalActor;        // § junction traffic-signal placeholder HISM
-	TWeakObjectPtr<AActor> GeoMedianActor;        // § raised median strip mesh
+	TWeakObjectPtr<AActor> GeoMedianActor;        // § raised median strip mesh (soil / plantable)
+	TWeakObjectPtr<AActor> GeoMedianWalkActor;    // § raised median strip mesh (concrete / walkable)
 	TWeakObjectPtr<AActor> GeoMedianSplineActor;  // § median centre splines (PCG tree scatter)
 
 	// Persistent per-junction marking overrides (keyed by location).
@@ -337,6 +355,7 @@ private:
 	void BuildLaneGraph(FRoadNetRebuildContext& Ctx) const;      // §12.2 lane connectivity
 	void BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const;    // §12.1 per-lane ribbon polys
 	void BuildJunctionMarkings(FRoadNetRebuildContext& Ctx);     // §2 junction paint + signals
+	void BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const;// § corner channelizing grass islands
 	void CommitGeometry(FRoadNetRebuildContext& Ctx);            // §10.15 mesh + spawn
 	void CommitCurbs(FRoadNetRebuildContext& Ctx);               // §8.12 kerb-line HISM
 	void CommitJunctionSignals(FRoadNetRebuildContext& Ctx);     // § signal placeholder HISM
@@ -350,6 +369,6 @@ private:
 	int32 CommitLayer(TWeakObjectPtr<AActor>& ActorPtr, const TCHAR* Label,
 		const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
 		double ExtraLiftCm, FColor Color, UMaterialInterface* Material, FRoadNetRebuildContext& Ctx,
-		bool bBakeLaneColors = false);
+		bool bBakeLaneColors = false, bool bWorldUVs = false);
 	// TODO: overlap masks (§10.10), per-road perimeter loops (§10.11), markings.
 };
