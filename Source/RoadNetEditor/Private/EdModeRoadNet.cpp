@@ -29,6 +29,30 @@ namespace
 	const FColor     kColorEditPt = FColor(120, 180, 255);
 	const FColor     kColorEditLine = FColor(90, 120, 160);
 	const FColor     kColorOsmLine = FColor(230, 150, 60);   // imported roads (selectable for lane edits)
+
+	const TCHAR* PresetName(ERoadNetJunctionPreset P)
+	{
+		switch (P)
+		{
+		case ERoadNetJunctionPreset::StopLine:         return TEXT("Stop line");
+		case ERoadNetJunctionPreset::StopAndCrosswalk: return TEXT("Stop + crosswalk");
+		case ERoadNetJunctionPreset::Signalized:       return TEXT("Signalized (stop + crosswalk + lights)");
+		case ERoadNetJunctionPreset::GiveWay:          return TEXT("Give way");
+		default:                                       return TEXT("None");
+		}
+	}
+
+	FColor PresetColor(ERoadNetJunctionPreset P)
+	{
+		switch (P)
+		{
+		case ERoadNetJunctionPreset::StopLine:         return FColor(255, 90, 90);
+		case ERoadNetJunctionPreset::StopAndCrosswalk: return FColor(255, 160, 60);
+		case ERoadNetJunctionPreset::Signalized:       return FColor(80, 220, 120);
+		case ERoadNetJunctionPreset::GiveWay:          return FColor(255, 230, 60);
+		default:                                       return FColor(150, 150, 160); // None
+		}
+	}
 }
 
 void FEdModeRoadNet::Enter()
@@ -469,6 +493,54 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
 			}
+
+			// Junction markings (draft not in progress):
+			//   'J' → cycle the treatment of the junction nearest the cursor
+			//         (None → Stop → Stop+Crosswalk → Signalized → GiveWay).
+			//         Shift+J reverses the cycle.
+			if (Key == EKeys::J)
+			{
+				URoadNetwork* Net = GetNetwork();
+				if (!Net) { return true; }
+
+				FVector2D Loc = FVector2D::ZeroVector;
+				bool bFound = false;
+				double BestD2 = FMath::Square(3000.0); // 30 m junction pick radius
+				FVector Hit;
+				if (ViewportClient && LineTraceCursor(ViewportClient, Hit))
+				{
+					for (const URoadNetwork::FRoadNetJunctionView& V : Net->GetJunctionViews())
+					{
+						const double D2 = FVector::DistSquaredXY(Hit, V.Location);
+						if (D2 < BestD2) { BestD2 = D2; Loc = FVector2D(V.Location.X, V.Location.Y); bFound = true; }
+					}
+				}
+				if (!bFound)
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: no junction under cursor — hover a junction (3+ roads), then press J"));
+					}
+					return true;
+				}
+
+				const bool bBack = Viewport &&
+					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
+
+				const FScopedTransaction Transaction(LOCTEXT("RoadNetJunctionMark", "Cycle RoadNet Junction Marking"));
+				if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+
+				const ERoadNetJunctionPreset P = Net->CycleJunctionPresetNear(Loc, bBack ? -1 : 1);
+				Net->Rebuild();
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+						FString::Printf(TEXT("RoadNet: junction marking = %s  ( J next / Shift+J prev )"), PresetName(P)));
+				}
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
 		}
 	}
 	return FEdMode::InputKey(ViewportClient, Viewport, Key, Event);
@@ -529,6 +601,14 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 						PDI->SetHitProxy(nullptr);
 					}
 				}
+			}
+
+			// Junction markers: a ring per real junction (3+ arms), coloured by
+			// its current marking preset. Hover one and press 'J' to cycle it.
+			for (const URoadNetwork::FRoadNetJunctionView& V : Net->GetJunctionViews())
+			{
+				const FColor Col = PresetColor(V.Preset);
+				PDI->DrawPoint(V.Location + FVector(0, 0, 30.f), Col, 22.f, SDPG_Foreground);
 			}
 		}
 	}

@@ -3,7 +3,10 @@
 #include "RoadNetMath.h"
 #include "RoadNetSurface.h"
 #include "RoadNetMesh.h"
+#include "RoadNetCurbs.h"
+#include "RoadNetJunctionMarks.h"
 #include "RoadNetZones.h"
+#include "Polygon2.h"
 #include "RoadNetMarkings.h"
 #include "RoadNetPerimeters.h"
 #include "RoadNetLanes.h"
@@ -14,6 +17,8 @@
 #include "DynamicMeshActor.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Components/SplineComponent.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInterface.h"
 #include "Engine/World.h"
@@ -198,8 +203,10 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified)
 	const double tZones = Now();   Trace(TEXT("zones"), tZones - tJoints);
 	BuildSurfaceUnion(Ctx);       // §10.9 Clipper2 boolean-union per zone
 	const double tSurface = Now(); Trace(TEXT("surface"), tSurface - tZones);
+	BuildJunctionMarkings(Ctx);   // §2 junction paint (stop/crosswalk) + signals
+	const double tJunc = Now();    Trace(TEXT("junctionmarks"), tJunc - tSurface);
 	BuildPerimeterLoops(Ctx);     // §10.11 perimeter loops (PCG export)
-	const double tPerim = Now();   Trace(TEXT("perimeters"), tPerim - tSurface);
+	const double tPerim = Now();   Trace(TEXT("perimeters"), tPerim - tJunc);
 	BuildLaneGraph(Ctx);          // §12.2 lane connectivity across joints
 	const double tGraph = Now();   Trace(TEXT("lanegraph"), tGraph - tPerim);
 	BuildLaneRibbons(Ctx);        // §12.1 per-lane ribbon polys
@@ -740,6 +747,45 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 				RoadNetMarkings::BuildRoadMarkings(Roads[RoadIdx], *C, White, Yellow);
 			}
 		}
+
+		// ---- white EDGE line from the carriageway boundary (§8.10) -------------
+		// Instead of per-road straight offsets (which can't turn a corner), stroke
+		// the merged surface boundary eroded inward by the edge inset. Because that
+		// boundary already rounds around junction/sidewalk corners, the edge line
+		// curves with them — and it covers hole (block) edges too.
+		{
+			using namespace UE::Geometry;
+			constexpr double kEdgeInsetCm  = 38.0;  // must match RoadNetMarkings
+			constexpr double kEdgeHalfCm   = 7.0;   // 14 cm solid line
+			TArray<FGeneralPolygon2d> Eroded;
+			if (Ctx.ZoneSurfacePolys[z].Num() > 0 &&
+				PolygonsOffset(-kEdgeInsetCm, Ctx.ZoneSurfacePolys[z], Eroded,
+					/*bCopyInputOnFailure*/false, /*MiterLimit*/2.0,
+					EPolygonOffsetJoinType::Round, EPolygonOffsetEndType::Polygon,
+					/*MaxStepsPerRadian*/16.0, /*DefaultStepsPerRadianScale*/1.0e-3))
+			{
+				auto Stroke = [&](const TArray<FVector2d>& Ring)
+				{
+					if (Ring.Num() < 3) { return; }
+					TArray<FVector> Path;
+					Path.Reserve(Ring.Num() + 1);
+					for (const FVector2d& V : Ring) { Path.Emplace(V.X, V.Y, 0.0); }
+					const FVector First = Path[0];
+					Path.Add(First); // close the loop
+					TArray<FGeneralPolygon2d> Strip;
+					if (RoadNetSurface::BuildPathRibbon(Path, kEdgeHalfCm, Strip))
+					{
+						White.Append(MoveTemp(Strip));
+					}
+				};
+				for (const FGeneralPolygon2d& GP : Eroded)
+				{
+					Stroke(GP.GetOuter().GetVertices());
+					for (const TPolygon2<double>& H : GP.GetHoles()) { Stroke(H.GetVertices()); }
+				}
+			}
+		}
+
 		// Markings end at the junction (§2.1): subtract the true edge-line junction
 		// area (plus stop-line setback), not a circular disc.
 		const TArray<UE::Geometry::FGeneralPolygon2d>& ClipRegion = Ctx.ZoneJunctionClip[z];
@@ -1100,8 +1146,446 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 		TEXT("[RoadNet] CommitGeometry: road %d tris (lane shading baked), sidewalk %d tris, markings %d white + %d yellow tris."),
 		RoadTris, WalkTris, WhiteTris, YellowTris);
 
+	// Kerb line rides on the same merged surface + sidewalk polys, so it must be
+	// committed AFTER the sidewalk band exists (it reads Ctx.ZoneSidewalkPolys).
+	CommitCurbs(Ctx);
+	CommitJunctionSignals(Ctx);   // § traffic-signal placeholders at signalized junctions
 	CommitPerimeters(Ctx);
 	CommitLaneGraph(Ctx);
+}
+
+void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
+{
+	UWorld* World = WorldPtr.Get();
+	if (!World) { return; }
+
+	// Default to the PCG kerb kit mesh; fall back to an engine cube only if that
+	// asset can't be found, so the kerb line is always visible.
+	UStaticMesh* Mesh = CurbMesh ? CurbMesh.Get() : nullptr;
+	const bool bUserMesh = (Mesh != nullptr);
+	if (!Mesh)
+	{
+		Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/PCG/Assets/Meshes/SM_Curb2.SM_Curb2"));
+	}
+	if (!Mesh)
+	{
+		Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	}
+
+	auto Retire = [this]()
+	{
+		if (AActor* A = GeoCurbActor.Get()) { A->Destroy(); }
+		GeoCurbActor = nullptr;
+	};
+
+	if (!bBuildCurbs || !Mesh)
+	{
+		Retire();
+		return;
+	}
+
+	// Gather kerb placements from every zone (each zone samples its own heights
+	// so overpasses keep their elevation).
+	TArray<RoadNetCurbs::FCurbInstance> Insts;
+	for (int32 z = 0; z < Ctx.Zones.Num(); ++z)
+	{
+		if (!Ctx.ZoneSurfacePolys.IsValidIndex(z) || !Ctx.ZoneSidewalkPolys.IsValidIndex(z)) { continue; }
+		if (Ctx.ZoneSurfacePolys[z].Num() == 0 || Ctx.ZoneSidewalkPolys[z].Num() == 0)       { continue; }
+
+		TArray<const TArray<FVector>*> CenterLines;
+		for (int32 RoadIdx : Ctx.Zones[z])
+		{
+			if (const FRoadCurves* C = Ctx.Curves.Find(RoadIdx)) { CenterLines.Add(&C->Sampled); }
+		}
+		RoadNetMesh::FCenterlineHeightField Field;
+		Field.Build(CenterLines);
+
+		RoadNetCurbs::BuildCurbInstancesForZone(
+			Ctx.ZoneSurfacePolys[z], Ctx.ZoneSidewalkPolys[z], Field,
+			CurbSpacingCm, kRoadZLiftCm, Insts);
+	}
+
+	if (Insts.Num() == 0) { Retire(); return; }
+
+	// Spawn/reuse the kerb container actor (kept across rebuilds).
+	AActor* Actor = GeoCurbActor.Get();
+	if (!Actor)
+	{
+		FActorSpawnParameters Params;
+		Params.ObjectFlags |= RF_Transient;
+		Actor = World->SpawnActor<AActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
+		if (!Actor) { return; }
+		USceneComponent* Root = NewObject<USceneComponent>(Actor, TEXT("Root"));
+		Actor->SetRootComponent(Root);
+		Root->RegisterComponent();
+#if WITH_EDITOR
+		Actor->SetActorLabel(TEXT("RoadNet_Curbs"));
+#endif
+		GeoCurbActor = Actor;
+	}
+
+	// Two alternating kerb HISMs → a zebra pattern (piece i → A / B). Each HISM
+	// carries one of the two override materials, so alternate pieces read in
+	// contrasting colours. Found/created by tag so material↔HISM stays stable
+	// across rebuilds (GetComponents order is not guaranteed).
+	auto GetOrMakeHISM = [&](FName Tag) -> UHierarchicalInstancedStaticMeshComponent*
+	{
+		TArray<UHierarchicalInstancedStaticMeshComponent*> Existing;
+		Actor->GetComponents<UHierarchicalInstancedStaticMeshComponent>(Existing);
+		for (UHierarchicalInstancedStaticMeshComponent* C : Existing)
+		{
+			if (C && C->ComponentHasTag(Tag)) { return C; }
+		}
+		UHierarchicalInstancedStaticMeshComponent* H = NewObject<UHierarchicalInstancedStaticMeshComponent>(Actor);
+		H->SetupAttachment(Actor->GetRootComponent());
+		H->SetMobility(EComponentMobility::Static);
+		H->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		H->SetCanEverAffectNavigation(false);
+		H->ComponentTags.Add(Tag);
+		H->RegisterComponent();
+		Actor->AddInstanceComponent(H);
+		return H;
+	};
+	UHierarchicalInstancedStaticMeshComponent* HA = GetOrMakeHISM(TEXT("CurbA"));
+	UHierarchicalInstancedStaticMeshComponent* HB = GetOrMakeHISM(TEXT("CurbB"));
+	if (!HA || !HB) { return; }
+
+	for (UHierarchicalInstancedStaticMeshComponent* H : { HA, HB })
+	{
+		H->ClearInstances();
+		H->SetStaticMesh(Mesh);
+	}
+	if (CurbMaterial0) { HA->SetMaterial(0, CurbMaterial0); }
+	if (CurbMaterial1) { HB->SetMaterial(0, CurbMaterial1); }
+
+	// ---- fit SM_Curb2 onto the kerb line ----------------------------------
+	// SM_Curb2 needs a 180° yaw so its raised face turns toward the road; we
+	// also scale it to a target section (height/width) and seat its bottom-centre
+	// on the kerb line, nudged toward the sidewalk so the road face meets the
+	// carriageway edge. Tunables are local so this stays a Live-Coding change.
+	constexpr double kCurbTargetHeightCm = 15.0;   // matches the +15 sidewalk lift
+	constexpr double kCurbTargetWidthCm  = 18.0;
+	constexpr double kCurbYawOffsetDeg   = 180.0;  // "rotated 180" to face the road
+	// Seat the kerb a bit INWARD of the carriageway edge (toward the road) so it
+	// reads as the road edge instead of sitting out on the sidewalk. +LeftN is
+	// the sidewalk side, so a net-negative offset shifts the piece onto the road.
+	constexpr double kCurbInwardCm       = 15.0;   // how far inward from the edge
+	const double kCurbLateralNudgeCm     = 0.5 * kCurbTargetWidthCm - kCurbInwardCm;
+
+	const FBox Box      = Mesh->GetBoundingBox();
+	const FVector Size  = Box.GetSize();
+	const FVector Ctr   = Box.GetCenter();
+	const bool bLongIsX = Size.X >= Size.Y;
+	const double MeshLong = FMath::Max(1.0, bLongIsX ? Size.X : Size.Y);
+	const double MeshWide = FMath::Max(1.0, bLongIsX ? Size.Y : Size.X);
+	const double MeshTall = FMath::Max(1.0, Size.Z);
+
+	int32 iCurb = 0, nA = 0, nB = 0;
+	for (const RoadNetCurbs::FCurbInstance& CI : Insts)
+	{
+		const double sLong = (double)CI.LengthCm / MeshLong;
+		const double sWide = kCurbTargetWidthCm  / MeshWide;
+		const double sTall = kCurbTargetHeightCm / MeshTall;
+		const FVector Scale = bLongIsX ? FVector(sLong, sWide, sTall) : FVector(sWide, sLong, sTall);
+		const float Yaw = CI.YawDeg + (bLongIsX ? 0.f : 90.f) + (float)kCurbYawOffsetDeg;
+
+		// Seat the mesh's bottom-centre (in local space) onto the target world
+		// point: TransformVector applies scale+rotation only (no translation).
+		FTransform Inst(FRotator(0.f, Yaw, 0.f), FVector::ZeroVector, Scale);
+		const FVector AnchorWorld = Inst.TransformVector(FVector(Ctr.X, Ctr.Y, Box.Min.Z));
+
+		const double PlaceYawRad = FMath::DegreesToRadians((double)CI.YawDeg);
+		const FVector LeftN(-FMath::Sin(PlaceYawRad), FMath::Cos(PlaceYawRad), 0.0); // sidewalk side
+		const FVector Target = CI.Location + LeftN * kCurbLateralNudgeCm;
+		Inst.SetTranslation(Target - AnchorWorld);
+
+		if ((iCurb++ & 1) == 0) { HA->AddInstance(Inst, /*bWorldSpace*/true); ++nA; }
+		else                    { HB->AddInstance(Inst, /*bWorldSpace*/true); ++nB; }
+	}
+
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitCurbs: %d kerb instances (zebra %d/%d)%s."),
+		Insts.Num(), nA, nB, bUserMesh ? TEXT("") : TEXT(" [SM_Curb2 default]"));
+}
+
+// ---- junction markings (§2 junctions) -------------------------------------
+
+namespace
+{
+	// Junctions are matched to persistent overrides by proximity (locations
+	// wobble slightly between rebuilds as centrelines re-smooth).
+	constexpr double kJunctionMatchCm = 600.0;
+
+	// Advance/reverse a preset through the cycle order.
+	ERoadNetJunctionPreset CyclePreset(ERoadNetJunctionPreset P, int32 Dir)
+	{
+		constexpr int32 N = 5; // None..GiveWay
+		int32 v = (int32)P + (Dir >= 0 ? 1 : -1);
+		v = ((v % N) + N) % N;
+		return (ERoadNetJunctionPreset)v;
+	}
+
+	bool PresetHasCrosswalk(ERoadNetJunctionPreset P)
+	{
+		return P == ERoadNetJunctionPreset::StopAndCrosswalk
+			|| P == ERoadNetJunctionPreset::Signalized;
+	}
+
+	// A CCW rectangle centred at C, ±HalfU along unit axis U, ±HalfV across.
+	UE::Geometry::FGeneralPolygon2d MakeRectPoly(const FVector2D& C, const FVector2D& U, double HalfU, double HalfV)
+	{
+		const FVector2D V(-U.Y, U.X);
+		TArray<FVector2d> Loop;
+		Loop.Reserve(4);
+		Loop.Emplace(C.X - U.X * HalfU - V.X * HalfV, C.Y - U.Y * HalfU - V.Y * HalfV);
+		Loop.Emplace(C.X + U.X * HalfU - V.X * HalfV, C.Y + U.Y * HalfU - V.Y * HalfV);
+		Loop.Emplace(C.X + U.X * HalfU + V.X * HalfV, C.Y + U.Y * HalfU + V.Y * HalfV);
+		Loop.Emplace(C.X - U.X * HalfU + V.X * HalfV, C.Y - U.Y * HalfU + V.Y * HalfV);
+		UE::Geometry::FPolygon2d P(Loop);
+		if (P.IsClockwise()) { P.Reverse(); }
+		UE::Geometry::FGeneralPolygon2d G;
+		G.SetOuter(P);
+		return G;
+	}
+}
+
+ERoadNetJunctionPreset URoadNetwork::ResolveJunctionPresetNear(const FVector2D& Loc) const
+{
+	double BestD2 = FMath::Square(kJunctionMatchCm);
+	ERoadNetJunctionPreset Best = ERoadNetJunctionPreset::None;
+	for (const FRoadNetJunctionConfig& Cfg : JunctionConfigs)
+	{
+		const double D2 = FVector2D::DistSquared(Cfg.Location, Loc);
+		if (D2 < BestD2) { BestD2 = D2; Best = Cfg.Preset; }
+	}
+	return Best;
+}
+
+ERoadNetJunctionPreset URoadNetwork::CycleJunctionPresetNear(const FVector2D& Loc, int32 Dir)
+{
+	Modify();
+	int32 BestIdx = INDEX_NONE;
+	double BestD2 = FMath::Square(kJunctionMatchCm);
+	for (int32 i = 0; i < JunctionConfigs.Num(); ++i)
+	{
+		const double D2 = FVector2D::DistSquared(JunctionConfigs[i].Location, Loc);
+		if (D2 < BestD2) { BestD2 = D2; BestIdx = i; }
+	}
+	if (BestIdx == INDEX_NONE)
+	{
+		FRoadNetJunctionConfig Cfg;
+		Cfg.Location = Loc;
+		Cfg.Preset = ERoadNetJunctionPreset::None;
+		BestIdx = JunctionConfigs.Add(Cfg);
+	}
+	FRoadNetJunctionConfig& C = JunctionConfigs[BestIdx];
+	C.Location = Loc; // re-anchor to the live junction position
+	C.Preset = CyclePreset(C.Preset, Dir);
+	return C.Preset;
+}
+
+void URoadNetwork::BuildJunctionMarkings(FRoadNetRebuildContext& Ctx)
+{
+	using namespace UE::Geometry;
+	JunctionViews.Reset();
+	Ctx.Signals.Reset();
+	if (!bBuildJunctionMarkings) { return; }
+
+	auto HalfWidth = [this](int32 RoadIdx) -> double
+	{
+		return Roads.IsValidIndex(RoadIdx) ? FMath::Max(50.0, (double)Roads[RoadIdx].Lanes.HalfWidthCm()) : 300.0;
+	};
+
+	// Every junction (T / X / Y / roundabout / multi-arm) is already captured by
+	// the per-zone clip region (built from 3+ arm joints AND crossings), so we
+	// treat EACH clip polygon as one junction node and derive its approaches
+	// from where the zone's centrelines cross that polygon's boundary.
+	for (int32 z = 0; z < Ctx.ZoneJunctionClip.Num(); ++z)
+	{
+		if (!Ctx.ZoneMarkingWhitePolys.IsValidIndex(z) || !Ctx.Zones.IsValidIndex(z)) { continue; }
+		const TArray<int32>& ZoneRoads = Ctx.Zones[z];
+
+		// Accumulated cut-back rectangles that push the YELLOW centre line back
+		// behind the crosswalk on each crosswalk approach (applied after the
+		// junction loop). Only crosswalk presets contribute.
+		TArray<FGeneralPolygon2d> YellowCut;
+
+		for (const FGeneralPolygon2d& GP : Ctx.ZoneJunctionClip[z])
+		{
+			const TArray<FVector2d>& OV = GP.GetOuter().GetVertices();
+			if (OV.Num() < 3) { continue; }
+
+			// Junction centre + a representative height (centroid of outer ring).
+			FVector2D Centre(0, 0);
+			for (const FVector2d& V : OV) { Centre += FVector2D(V.X, V.Y); }
+			Centre /= (double)OV.Num();
+
+			auto InClip = [&GP](const FVector2D& P) { return GP.Contains(FVector2d(P.X, P.Y)); };
+
+			// Approaches: each place a zone road's centreline crosses this
+			// polygon's boundary is one approach (stop-line pos + outward dir).
+			TArray<RoadNetJunctionMarks::FApproach> Approaches;
+			double SumZ = 0.0; int32 ZN = 0;
+			for (int32 r : ZoneRoads)
+			{
+				const FRoadCurves* C = Ctx.Curves.Find(r);
+				if (!C || C->Sampled.Num() < 2) { continue; }
+				const double Half = HalfWidth(r);
+				const TArray<FVector>& S = C->Sampled;
+				bool bPrevIn = InClip(FVector2D(S[0].X, S[0].Y));
+				for (int32 i = 1; i < S.Num(); ++i)
+				{
+					const FVector2D A(S[i - 1].X, S[i - 1].Y);
+					const FVector2D B(S[i].X, S[i].Y);
+					const bool bIn = InClip(B);
+					if (bIn != bPrevIn)
+					{
+						// Bisect for the boundary point between A (bPrevIn) and B (bIn).
+						FVector2D Lo = A, Hi = B; bool bLoIn = bPrevIn;
+						for (int32 it = 0; it < 12; ++it)
+						{
+							const FVector2D Mid = 0.5 * (Lo + Hi);
+							if (InClip(Mid) == bLoIn) { Lo = Mid; } else { Hi = Mid; }
+						}
+						const FVector2D Boundary = 0.5 * (Lo + Hi);
+						// Outward = from inside toward outside.
+						FVector2D Outward = bPrevIn ? (B - A) : (A - B);
+						RoadNetJunctionMarks::FApproach Ap;
+						Ap.StopPos = Boundary;
+						Ap.Outward = Outward;
+						Ap.HalfWidthCm = Half;
+						Approaches.Add(Ap);
+						SumZ += FMath::Lerp(S[i - 1].Z, S[i].Z, 0.5); ++ZN;
+					}
+					bPrevIn = bIn;
+				}
+			}
+
+			const double CentreZ = (ZN > 0) ? (SumZ / (double)ZN) : 0.0;
+			const ERoadNetJunctionPreset Preset = ResolveJunctionPresetNear(Centre);
+
+			FRoadNetJunctionView View;
+			View.Location = FVector(Centre.X, Centre.Y, CentreZ);
+			View.Preset = Preset;
+			View.ArmCount = Approaches.Num();
+			JunctionViews.Add(View);
+
+			if (Preset == ERoadNetJunctionPreset::None || Approaches.Num() == 0) { continue; }
+
+			TArray<RoadNetJunctionMarks::FSignal> Signals;
+			RoadNetJunctionMarks::BuildJoint(
+				Centre, CentreZ, Approaches, Preset, Ctx.ZoneMarkingWhitePolys[z], Signals);
+
+			for (const RoadNetJunctionMarks::FSignal& Sg : Signals)
+			{
+				Ctx.Signals.Emplace(Sg.Location, Sg.YawDeg);
+			}
+
+			// Cut the yellow centre line back to BEHIND the crosswalk: a full-
+			// width rectangle from the junction boundary out past the crosswalk's
+			// far edge (matches the crosswalk band placement in BuildJoint).
+			if (PresetHasCrosswalk(Preset))
+			{
+				constexpr double kCwFarCm = 560.0;  // just beyond the zebra band
+				for (const RoadNetJunctionMarks::FApproach& Ap : Approaches)
+				{
+					FVector2D Out = Ap.Outward;
+					if (!Out.Normalize()) { continue; }
+					const double HalfU = 0.5 * (kCwFarCm + 10.0);
+					const FVector2D C = Ap.StopPos + Out * (HalfU - 10.0);
+					YellowCut.Add(MakeRectPoly(C, Out, HalfU, Ap.HalfWidthCm + 25.0));
+				}
+			}
+		}
+
+		// Apply the yellow cut-backs for this zone (if any crosswalk junctions).
+		if (YellowCut.Num() > 0 && Ctx.ZoneMarkingYellowPolys.IsValidIndex(z)
+			&& Ctx.ZoneMarkingYellowPolys[z].Num() > 0)
+		{
+			TArray<FGeneralPolygon2d> Trimmed;
+			if (RoadNetSurface::Difference(Ctx.ZoneMarkingYellowPolys[z], YellowCut, Trimmed))
+			{
+				Ctx.ZoneMarkingYellowPolys[z] = MoveTemp(Trimmed);
+			}
+		}
+	}
+}
+
+void URoadNetwork::CommitJunctionSignals(FRoadNetRebuildContext& Ctx)
+{
+	UWorld* World = WorldPtr.Get();
+	if (!World) { return; }
+
+	auto Retire = [this]()
+	{
+		if (AActor* A = GeoSignalActor.Get()) { A->Destroy(); }
+		GeoSignalActor = nullptr;
+	};
+
+	if (!bBuildJunctionMarkings || Ctx.Signals.Num() == 0) { Retire(); return; }
+
+	UStaticMesh* Mesh = SignalMesh ? SignalMesh.Get() : nullptr;
+	if (!Mesh) { Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder")); }
+	if (!Mesh) { Retire(); return; }
+
+	AActor* Actor = GeoSignalActor.Get();
+	if (!Actor)
+	{
+		FActorSpawnParameters Params;
+		Params.ObjectFlags |= RF_Transient;
+		Actor = World->SpawnActor<AActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
+		if (!Actor) { return; }
+		USceneComponent* Root = NewObject<USceneComponent>(Actor, TEXT("Root"));
+		Actor->SetRootComponent(Root);
+		Root->RegisterComponent();
+#if WITH_EDITOR
+		Actor->SetActorLabel(TEXT("RoadNet_Signals"));
+#endif
+		GeoSignalActor = Actor;
+	}
+
+	UHierarchicalInstancedStaticMeshComponent* H = nullptr;
+	{
+		TArray<UHierarchicalInstancedStaticMeshComponent*> Existing;
+		Actor->GetComponents<UHierarchicalInstancedStaticMeshComponent>(Existing);
+		H = Existing.Num() ? Existing[0] : nullptr;
+		if (!H)
+		{
+			H = NewObject<UHierarchicalInstancedStaticMeshComponent>(Actor);
+			H->SetupAttachment(Actor->GetRootComponent());
+			H->SetMobility(EComponentMobility::Static);
+			H->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			H->SetCanEverAffectNavigation(false);
+			H->RegisterComponent();
+			Actor->AddInstanceComponent(H);
+		}
+	}
+	if (!H) { return; }
+	H->ClearInstances();
+	H->SetStaticMesh(Mesh);
+
+	// Fit the mesh into a thin, ~3.5 m tall "pole" placeholder seated on the
+	// ground point, unless the user supplied a real signal mesh (then place it
+	// upright, un-stretched, seated at the base).
+	const bool bUserMesh = (SignalMesh != nullptr);
+	const FBox Box = Mesh->GetBoundingBox();
+	const FVector Size = Box.GetSize();
+	const FVector Ctr = Box.GetCenter();
+	constexpr double kPoleTallCm = 350.0;
+	constexpr double kPoleWideCm = 25.0;
+	const double sTall = bUserMesh ? 1.0 : kPoleTallCm / FMath::Max(1.0, Size.Z);
+	const double sWide = bUserMesh ? 1.0 : kPoleWideCm / FMath::Max(1.0, FMath::Max(Size.X, Size.Y));
+
+	for (const TPair<FVector, float>& SP : Ctx.Signals)
+	{
+		const FVector Scale(sWide, sWide, sTall);
+		FTransform Inst(FRotator(0.f, SP.Value, 0.f), FVector::ZeroVector, Scale);
+		const FVector AnchorWorld = Inst.TransformVector(FVector(Ctr.X, Ctr.Y, Box.Min.Z)); // bottom-centre
+		Inst.SetTranslation(SP.Key - AnchorWorld);
+		H->AddInstance(Inst, /*bWorldSpace*/true);
+	}
+
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitJunctionSignals: %d signal placeholders%s."),
+		Ctx.Signals.Num(), bUserMesh ? TEXT("") : TEXT(" [cylinder default]"));
 }
 
 void URoadNetwork::CommitPerimeters(FRoadNetRebuildContext& Ctx)

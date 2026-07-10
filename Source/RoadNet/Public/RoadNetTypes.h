@@ -48,6 +48,33 @@ enum class ERoadNetJointKind : uint8
 	Intersection   // degree >= 3 — a real junction
 };
 
+// Junction marking treatment, cycled interactively per junction. Each step is a
+// superset of the previous paint; Signalized also drops traffic-light meshes.
+UENUM(BlueprintType)
+enum class ERoadNetJunctionPreset : uint8
+{
+	None,              // no junction markings
+	StopLine,          // stop bar across each entering approach
+	StopAndCrosswalk,  // stop bar + zebra crosswalk
+	Signalized,        // stop + crosswalk + traffic-light placeholder meshes
+	GiveWay            // give-way (yield) dashed bar
+};
+
+// Persistent per-junction override, keyed by world location and matched by
+// proximity so it survives road-index shifts and minor re-smoothing between
+// rebuilds (joints themselves are recomputed every rebuild).
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetJunctionConfig
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FVector2D Location = FVector2D::ZeroVector;
+
+	UPROPERTY()
+	ERoadNetJunctionPreset Preset = ERoadNetJunctionPreset::None;
+};
+
 // Lane semantic type — mirrors RoadBLD ELaneType (minus deprecated None; our
 // sidewalks are their own layer, not a lane type). See ROADBLD_FEATURES.md §4.
 UENUM(BlueprintType)

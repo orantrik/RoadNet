@@ -11,9 +11,11 @@ namespace
 {
 	constexpr double kStripeHalfCm  = 7.0;    // 14 cm solid line (centre/edge)
 	constexpr double kDashHalfCm    = 6.0;    // 12 cm dashed lane divider
-	constexpr double kEdgeInsetCm   = 22.0;   // line centre inset from the kerb
 	constexpr double kDashLenCm     = 300.0;  // 3 m dash
 	constexpr double kGapLenCm      = 500.0;  // 5 m gap
+	// NOTE: the white EDGE line now comes from the eroded carriageway boundary in
+	// URoadNetwork::BuildSurfaceUnion (so it curves around corners); the inset +
+	// half-width used there mirror kEdgeInsetCm=38 / kStripeHalfCm here.
 
 	// Extract the sub-polyline of Path between arc-lengths [S, E] (inclusive),
 	// interpolating the cut endpoints.
@@ -74,11 +76,18 @@ namespace RoadNetMarkings
 
 		const double Half = FMath::Max(50.0, (double)Road.Lanes.HalfWidthCm());
 
+		// Densify the (already G2-smoothed) centreline so every offset line reads
+		// as a smooth curve around corners — matching the finely-sampled kerb
+		// instead of faceting at the ~2 m resample spacing.
+		TArray<FVector> Dense;
+		RoadNetMath::SmoothG2Spline(C.Sampled, 40.0, Dense);
+		if (Dense.Num() < 2) { Dense = C.Sampled; }
+
 		// Solid line centred at LateralOffset, routed to a specific colour set.
 		auto EmitSolid = [&](double LateralOffset, TArray<FGeneralPolygon2d>& Dst)
 		{
 			TArray<FVector> Path;
-			RoadNetMath::OffsetPolyline(C.Sampled, LateralOffset, Path);
+			RoadNetMath::OffsetPolyline(Dense, LateralOffset, Path);
 			FGeneralPolygon2d Ribbon;
 			if (MakeRibbon(Path, kStripeHalfCm, Ribbon)) { Dst.Add(MoveTemp(Ribbon)); }
 		};
@@ -87,7 +96,7 @@ namespace RoadNetMarkings
 		auto EmitDashed = [&](double LateralOffset)
 		{
 			TArray<FVector> Path;
-			RoadNetMath::OffsetPolyline(C.Sampled, LateralOffset, Path);
+			RoadNetMath::OffsetPolyline(Dense, LateralOffset, Path);
 			const double Total = RoadNetMath::TotalLength(Path);
 			const double Stride = kDashLenCm + kGapLenCm;
 			for (double S = 0.0; S < Total; S += Stride)
@@ -118,11 +127,9 @@ namespace RoadNetMarkings
 			}
 		}
 
-		// Edge lines (white) — only if the road is wide enough to fit them cleanly.
-		if (Half > kEdgeInsetCm + kStripeHalfCm + 10.0)
-		{
-			EmitSolid(+(Half - kEdgeInsetCm), OutWhite);
-			EmitSolid(-(Half - kEdgeInsetCm), OutWhite);
-		}
+		// Edge lines (white) are NOT emitted per-road here anymore: they are
+		// stroked from the merged carriageway boundary in BuildSurfaceUnion so
+		// they curve around junction/sidewalk corners (a straight per-road offset
+		// can't turn a corner). kEdgeInsetCm/kStripeHalfCm are kept in sync there.
 	}
 }

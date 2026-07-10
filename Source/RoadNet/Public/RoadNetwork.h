@@ -82,6 +82,9 @@ struct FRoadNetRebuildContext
 	// setback. Markings and lane ribbons are subtracted against this so paint ends
 	// at the junction edge (not on a lazy circular disc).
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneJunctionClip;
+	// § junction traffic-signal placeholder placements (location, yawDeg) for
+	// this rebuild — committed as a HISM.
+	TArray<TPair<FVector, float>> Signals;
 	// Flattened unions (for logging/QA only).
 	TArray<UE::Geometry::FGeneralPolygon2d> SurfacePolys;
 	TArray<UE::Geometry::FGeneralPolygon2d> SidewalkPolys;
@@ -93,6 +96,7 @@ struct FRoadNetRebuildContext
 };
 
 class UMaterialInterface;
+class UStaticMesh;
 
 UCLASS(BlueprintType, EditInlineNew, DefaultToInstanced)
 class ROADNET_API URoadNetwork : public UObject
@@ -137,6 +141,47 @@ public:
 	// PCG / traffic. Disable to skip the graph stages on large imports.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
 	bool bBuildLaneGraph = true;
+
+	// ---- kerbs (§8.12 companion) ------------------------------------------
+	// Instance a kerb-segment mesh along the road/sidewalk boundary as a HISM.
+	// The kerb line is derived from the merged carriageway + sidewalk polygons
+	// each rebuild, so it tracks lane growth and curved junction corners and is
+	// only emitted where a sidewalk actually exists.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
+	bool bBuildCurbs = true;
+
+	// Kerb segment mesh (long axis = travel). Author its raised face toward −Y
+	// (road side) and its pivot at the base. If unset a scaled engine cube is
+	// used as a visible placeholder so you can see the kerb line.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
+	TObjectPtr<UStaticMesh> CurbMesh;
+
+	// Two material overrides applied to the kerb HISM (slot 0 + slot 1), so a
+	// two-slot kerb mesh (e.g. top vs. face) can be textured separately — like
+	// the RoadPCG kerb kit.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
+	TObjectPtr<UMaterialInterface> CurbMaterial0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
+	TObjectPtr<UMaterialInterface> CurbMaterial1;
+
+	// Along-line spacing (cm) of kerb pieces. Each piece is stretched to tile
+	// its run gaplessly, so this is a target length per segment.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs",
+		meta = (ClampMin = "50.0", UIMin = "50.0", UIMax = "600.0"))
+	double CurbSpacingCm = 100.0;
+
+	// ---- junction markings (§2 junctions) ---------------------------------
+	// Master toggle for junction paint (stop/give-way lines, crosswalks) and
+	// the traffic-signal placeholders. Per-junction treatment is chosen
+	// interactively in the RoadNet Draw mode (click a junction, cycle preset).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions")
+	bool bBuildJunctionMarkings = true;
+
+	// Placeholder mesh for a signalized junction (one per approach). If unset a
+	// scaled engine cylinder is instanced as a visible "pole" placeholder.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions")
+	TObjectPtr<UStaticMesh> SignalMesh;
 
 	// ---- junctions (§10.8/§10.9) ------------------------------------------
 	// Morphological "close" radius (cm) applied to the merged carriageway. Larger
@@ -202,6 +247,26 @@ public:
 	// triggers Rebuild().
 	bool RemoveRoad(int32 RoadIdx);
 
+	// ---- junction marking authoring (§2 junctions) ------------------------
+	// A junction as surfaced to the editor tool after a rebuild: its world
+	// centre, arm count and the currently-resolved preset.
+	struct FRoadNetJunctionView
+	{
+		FVector Location = FVector::ZeroVector;
+		ERoadNetJunctionPreset Preset = ERoadNetJunctionPreset::None;
+		int32 ArmCount = 0;
+	};
+	const TArray<FRoadNetJunctionView>& GetJunctionViews() const { return JunctionViews; }
+
+	// Resolve the stored preset for the junction nearest Loc (within tolerance);
+	// ERoadNetJunctionPreset::None if no override exists there.
+	ERoadNetJunctionPreset ResolveJunctionPresetNear(const FVector2D& Loc) const;
+
+	// Advance (Dir=+1) or reverse (Dir=-1) the preset for the junction nearest
+	// Loc, creating an override entry if needed. Returns the new preset. Caller
+	// triggers Rebuild().
+	ERoadNetJunctionPreset CycleJunctionPresetNear(const FVector2D& Loc, int32 Dir);
+
 	// Staged rebuild entry point (§10.18). Empty Modified = rebuild everything.
 	void Rebuild(TArrayView<const int32> Modified = TArrayView<const int32>());
 
@@ -223,6 +288,16 @@ private:
 	TWeakObjectPtr<AActor> GeoLaneGraphActor;     // §12.2 lane-connectivity splines for PCG/traffic
 	TWeakObjectPtr<AActor> GeoLaneEvenActor;      // §12.1 per-lane ribbons (even bank)
 	TWeakObjectPtr<AActor> GeoLaneOddActor;       // §12.1 per-lane ribbons (odd bank)
+	TWeakObjectPtr<AActor> GeoCurbActor;          // §8.12 kerb-line HISM (road/sidewalk edge)
+	TWeakObjectPtr<AActor> GeoSignalActor;        // § junction traffic-signal placeholder HISM
+
+	// Persistent per-junction marking overrides (keyed by location).
+	UPROPERTY()
+	TArray<FRoadNetJunctionConfig> JunctionConfigs;
+
+	// Transient snapshot of the last rebuild's junctions (>=3 arms) for the
+	// editor tool to render + hit-test. Not serialized.
+	TArray<FRoadNetJunctionView> JunctionViews;
 
 	// ---- pipeline stages (§10.18) --------------------------------------
 	void DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const;
@@ -234,7 +309,10 @@ private:
 	void BuildPerimeterLoops(FRoadNetRebuildContext& Ctx) const; // §10.11 loops for PCG export
 	void BuildLaneGraph(FRoadNetRebuildContext& Ctx) const;      // §12.2 lane connectivity
 	void BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const;    // §12.1 per-lane ribbon polys
+	void BuildJunctionMarkings(FRoadNetRebuildContext& Ctx);     // §2 junction paint + signals
 	void CommitGeometry(FRoadNetRebuildContext& Ctx);            // §10.15 mesh + spawn
+	void CommitCurbs(FRoadNetRebuildContext& Ctx);               // §8.12 kerb-line HISM
+	void CommitJunctionSignals(FRoadNetRebuildContext& Ctx);     // § signal placeholder HISM
 	void CommitPerimeters(FRoadNetRebuildContext& Ctx);          // §8.4 spline loops for PCG
 	void CommitLaneGraph(FRoadNetRebuildContext& Ctx);           // §12.2 lane-graph splines for PCG
 
