@@ -34,7 +34,7 @@ namespace RoadNetMesh
 		bool IsEmpty() const { return Segs.Num() == 0; }
 
 	private:
-		struct FSeg { FVector2D A, B; double Za, Zb; };
+		struct FSeg { FVector2D A, B; double Za, Zb; int32 Road; };
 		TArray<FSeg> Segs;
 		TMultiMap<FIntPoint, int32> Grid;
 		double CellCm = 1000.0;

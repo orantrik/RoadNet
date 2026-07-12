@@ -240,12 +240,71 @@ bool URoadNetwork::InsertRoadPoint(int32 RoadIdx, int32 AfterIdx, const FVector&
 	return true;
 }
 
+namespace
+{
+	// Typical lane width (cm) for each authored lane type. Bicycle paths are
+	// narrow, parking bays are wide enough for a parked car, everything else is
+	// a standard driving lane.
+	double LaneTypeDefaultWidthCm(ERoadNetLaneType Type)
+	{
+		switch (Type)
+		{
+			case ERoadNetLaneType::Bicycle: return 150.0; // 1.5 m
+			case ERoadNetLaneType::Parking: return 250.0; // 2.5 m
+			default:                        return 350.0; // 3.5 m driving lane
+		}
+	}
+
+	// Recompute every authored lane's CenterOffset + Side by stacking widths
+	// left→right, centred on the reference line. A central median (MedianHalf>0)
+	// opens a gap in the middle. Lanes are assumed already ordered left→right.
+	void RelayoutLanes(TArray<FRoadNetLane>& Lanes, double MedianHalfCm)
+	{
+		double Sum = 0.0;
+		for (const FRoadNetLane& Ln : Lanes) { Sum += FMath::Max(1.f, Ln.Width); }
+		const double Total = Sum + 2.0 * FMath::Max(0.0, MedianHalfCm);
+		double Cursor = -0.5 * Total;
+		bool bGapDone = (MedianHalfCm <= 0.0);
+		for (FRoadNetLane& Ln : Lanes)
+		{
+			const double W = FMath::Max(1.f, Ln.Width);
+			// Insert the median gap once, before the first lane whose centre would
+			// cross the reference line.
+			if (!bGapDone && (Cursor + 0.5 * W) >= 0.0) { Cursor += 2.0 * MedianHalfCm; bGapDone = true; }
+			Ln.CenterOffset = Cursor + 0.5 * W;
+			Ln.Side = (Ln.CenterOffset < 0.0) ? ERoadNetSide::Left : ERoadNetSide::Right;
+			Cursor += W;
+		}
+	}
+
+	// Materialise a road's lanes as authored DetailedLanes ordered left→right,
+	// so per-lane edits (insert/type) have concrete entities to act on. Idempotent
+	// once authored.
+	void EnsureDetailedLanes(FRoadNetLaneSpec& L)
+	{
+		if (!L.HasDetailedLanes()) { L.DetailedLanes = L.ResolveLanes(); }
+		L.DetailedLanes.Sort([](const FRoadNetLane& A, const FRoadNetLane& B)
+			{ return A.CenterOffset < B.CenterOffset; });
+	}
+}
+
 bool URoadNetwork::AddLane(int32 RoadIdx, ERoadNetSide Side)
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return false; }
 	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
-	// Authored per-lane roads aren't handled by this coarse count-model editor.
-	if (L.HasDetailedLanes()) { return false; }
+
+	// Authored road: append a normal lane on the far end of the chosen side.
+	if (L.HasDetailedLanes())
+	{
+		FRoadNetLane NL;
+		NL.LaneId = FGuid::NewGuid();
+		NL.Type   = ERoadNetLaneType::Normal;
+		NL.Width  = (float)LaneTypeDefaultWidthCm(ERoadNetLaneType::Normal);
+		if (Side == ERoadNetSide::Left) { L.DetailedLanes.Insert(NL, 0); }
+		else                            { L.DetailedLanes.Add(NL); }
+		RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+		return true;
+	}
 
 	const bool bDirectional = (L.Forward > 0 || L.Backward > 0);
 	if (!bDirectional)
@@ -263,7 +322,16 @@ bool URoadNetwork::RemoveLane(int32 RoadIdx, ERoadNetSide Side)
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return false; }
 	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
-	if (L.HasDetailedLanes()) { return false; }
+
+	// Authored road: drop the outermost lane on the chosen side (keep >=1).
+	if (L.HasDetailedLanes())
+	{
+		if (L.DetailedLanes.Num() <= 1) { return false; }
+		if (Side == ERoadNetSide::Left) { L.DetailedLanes.RemoveAt(0); }
+		else                            { L.DetailedLanes.RemoveAt(L.DetailedLanes.Num() - 1); }
+		RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+		return true;
+	}
 
 	const bool bDirectional = (L.Forward > 0 || L.Backward > 0);
 	if (!bDirectional)
@@ -296,6 +364,58 @@ int32 URoadNetwork::GetLaneCount(int32 RoadIdx) const
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return 0; }
 	return Roads[RoadIdx].Lanes.EffectiveLaneCount();
+}
+
+TArray<FRoadNetLane> URoadNetwork::GetLanesLeftToRight(int32 RoadIdx) const
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return {}; }
+	TArray<FRoadNetLane> Lanes = Roads[RoadIdx].Lanes.ResolveLanes();
+	Lanes.Sort([](const FRoadNetLane& A, const FRoadNetLane& B)
+		{ return A.CenterOffset < B.CenterOffset; });
+	return Lanes;
+}
+
+int32 URoadNetwork::InsertLaneRelative(int32 RoadIdx, int32 LaneLtoR, bool bRightSide)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return INDEX_NONE; }
+	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+	EnsureDetailedLanes(L);
+	if (!L.DetailedLanes.IsValidIndex(LaneLtoR)) { return INDEX_NONE; }
+
+	FRoadNetLane NL;
+	NL.LaneId = FGuid::NewGuid();
+	NL.Type   = ERoadNetLaneType::Normal;
+	NL.Width  = (float)LaneTypeDefaultWidthCm(ERoadNetLaneType::Normal);
+
+	const int32 Pos = bRightSide ? (LaneLtoR + 1) : LaneLtoR;
+	L.DetailedLanes.Insert(NL, Pos);
+	RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+
+	// New left→right index of the originally selected lane (so the caller keeps
+	// its highlight): unchanged when we inserted to its right, +1 to its left.
+	return bRightSide ? LaneLtoR : (LaneLtoR + 1);
+}
+
+ERoadNetLaneType URoadNetwork::CycleLaneType(int32 RoadIdx, int32 LaneLtoR, int32 Dir)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return ERoadNetLaneType::Normal; }
+	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+	EnsureDetailedLanes(L);
+	if (!L.DetailedLanes.IsValidIndex(LaneLtoR)) { return ERoadNetLaneType::Normal; }
+
+	// Author cycle order: driving → bicycle path → parking bay → driving.
+	static const ERoadNetLaneType kCycle[] = {
+		ERoadNetLaneType::Normal, ERoadNetLaneType::Bicycle, ERoadNetLaneType::Parking };
+	constexpr int32 N = UE_ARRAY_COUNT(kCycle);
+
+	FRoadNetLane& Ln = L.DetailedLanes[LaneLtoR];
+	int32 Cur = 0;
+	for (int32 i = 0; i < N; ++i) { if (kCycle[i] == Ln.Type) { Cur = i; break; } }
+	const int32 Next = ((Cur + (Dir >= 0 ? 1 : -1)) % N + N) % N;
+	Ln.Type  = kCycle[Next];
+	Ln.Width = (float)LaneTypeDefaultWidthCm(Ln.Type);
+	RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+	return Ln.Type;
 }
 
 bool URoadNetwork::ToggleMedian(int32 RoadIdx)
@@ -1279,10 +1399,28 @@ int32 URoadNetwork::CommitLayer(
 	TWeakObjectPtr<AActor>& ActorPtr, const TCHAR* Label,
 	const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
 	double ExtraLiftCm, FColor Color, UMaterialInterface* Material, FRoadNetRebuildContext& Ctx,
-	bool bBakeLaneColors, bool bWorldUVs)
+	bool bBakeLaneColors, bool bWorldUVs, bool bConformSurface)
 {
 	UWorld* World = WorldPtr.Get();
 	if (!World) { return 0; }
+
+	// A zone drives the terrain conform only if ALL its roads are ground-level
+	// (not a bridge/tunnel/elevated layer) — otherwise an overpass deck would
+	// carve the ground up to its own height. Matches SculptCorridorsToBed's
+	// IsDeformable rule.
+	auto ZoneIsGround = [&](int32 z) -> bool
+	{
+		if (!Ctx.Zones.IsValidIndex(z)) { return false; }
+		for (int32 r : Ctx.Zones[z])
+		{
+			if (Roads.IsValidIndex(r))
+			{
+				const FRoadDef& R = Roads[r];
+				if (R.bBridge || R.bTunnel || R.Layer != 0) { return false; }
+			}
+		}
+		return true;
+	};
 
 	// Baked per-lane shading colours (linear). Alternating asphalt banks plus a
 	// base for junction fill / off-lane areas — same palette the old lifted
@@ -1336,11 +1474,33 @@ int32 URoadNetwork::CommitLayer(
 			return BaseCol;
 		};
 
+		const int32 TID0 = Mesh.MaxTriangleID();
 		Tris += RoadNetMesh::AppendSurfaceMesh(
 			ZonePolys[z], CenterLines, kRoadZLiftCm + ExtraLiftCm, Mesh,
 			bBake ? &ShadeFn : nullptr,
 			/*bComputeUVs*/true, /*UVUnitCm*/100.0, /*bGradientNormals*/true,
 			/*bWorldUVs*/bWorldUVs);
+
+		// Capture this zone's triangles (world cm — the layer actor is spawned at
+		// the origin with identity transform) into the terrain-conform soup so
+		// OSMRoadCore can deform the landscape to the ACTUAL built surface. Only
+		// ground zones of conform layers contribute; verts are duplicated per
+		// triangle (the rasteriser treats triangles independently).
+		if (bConformSurface && ZoneIsGround(z))
+		{
+			for (int32 tid = TID0; tid < Mesh.MaxTriangleID(); ++tid)
+			{
+				if (!Mesh.IsTriangle(tid)) { continue; }
+				const UE::Geometry::FIndex3i T = Mesh.GetTriangle(tid);
+				const int32 Base = ConformVerts.Num();
+				ConformVerts.Add((FVector)Mesh.GetVertex(T.A));
+				ConformVerts.Add((FVector)Mesh.GetVertex(T.B));
+				ConformVerts.Add((FVector)Mesh.GetVertex(T.C));
+				ConformTris.Add(Base + 0);
+				ConformTris.Add(Base + 1);
+				ConformTris.Add(Base + 2);
+			}
+		}
 	}
 
 	if (Tris == 0) { return 0; }
@@ -1476,15 +1636,22 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 		return;
 	}
 
+	// Fresh terrain-conform soup for this rebuild. Ground surface layers append
+	// their world triangles here (see CommitLayer bConformSurface); markings /
+	// lanes / perimeters do not. Consumed by OSMRoadCore's mesh conform.
+	ConformVerts.Reset();
+	ConformTris.Reset();
+
 	// Road carriageway (dark asphalt) and sidewalk band (light concrete, raised
 	// one curb height above the road so the kerb reads correctly). Lane shading
 	// is BAKED into the carriageway's vertex colours (bBakeLaneColors=true) so
 	// lanes no longer need a separate lifted overlay that dove in/out of the road.
 	const int32 RoadTris = CommitLayer(GeoActor, TEXT("RoadNet_Surface"),
 		Ctx.ZoneSurfacePolys, /*ExtraLift*/0.0, FColor(38, 38, 42), RoadMaterial, Ctx,
-		/*bBakeLaneColors*/true);
+		/*bBakeLaneColors*/true, /*bWorldUVs*/false, /*bConformSurface*/true);
 	const int32 WalkTris = CommitLayer(GeoSidewalkActor, TEXT("RoadNet_Sidewalks"),
-		Ctx.ZoneSidewalkPolys, /*ExtraLift*/15.0, FColor(165, 162, 155), SidewalkMaterial, Ctx);
+		Ctx.ZoneSidewalkPolys, /*ExtraLift*/15.0, FColor(165, 162, 155), SidewalkMaterial, Ctx,
+		/*bBakeLaneColors*/false, /*bWorldUVs*/false, /*bConformSurface*/true);
 	const int32 WhiteTris = CommitLayer(GeoMarkingWhiteActor, TEXT("RoadNet_Markings_White"),
 		Ctx.ZoneMarkingWhitePolys, /*ExtraLift*/4.0, FColor(232, 232, 226), MarkingWhiteMaterial, Ctx);
 	const int32 YellowTris = CommitLayer(GeoMarkingYellowActor, TEXT("RoadNet_Markings_Yellow"),

@@ -263,6 +263,24 @@ public:
 	// Number of lanes on a road (for HUD/debug).
 	int32 GetLaneCount(int32 RoadIdx) const;
 
+	// Resolved lanes of a road ordered LEFT→RIGHT (ascending lateral offset).
+	// The interactive lane editor selects/indexes lanes in this order, and the
+	// per-lane edit ops below take that same left→right index. Empty on bad idx.
+	TArray<FRoadNetLane> GetLanesLeftToRight(int32 RoadIdx) const;
+
+	// Insert a new normal lane immediately to the RIGHT (bRightSide) or LEFT of
+	// the lane at left→right index LaneLtoR. Converts the road to authored
+	// DetailedLanes on first use, then relays out all offsets. Returns the new
+	// left→right index of the ORIGINALLY selected lane (so the caller can keep
+	// its highlight), or INDEX_NONE on failure. Caller triggers Rebuild().
+	int32 InsertLaneRelative(int32 RoadIdx, int32 LaneLtoR, bool bRightSide);
+
+	// Cycle the type of the lane at left→right index LaneLtoR
+	// (Normal → Bicycle → Parking → Normal; Dir=-1 reverses), snapping its width
+	// to that type's default. Converts to authored DetailedLanes on first use.
+	// Returns the new type. Caller triggers Rebuild().
+	ERoadNetLaneType CycleLaneType(int32 RoadIdx, int32 LaneLtoR, int32 Dir);
+
 	// ---- median editing (RoadNet Draw hotkeys) ----------------------------
 	// Toggle the central median on a road. Returns the new bMedian state.
 	// Caller triggers Rebuild().
@@ -296,6 +314,16 @@ public:
 	// first rebuild. RoadNet itself never touches the landscape (dependency only
 	// points OSMRoadCore -> RoadNet).
 	const TArray<FRoadNetDeformCorridor>& GetDeformCorridors() const { return DeformCorridors; }
+
+	// World-space triangle soup of the LAST rebuild's GROUND-level driving
+	// surface (carriageway + sidewalk + median tops; bridges/tunnels/elevated
+	// zones excluded). This is the EXACT built mesh, so OSMRoadCore can conform
+	// the landscape to the real surface instead of the centreline+falloff
+	// approximation (no drift → terrain can never lap over the ribbon). Verts
+	// are absolute world cm; Tris are flat index triples. Regenerated every
+	// Rebuild; empty until the first rebuild. Not serialized.
+	const TArray<FVector>& GetConformVerts() const { return ConformVerts; }
+	const TArray<int32>&   GetConformTris()  const { return ConformTris;  }
 
 	// ---- interactive edit API (§9.3 edit/split controllers) ---------------
 	// Move one reference point of a road to a new world position. Returns false
@@ -399,6 +427,13 @@ private:
 	// GetDeformCorridors / FRoadNetDeformCorridor). Not serialized.
 	TArray<FRoadNetDeformCorridor> DeformCorridors;
 
+	// Transient world-space triangle soup of the last rebuild's ground driving
+	// surface (see GetConformVerts/GetConformTris). Accumulated in CommitLayer
+	// for the layers flagged bConformSurface, skipping elevated zones. Not
+	// serialized.
+	TArray<FVector> ConformVerts;
+	TArray<int32>   ConformTris;
+
 	// ---- pipeline stages (§10.18) --------------------------------------
 	void DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const;
 	void BuildCurves(FRoadNetRebuildContext& Ctx) const;
@@ -424,6 +459,6 @@ private:
 	int32 CommitLayer(TWeakObjectPtr<AActor>& ActorPtr, const TCHAR* Label,
 		const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
 		double ExtraLiftCm, FColor Color, UMaterialInterface* Material, FRoadNetRebuildContext& Ctx,
-		bool bBakeLaneColors = false, bool bWorldUVs = false);
+		bool bBakeLaneColors = false, bool bWorldUVs = false, bool bConformSurface = false);
 	// TODO: overlap masks (§10.10), per-road perimeter loops (§10.11), markings.
 };

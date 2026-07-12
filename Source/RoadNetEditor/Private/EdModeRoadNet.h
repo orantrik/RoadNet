@@ -112,6 +112,10 @@ private:
 	// point, else the nearest road centreline. bToggle (Shift) adds/removes the
 	// picked point from the multi-selection. Returns true when it selected.
 	bool TrySelectUnderCursor(FEditorViewportClient* ViewportClient, bool bToggle);
+	// Which lane (left→right index, see URoadNetwork::GetLanesLeftToRight) of
+	// RoadIdx the world point sits over, by nearest lane-centre offset line;
+	// INDEX_NONE if none. Used to pick the lane to highlight/edit.
+	int32 PickLaneAt(int32 RoadIdx, const FVector& WorldHit) const;
 
 	TArray<FVector> DraftPoints;
 	FVector HoverPoint = FVector::ZeroVector;
@@ -126,6 +130,11 @@ private:
 	//     still have a road context and the road isn't drawn as whole-selected.
 	int32 SelRoad = INDEX_NONE;
 	int32 SelPoint = INDEX_NONE;
+	// Selected lane (left→right index) of SelRoad for interactive lane editing;
+	// INDEX_NONE when no lane is picked. Set when a road/lane is clicked, drawn
+	// as a highlighted ribbon, and targeted by Shift+= / Shift+- (insert a lane
+	// on that side) and B (cycle its type: driving → bicycle → parking).
+	int32 SelLane = INDEX_NONE;
 	bool bDirtyDuringDrag = false;
 
 	// Multi-point selection: (RoadIndex, PointIndex) pairs. Move/delete act on all.

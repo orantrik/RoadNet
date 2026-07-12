@@ -6,8 +6,22 @@
 #include "DynamicMesh/DynamicMesh3.h"
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/MeshNormals.h"
+#include "HAL/IConsoleManager.h"
 
 using namespace UE::Geometry;
+
+// Junction height-blend temperature (cm). SampleHeight resolves overlapping
+// roads with a distance-weighted SOFT-MAX of their heights, i.e. the HIGHEST
+// road wins by default (so a connecting road rises/falls to meet the through
+// road, and the through road is NOT dragged down). Tau controls how sharp that
+// max is: small → a crisp crown at the junction (lower road excluded quickly);
+// large → the old smooth average (both roads pulled together). 50 cm keeps
+// through roads put while ramping the minor road over the blend radius.
+static TAutoConsoleVariable<float> CVarRoadNetHeightTauCm(
+	TEXT("roadnet.HeightBlendTauCm"),
+	50.0f,
+	TEXT("RoadNet junction height soft-max temperature (cm): highest road wins. Small = crisp crown (through road stays, connecting road ramps to it); large = smooth average of both. Default 50."),
+	ECVF_Default);
 
 namespace RoadNetMesh
 {
@@ -24,15 +38,20 @@ namespace RoadNetMesh
 			if (CLPtr) { Count += FMath::Max(0, CLPtr->Num() - 1); }
 		}
 		Segs.Reserve(Count);
+		// RoadId = the centreline's index in this array. Two distinct centrelines
+		// are two distinct roads, so SampleHeight can resolve them per-road (each
+		// road keeps its own smooth grade; only genuine overlaps are blended).
+		int32 RoadId = 0;
 		for (const TArray<FVector>* CLPtr : CenterLines)
 		{
-			if (!CLPtr) { continue; }
+			if (!CLPtr) { ++RoadId; continue; }
 			const TArray<FVector>& CL = *CLPtr;
 			for (int32 i = 0; i + 1 < CL.Num(); ++i)
 			{
 				Segs.Add({ FVector2D(CL[i].X, CL[i].Y), FVector2D(CL[i + 1].X, CL[i + 1].Y),
-					CL[i].Z, CL[i + 1].Z });
+					CL[i].Z, CL[i + 1].Z, RoadId });
 			}
+			++RoadId;
 		}
 		if (Segs.Num() == 0) { return; }
 
@@ -57,22 +76,27 @@ namespace RoadNetMesh
 		const int32 CX = (int32)FMath::FloorToInt(X / CellCm);
 		const int32 CY = (int32)FMath::FloorToInt(Y / CellCm);
 
-		// Smooth inverse-distance blend of nearby centerlines (§8.5 plane/blend).
-		// The old code snapped Z to the single NEAREST centerline, so where two
-		// roads meet at a junction at different heights the surface stepped along
-		// the "which road is closest" seam and thin marking polygons scattered.
-		// Blending nearby segments makes the junction transition smoothly; on a
-		// lone road its own segments dominate so grade is preserved.
-		constexpr double SoftCm  = 120.0;              // softening (near-field flat weight)
+		// Resolve height PER ROAD, then combine roads with a distance-weighted
+		// SOFT-MAX (highest wins). Two goals:
+		//  1) SMOOTH — on a lone road only its OWN nearest segment contributes, so
+		//     the surface is exactly that road's already grade-smoothed centreline
+		//     (no cross-segment averaging = no washboard waves).
+		//  2) JUNCTIONS — where roads overlap, the HIGHEST road wins, so the
+		//     through/original road keeps its height and the connecting road
+		//     rises/falls to meet it (never a dip carved into the through road).
+		constexpr double SoftCm  = 120.0;              // near-field softening (flat weight)
 		constexpr double Soft2   = SoftCm * SoftCm;
-		constexpr double BlendCm = 700.0;              // only blend roads within this
+		constexpr double BlendCm = 700.0;              // roads within this can blend
 		constexpr double Blend2  = BlendCm * BlendCm;
 
-		double SumW = 0.0, SumWZ = 0.0;
+		// Nearest hit PER road within the blend radius (few roads meet at a point,
+		// so an inline array + linear scan avoids any per-sample heap allocation).
+		struct FRoadHit { int32 Road; double D2; double Z; };
+		TArray<FRoadHit, TInlineAllocator<8>> Hits;
 		double BestD2 = TNumericLimits<double>::Max();
 		double BestZ  = Fallback;
 
-		TArray<int32> Bucket;
+		TArray<int32, TInlineAllocator<32>> Bucket;
 		auto TestCell = [&](int32 cx, int32 cy)
 		{
 			Bucket.Reset();
@@ -85,11 +109,20 @@ namespace RoadNetMesh
 				const double D2 = FVector2D::DistSquared(Q, C);
 				const double Z  = FMath::Lerp(G.Za, G.Zb, T);
 				if (D2 < BestD2) { BestD2 = D2; BestZ = Z; }
-				if (D2 <= Blend2)
+				if (D2 > Blend2) { continue; }
+
+				// Keep only the closest segment of each road.
+				bool bFound = false;
+				for (FRoadHit& Hh : Hits)
 				{
-					const double W = 1.0 / (D2 + Soft2);
-					SumW += W; SumWZ += W * Z;
+					if (Hh.Road == G.Road)
+					{
+						if (D2 < Hh.D2) { Hh.D2 = D2; Hh.Z = Z; }
+						bFound = true;
+						break;
+					}
 				}
+				if (!bFound) { Hits.Add({ G.Road, D2, Z }); }
 			}
 		};
 
@@ -113,8 +146,24 @@ namespace RoadNetMesh
 			}
 		}
 
-		// Blended height when anything was within range, else the nearest hit.
-		return (SumW > 0.0) ? (SumWZ / SumW) : BestZ;
+		if (Hits.Num() == 0) { return BestZ; }          // nothing in range → nearest
+		if (Hits.Num() == 1) { return Hits[0].Z; }      // lone road → its own grade
+
+		// Distance-weighted soft-max across roads: w = invDist · exp((Z-Zmax)/Tau).
+		// exp() term makes the higher road dominate (highest wins); invDist term
+		// hands each road its own turf away from the overlap, so the transition is
+		// a smooth ramp confined to where the roads actually meet.
+		double Zmax = -TNumericLimits<double>::Max();
+		for (const FRoadHit& Hh : Hits) { Zmax = FMath::Max(Zmax, Hh.Z); }
+
+		const double Tau = FMath::Max(1.0, (double)CVarRoadNetHeightTauCm.GetValueOnAnyThread());
+		double SumW = 0.0, SumWZ = 0.0;
+		for (const FRoadHit& Hh : Hits)
+		{
+			const double W = (1.0 / (Hh.D2 + Soft2)) * FMath::Exp((Hh.Z - Zmax) / Tau);
+			SumW += W; SumWZ += W * Hh.Z;
+		}
+		return (SumW > 0.0) ? (SumWZ / SumW) : Zmax;
 	}
 
 	double FirstCenterlineZ(const TArray<const TArray<FVector>*>& CenterLines)

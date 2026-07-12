@@ -101,7 +101,8 @@ enum class ERoadNetLaneType : uint8
 	Restricted,  // restricted (bus/bike/HOV)
 	Shoulder,    // shoulder
 	CenterTurn,  // center two-way turn lane
-	Median       // median (non-drivable divider)
+	Median,      // median (non-drivable divider)
+	Bicycle      // dedicated bicycle path
 };
 
 // Which side of the reference line a lane sits on. RoadBLD ERoadSide parity:

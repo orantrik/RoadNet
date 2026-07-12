@@ -3,6 +3,7 @@
 #include "RoadNetActor.h"
 #include "RoadNetwork.h"
 #include "RoadNetTypes.h"
+#include "RoadNetMath.h"
 #include "RoadNetLog.h"
 #include "EditorViewportClient.h"
 #include "SceneView.h"
@@ -70,8 +71,8 @@ void FEdModeRoadNet::Enter()
 		GEngine->AddOnScreenDebugMessage(-1, 9.0f, FColor::Cyan,
 			TEXT("RoadNet Draw:  LMB draw/select  |  Alt+LMB force-draw  |  Ctrl+LMB split  |  Enter/RMB finish  |  Del delete\n"
 			     "P edit ALL points  |  LMB-drag = marquee select points  |  Shift+click add/remove  |  drag widget = move all  |  Del = delete all\n"
-			     "U force-merge selected roads  |  =/- lane (Shift=left)  |  [ ] smoothing  |  J junction mark  |  K corner island  |  M median (, . width)  |  Ctrl+Z undo\n"
-			     "Full cheat-sheet: 'OSM Roads' panel > Legend tab"));
+			     "U force-merge selected roads  |  =/- lane (Shift=left)  |  click a lane to select it  |  Shift+= / Shift+- insert lane right/left of it  |  B cycle lane type (bike/parking)\n"
+			     "[ ] smoothing  |  J junction mark  |  K corner island  |  M median (, . width)  |  Ctrl+Z undo  |  Full cheat-sheet: 'OSM Roads' panel > Legend tab"));
 	}
 }
 
@@ -94,8 +95,38 @@ void FEdModeRoadNet::ClearSelection()
 {
 	SelRoad = INDEX_NONE;
 	SelPoint = INDEX_NONE;
+	SelLane = INDEX_NONE;
 	SelPoints.Reset();
 	bDirtyDuringDrag = false;
+}
+
+int32 FEdModeRoadNet::PickLaneAt(int32 RoadIdx, const FVector& WorldHit) const
+{
+	const URoadNetwork* Net = GetNetwork();
+	if (!Net) { return INDEX_NONE; }
+	const TArray<FRoadDef>& Roads = Net->GetRoads();
+	if (!Roads.IsValidIndex(RoadIdx) || Roads[RoadIdx].Ref.Num() < 2) { return INDEX_NONE; }
+
+	const TArray<FRoadNetLane> Lanes = Net->GetLanesLeftToRight(RoadIdx);
+	if (Lanes.Num() == 0) { return INDEX_NONE; }
+
+	// Nearest lane by distance from the click to each lane-centre offset line
+	// (offsetting the raw reference polyline — good enough for a picker).
+	const TArray<FVector>& Ref = Roads[RoadIdx].Ref;
+	int32 Best = INDEX_NONE;
+	double BestD2 = TNumericLimits<double>::Max();
+	for (int32 i = 0; i < Lanes.Num(); ++i)
+	{
+		TArray<FVector> C;
+		RoadNetMath::OffsetPolyline(Ref, Lanes[i].CenterOffset, C);
+		for (int32 s = 0; s + 1 < C.Num(); ++s)
+		{
+			const FVector P = FMath::ClosestPointOnSegment(WorldHit, C[s], C[s + 1]);
+			const double D2 = FVector::DistSquaredXY(WorldHit, P);
+			if (D2 < BestD2) { BestD2 = D2; Best = i; }
+		}
+	}
+	return Best;
 }
 
 bool FEdModeRoadNet::IsPointSelected(int32 Road, int32 Point) const
@@ -109,11 +140,13 @@ void FEdModeRoadNet::SelectSinglePoint(int32 Road, int32 Point)
 	SelPoints.Add(FIntPoint(Road, Point));
 	SelRoad = Road;
 	SelPoint = Point;   // >= 0 so this is a POINT selection, not a whole-road one
+	SelLane = INDEX_NONE;
 }
 
 void FEdModeRoadNet::ToggleSelPoint(int32 Road, int32 Point)
 {
 	const FIntPoint Key(Road, Point);
+	SelLane = INDEX_NONE;
 	const int32 Existing = SelPoints.Find(Key);
 	if (Existing != INDEX_NONE)
 	{
@@ -314,10 +347,12 @@ bool FEdModeRoadNet::TrySelectUnderCursor(FEditorViewportClient* ViewportClient,
 	}
 	else if (RdRoad != INDEX_NONE)
 	{
-		// Whole-road select (not a point pick) — drop any point selection.
+		// Whole-road select (not a point pick) — drop any point selection and
+		// pick the lane under the cursor for lane editing.
 		SelPoints.Reset();
 		SelRoad = RdRoad;
 		SelPoint = INDEX_NONE;
+		SelLane = PickLaneAt(RdRoad, Hit);
 	}
 	else { return false; }
 
@@ -490,12 +525,16 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 				if (InViewportClient) { InViewportClient->Invalidate(); }
 				return true;
 			}
-			// Plain click on a segment selects the whole road (SelPoint = NONE).
+			// Plain click on a segment selects the whole road (SelPoint = NONE)
+			// and picks the lane under the cursor for lane editing.
 			if (HRoadNetSegmentProxy* S = HitProxyCast<HRoadNetSegmentProxy>(HitProxy))
 			{
 				SelPoints.Reset();
 				SelRoad = S->RoadIndex;
 				SelPoint = INDEX_NONE;
+				FVector Hit;
+				SelLane = LineTraceCursor(InViewportClient, Hit)
+					? PickLaneAt(SelRoad, Hit) : INDEX_NONE;
 				if (InViewportClient) { InViewportClient->Invalidate(); }
 				return true;
 			}
@@ -729,6 +768,39 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				URoadNetwork* Net = GetNetwork();
 				if (!Net) { return true; }
 
+				const bool bShift = Viewport &&
+					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
+
+				// Lane-relative INSERT: Shift + a SELECTED lane. Shift+= inserts a
+				// new lane to the RIGHT of the highlighted lane, Shift+- to the LEFT
+				// (plain = / - stay as the general add/remove below). Requires a lane
+				// pick (click a road/lane first) so we know the anchor.
+				if (bShift && SelRoad != INDEX_NONE && SelLane != INDEX_NONE)
+				{
+					const FScopedTransaction Transaction(LOCTEXT("RoadNetInsertLane", "Insert RoadNet Lane"));
+					ModifyForEdit();
+					const int32 NewSel = Net->InsertLaneRelative(SelRoad, SelLane, /*bRightSide*/bAdd);
+					if (NewSel != INDEX_NONE)
+					{
+						SelLane = NewSel;
+						SelPoint = INDEX_NONE;
+						Net->Rebuild();
+						if (GEngine)
+						{
+							GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+								FString::Printf(TEXT("RoadNet: inserted lane to the %s of the selected lane (road %d now has %d lanes)"),
+									bAdd ? TEXT("RIGHT") : TEXT("LEFT"), SelRoad, Net->GetLaneCount(SelRoad)));
+						}
+						if (ViewportClient) { ViewportClient->Invalidate(); }
+					}
+					else if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: click a road/lane to select a lane first, then Shift+= / Shift+-"));
+					}
+					return true;
+				}
+
 				// Resolve a target road: current selection, else nearest road to
 				// the cursor within a pick radius so no explicit click is needed.
 				int32 Target = SelRoad;
@@ -790,6 +862,42 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
 						TEXT("RoadNet: lane edit not applied (already at min 1 lane, or road has authored DetailedLanes)."));
 				}
+				return true;
+			}
+
+			// Lane type cycle (draft not in progress):
+			//   'B' → cycle the SELECTED lane's type: driving → bicycle → parking →
+			//         driving (Shift+B reverses). Best used on an OUTER lane to turn
+			//         it into a bike path / parking bay. Requires a lane pick.
+			if (Key == EKeys::B)
+			{
+				URoadNetwork* Net = GetNetwork();
+				if (!Net) { return true; }
+				if (SelRoad == INDEX_NONE || SelLane == INDEX_NONE)
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: click a road/lane to select a lane first, then B to cycle its type"));
+					}
+					return true;
+				}
+				const bool bShiftB = Viewport &&
+					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
+
+				const FScopedTransaction Transaction(LOCTEXT("RoadNetLaneType", "Cycle RoadNet Lane Type"));
+				ModifyForEdit();
+				const ERoadNetLaneType NewType = Net->CycleLaneType(SelRoad, SelLane, bShiftB ? -1 : 1);
+				Net->Rebuild();
+				if (GEngine)
+				{
+					const TCHAR* TypeName =
+						(NewType == ERoadNetLaneType::Bicycle) ? TEXT("Bicycle path") :
+						(NewType == ERoadNetLaneType::Parking) ? TEXT("Parking bay")  : TEXT("Driving lane");
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+						FString::Printf(TEXT("RoadNet: selected lane is now a %s"), TypeName));
+				}
+				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
 			}
 
@@ -1066,6 +1174,36 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 			{
 				const FColor Col = PresetColor(V.Preset);
 				PDI->DrawPoint(V.Location + FVector(0, 0, 30.f), Col, 22.f, SDPG_Foreground);
+			}
+
+			// Selected-lane highlight (whole-road selection only): draw the lane's
+			// centre + two edges, lifted above the carriageway, tinted by type so
+			// bike/parking lanes read at a glance. Anchor for Shift+= / Shift+- / B.
+			if (SelRoad != INDEX_NONE && SelPoint == INDEX_NONE && SelLane != INDEX_NONE
+				&& Roads.IsValidIndex(SelRoad) && Roads[SelRoad].Ref.Num() >= 2)
+			{
+				const TArray<FRoadNetLane> Lanes = Net->GetLanesLeftToRight(SelRoad);
+				if (Lanes.IsValidIndex(SelLane))
+				{
+					const FRoadNetLane& Ln = Lanes[SelLane];
+					const FColor HL =
+						(Ln.Type == ERoadNetLaneType::Bicycle) ? FColor(60, 220, 90)  :
+						(Ln.Type == ERoadNetLaneType::Parking) ? FColor(255, 210, 40) : FColor(70, 200, 255);
+					const FVector Lift(0, 0, 25.f);
+					const TArray<FVector>& Ref = Roads[SelRoad].Ref;
+					auto DrawOff = [&](double Off, float Thick)
+					{
+						TArray<FVector> C;
+						RoadNetMath::OffsetPolyline(Ref, Off, C);
+						for (int32 s = 0; s + 1 < C.Num(); ++s)
+						{
+							PDI->DrawLine(C[s] + Lift, C[s + 1] + Lift, HL, SDPG_Foreground, Thick);
+						}
+					};
+					DrawOff(Ln.CenterOffset, 4.f);
+					DrawOff(Ln.CenterOffset + 0.5 * Ln.Width, 2.f);
+					DrawOff(Ln.CenterOffset - 0.5 * Ln.Width, 2.f);
+				}
 			}
 		}
 	}

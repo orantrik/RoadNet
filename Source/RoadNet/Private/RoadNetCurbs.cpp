@@ -52,6 +52,12 @@ namespace RoadNetCurbs
 			const double StdLenCm   = FMath::Max(20.0, SpacingCm);       // standard piece length
 			const double MinPieceCm = FMath::Max(15.0, StdLenCm * 0.25); // shortest corner sliver
 			constexpr double kMaxPieceTurnRad = 0.20;                    // ~11.5° → cut on curves
+			// Max allowed sag/hump (cm) of a straight stone's chord from the real
+			// draped grade at its midpoint. When the LONGITUDINAL slope curves (a
+			// crest/dip), a full-length stone would bridge the bump and lift off /
+			// dig in — so shrink the piece until the chord hugs the grade. On a
+			// constant slope the chord matches exactly → pieces stay standard length.
+			constexpr double kZChordTolCm = 2.0;
 
 			// Position along the polyline at arc length s (forward-only hint).
 			auto PosAt = [&](double s, int32& Hint) -> FVector2D
@@ -109,6 +115,25 @@ namespace RoadNetCurbs
 					const double Turn = FMath::Acos(FMath::Clamp((double)FVector2D::DotProduct(Dir0, Hk), -1.0, 1.0));
 					if (Turn > kMaxPieceTurnRad) { e = S[k]; break; }
 				}
+
+				// Vertical (grade) curvature cut: halve the piece until its straight
+				// chord stays within kZChordTolCm of the draped grade at the midpoint,
+				// down to MinPieceCm. Short stones where the slope bends, standard
+				// length where it doesn't.
+				for (int32 VGuard = 0; VGuard < 24 && (e - s) > MinPieceCm; ++VGuard)
+				{
+					int32 hA = HintS, hM = HintS, hB = HintS;
+					const FVector2D PA = PosAt(s, hA);
+					const FVector2D PB = PosAt(e, hB);
+					const FVector2D PM = PosAt(0.5 * (s + e), hM);
+					const double Za = Height.SampleHeight(PA.X, PA.Y, Fallback);
+					const double Zb = Height.SampleHeight(PB.X, PB.Y, Fallback);
+					const double Zm = Height.SampleHeight(PM.X, PM.Y, Fallback);
+					if (FMath::Abs(Zm - 0.5 * (Za + Zb)) <= kZChordTolCm) { break; }
+					e = s + 0.5 * (e - s);
+				}
+				if ((e - s) < MinPieceCm) { e = FMath::Min(s + MinPieceCm, Total); }
+
 				// Fold a short tail into this piece rather than slivering.
 				if (Total - e < MinPieceCm) { e = Total; }
 
