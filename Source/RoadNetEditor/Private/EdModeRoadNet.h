@@ -80,6 +80,13 @@ private:
 	void FinalizeDraft();
 	bool GetSelectedPoint(FVector& OutPos) const;
 	void ClearSelection();
+	// Mark BOTH the actor and its network dirty for the open transaction so the
+	// road source-of-truth (URoadNetwork::Roads) is captured by undo/redo.
+	void ModifyForEdit();
+	// Proximity pick under the cursor (used when the carriageway mesh occludes
+	// the thin point/segment hit proxies). Selects the nearest hand-drawn control
+	// point, else the nearest road centreline. Returns true when it selected.
+	bool TrySelectUnderCursor(FEditorViewportClient* ViewportClient);
 
 	TArray<FVector> DraftPoints;
 	FVector HoverPoint = FVector::ZeroVector;

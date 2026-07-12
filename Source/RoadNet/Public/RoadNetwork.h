@@ -315,6 +315,13 @@ public:
 	// Bind a target world for the (future) commit stage that spawns geometry.
 	void SetWorld(UWorld* InWorld) { WorldPtr = InWorld; }
 
+#if WITH_EDITOR
+	// Undo/redo restores the reflected Roads / JunctionConfigs on this object,
+	// but the generated geometry (dynamic-mesh + HISM actors) is not part of the
+	// transaction — so regenerate it here to match the restored authoring state.
+	virtual void PostEditUndo() override;
+#endif
+
 private:
 	UPROPERTY()
 	TArray<FRoadDef> Roads;

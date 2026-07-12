@@ -61,7 +61,14 @@ void FEdModeRoadNet::Enter()
 	GetOrSpawnNetActor();
 	DraftPoints.Reset();
 	bHasHover = false;
-	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw mode entered. Left-click to place points, Enter/double-click to finish, Backspace to undo, Esc to cancel."));
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw mode: LMB draw/select | Alt+LMB force-draw | Ctrl+LMB split | Enter/RMB finish | Del delete | =/- lane (Shift=left) | [ ] junction smoothing | J mark | K island | M median (, . width) | Ctrl+Z undo. Full list: 'OSM Roads' panel > Legend tab."));
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 9.0f, FColor::Cyan,
+			TEXT("RoadNet Draw:  LMB draw/select  |  Alt+LMB force-draw  |  Ctrl+LMB split  |  Enter/RMB finish  |  Del delete\n"
+			     "=/- lane (Shift=left)  |  [ ] smoothing  |  J junction mark  |  K corner island  |  M median (, . width)  |  Ctrl+Z undo\n"
+			     "Full cheat-sheet: 'OSM Roads' panel > Legend tab"));
+	}
 }
 
 void FEdModeRoadNet::Exit()
@@ -84,6 +91,59 @@ void FEdModeRoadNet::ClearSelection()
 	SelRoad = INDEX_NONE;
 	SelPoint = INDEX_NONE;
 	bDirtyDuringDrag = false;
+}
+
+void FEdModeRoadNet::ModifyForEdit()
+{
+	// Modify the actor (owns the sub-object) AND the network (owns the Roads
+	// array) so the whole authoring state is snapshotted into the transaction.
+	if (ARoadNetActor* Actor = NetActorPtr.Get())
+	{
+		Actor->Modify();
+		if (URoadNetwork* Net = Actor->GetNetwork()) { Net->Modify(); }
+	}
+}
+
+bool FEdModeRoadNet::TrySelectUnderCursor(FEditorViewportClient* ViewportClient)
+{
+	URoadNetwork* Net = GetNetwork();
+	if (!Net || !ViewportClient) { return false; }
+
+	FVector Hit;
+	if (!LineTraceCursor(ViewportClient, Hit)) { return false; }
+
+	const TArray<FRoadDef>& Roads = Net->GetRoads();
+	double BestPtD2 = FMath::Square(450.0);   // 4.5 m: hand-drawn control-point pick
+	int32  PtRoad = INDEX_NONE, PtIdx = INDEX_NONE;
+	double BestRdD2 = FMath::Square(400.0);   // 4 m: road-centreline pick
+	int32  RdRoad = INDEX_NONE;
+	for (int32 r = 0; r < Roads.Num(); ++r)
+	{
+		const FRoadDef& Rd = Roads[r];
+		// Per-point handles only exist for hand-drawn roads (OSM points are
+		// re-derived on import), so only they are point-selectable.
+		if (Rd.Source == ERoadNetSource::HandDrawn)
+		{
+			for (int32 i = 0; i < Rd.Ref.Num(); ++i)
+			{
+				const double D2 = FVector::DistSquaredXY(Hit, Rd.Ref[i]);
+				if (D2 < BestPtD2) { BestPtD2 = D2; PtRoad = r; PtIdx = i; }
+			}
+		}
+		for (int32 i = 0; i + 1 < Rd.Ref.Num(); ++i)
+		{
+			const FVector C = FMath::ClosestPointOnSegment(Hit, Rd.Ref[i], Rd.Ref[i + 1]);
+			const double D2 = FVector::DistSquaredXY(Hit, C);
+			if (D2 < BestRdD2) { BestRdD2 = D2; RdRoad = r; }
+		}
+	}
+
+	if (PtRoad != INDEX_NONE) { SelRoad = PtRoad; SelPoint = PtIdx; }
+	else if (RdRoad != INDEX_NONE) { SelRoad = RdRoad; SelPoint = INDEX_NONE; }
+	else { return false; }
+
+	if (ViewportClient) { ViewportClient->Invalidate(); }
+	return true;
 }
 
 bool FEdModeRoadNet::GetSelectedPoint(FVector& OutPos) const
@@ -203,8 +263,11 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 			FinalizeDraft();
 			return true;
 		}
-		// EDIT: while idle (no draft), clicks operate on existing hand-drawn roads.
-		if (DraftPoints.Num() == 0)
+		// EDIT: while idle (no draft), clicks operate on existing roads — pick a
+		// control point / road to select & edit. Holding ALT gates this OFF and
+		// forces a DRAW point instead, so you can start or extend a road on top
+		// of (or right beside) an existing one without it stealing the click.
+		if (DraftPoints.Num() == 0 && !Click.IsAltDown())
 		{
 			// Ctrl+click a segment → insert a point there (mid-span split).
 			if (Click.IsControlDown())
@@ -226,7 +289,7 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 									Hit, Roads[S->RoadIndex].Ref[S->SegIndex], Roads[S->RoadIndex].Ref[S->SegIndex + 1]);
 							}
 							const FScopedTransaction Transaction(LOCTEXT("RoadNetSplit", "Split RoadNet Road"));
-							if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+							ModifyForEdit();
 							if (Net->InsertRoadPoint(S->RoadIndex, S->SegIndex, InsertPos))
 							{
 								SelRoad = S->RoadIndex;
@@ -253,6 +316,15 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 				SelRoad = S->RoadIndex;
 				SelPoint = INDEX_NONE;
 				if (InViewportClient) { InViewportClient->Invalidate(); }
+				return true;
+			}
+			// The point/segment hit proxies are thin overlays and get occluded by
+			// the carriageway mesh once a road is built, so the click above often
+			// returns the mesh's proxy instead. Fall back to a proximity pick (as
+			// the delete/lane hotkeys do) so control points stay grabbable. Only
+			// when nothing is near the cursor do we drop through to DRAW.
+			if (TrySelectUnderCursor(InViewportClient))
+			{
 				return true;
 			}
 		}
@@ -347,7 +419,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					if (DelPoint != INDEX_NONE)
 					{
 						const FScopedTransaction Transaction(LOCTEXT("RoadNetDeletePoint", "Delete RoadNet Point"));
-						if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+						ModifyForEdit();
 						bool bRoadRemoved = false;
 						if (Net->DeleteRoadPoint(DelRoad, DelPoint, bRoadRemoved))
 						{
@@ -364,7 +436,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					else
 					{
 						const FScopedTransaction Transaction(LOCTEXT("RoadNetDeleteRoad", "Delete RoadNet Road"));
-						if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+						ModifyForEdit();
 						if (Net->RemoveRoad(DelRoad))
 						{
 							Net->Rebuild();
@@ -440,7 +512,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				const ERoadNetSide Side = bLeft ? ERoadNetSide::Left : ERoadNetSide::Right;
 
 				const FScopedTransaction Transaction(LOCTEXT("RoadNetEditLane", "Edit RoadNet Lane"));
-				if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+				ModifyForEdit();
 
 				const bool bOk = bAdd ? Net->AddLane(Target, Side) : Net->RemoveLane(Target, Side);
 				if (bOk)
@@ -481,7 +553,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				const double Step = (bCoarse ? 50.0 : 10.0) * (bSmoothUp ? 1.0 : -1.0);
 
 				const FScopedTransaction Transaction(LOCTEXT("RoadNetJunctionSmooth", "Adjust RoadNet Junction Smoothing"));
-				if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+				ModifyForEdit();
 
 				const double NewVal = Net->AdjustJunctionSmoothing(Step);
 				Net->Rebuild();
@@ -529,7 +601,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
 
 				const FScopedTransaction Transaction(LOCTEXT("RoadNetJunctionMark", "Cycle RoadNet Junction Marking"));
-				if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+				ModifyForEdit();
 
 				const ERoadNetJunctionPreset P = Net->CycleJunctionPresetNear(Loc, bBack ? -1 : 1);
 				Net->Rebuild();
@@ -573,7 +645,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				}
 
 				const FScopedTransaction Transaction(LOCTEXT("RoadNetJunctionIsland", "Toggle RoadNet Junction Islands"));
-				if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+				ModifyForEdit();
 
 				const bool bOn = Net->ToggleJunctionIslandsNear(Loc);
 				Net->Rebuild();
@@ -631,7 +703,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
 
 				const FScopedTransaction Transaction(LOCTEXT("RoadNetMedian", "Edit RoadNet Median"));
-				if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+				ModifyForEdit();
 
 				FString Msg;
 				if (Key == EKeys::M)
@@ -790,7 +862,7 @@ bool FEdModeRoadNet::InputDelta(FEditorViewportClient* InViewportClient, FViewpo
 				if (!bDirtyDuringDrag && GEditor)
 				{
 					GEditor->BeginTransaction(LOCTEXT("RoadNetMovePoint", "Move RoadNet Point"));
-					if (ARoadNetActor* Actor = NetActorPtr.Get()) { Actor->Modify(); }
+					ModifyForEdit();
 					bDirtyDuringDrag = true;
 				}
 				Net->MoveRoadPoint(SelRoad, SelPoint, Pos + InDrag);   // rebuild on release
@@ -829,6 +901,7 @@ void FEdModeRoadNet::FinalizeDraft()
 
 	const FScopedTransaction Transaction(LOCTEXT("RoadNetDrawRoad", "Draw RoadNet Road"));
 	Actor->Modify();
+	Net->Modify();   // roads live on the network sub-object; capture it for undo
 
 	FRoadDef R;
 	R.Source = ERoadNetSource::HandDrawn;

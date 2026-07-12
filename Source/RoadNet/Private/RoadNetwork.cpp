@@ -241,6 +241,23 @@ double URoadNetwork::AdjustJunctionSmoothing(double DeltaCm)
 	return JunctionSmoothingCm;
 }
 
+#if WITH_EDITOR
+void URoadNetwork::PostEditUndo()
+{
+	Super::PostEditUndo();
+
+	// The transaction restored the reflected authoring state (Roads / junction
+	// overrides); rebind the world from our owning actor (the weak WorldPtr may
+	// have gone stale across the undo) and regenerate the disposable geometry so
+	// the viewport reflects the undone/redone edit.
+	if (const AActor* Owner = GetTypedOuter<AActor>())
+	{
+		if (UWorld* World = Owner->GetWorld()) { WorldPtr = World; }
+	}
+	Rebuild();
+}
+#endif
+
 void URoadNetwork::Rebuild(TArrayView<const int32> Modified)
 {
 	const double T0 = FPlatformTime::Seconds();

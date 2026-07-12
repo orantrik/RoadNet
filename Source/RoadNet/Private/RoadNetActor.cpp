@@ -12,20 +12,29 @@ ARoadNetActor::ARoadNetActor()
 	SetRootComponent(Root);
 
 	Network = CreateDefaultSubobject<URoadNetwork>(TEXT("RoadNetwork"));
+	// The road source-of-truth (Roads array) lives on the Network sub-object, so
+	// it must be transactional for interactive edits to be undoable (Ctrl+Z).
+	if (Network) { Network->SetFlags(RF_Transactional); }
 }
 
 URoadNetwork* ARoadNetActor::GetNetwork()
 {
 	if (!Network)
 	{
-		Network = NewObject<URoadNetwork>(this, TEXT("RoadNetwork"));
+		Network = NewObject<URoadNetwork>(this, TEXT("RoadNetwork"), RF_Transactional);
 	}
+	// Ensure the network always participates in the transaction buffer (older
+	// saved actors may have a non-transactional sub-object) so draw/move/delete/
+	// lane/median/junction edits can be undone and redone.
+	Network->SetFlags(RF_Transactional);
 	Network->SetWorld(GetWorld());
 	return Network;
 }
 
 void ARoadNetActor::AddDraftSpline()
 {
+	Modify();   // capture the DraftSplines change for undo
+
 	USplineComponent* Spline = NewObject<USplineComponent>(this, NAME_None, RF_Transactional);
 	if (!Spline) { return; }
 
@@ -50,6 +59,9 @@ void ARoadNetActor::RebuildFromDrafts()
 {
 	URoadNetwork* Net = GetNetwork();
 	if (!Net) { return; }
+
+	Modify();
+	Net->Modify();
 
 	// Refresh only hand-drawn roads; OSM-imported roads are left untouched.
 	Net->RemoveRoadsBySource(ERoadNetSource::HandDrawn);
@@ -96,6 +108,8 @@ void ARoadNetActor::ClearHandDrawn()
 {
 	URoadNetwork* Net = GetNetwork();
 	if (!Net) { return; }
+	Modify();
+	Net->Modify();
 	const int32 Removed = Net->RemoveRoadsBySource(ERoadNetSource::HandDrawn);
 	Net->Rebuild();
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] ClearHandDrawn: removed %d hand-drawn road(s)."), Removed);
