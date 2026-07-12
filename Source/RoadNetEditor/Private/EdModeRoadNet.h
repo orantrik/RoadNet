@@ -55,6 +55,11 @@ public:
 	virtual bool InputKey(FEditorViewportClient* ViewportClient, FViewport* Viewport, FKey Key, EInputEvent Event) override;
 	virtual bool MouseMove(FEditorViewportClient* ViewportClient, FViewport* Viewport, int32 MouseX, int32 MouseY) override;
 	virtual void Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI) override;
+	virtual void DrawHUD(FEditorViewportClient* ViewportClient, FViewport* Viewport, const FSceneView* View, FCanvas* Canvas) override;
+
+	// Marquee box-select of control points (left-drag on empty space).
+	virtual bool StartTracking(FEditorViewportClient* InViewportClient, FViewport* InViewport) override;
+	virtual bool CapturedMouseMove(FEditorViewportClient* InViewportClient, FViewport* InViewport, int32 InMouseX, int32 InMouseY) override;
 
 	// Transform-widget editing of the selected point.
 	virtual bool ShouldDrawWidget() const override;
@@ -80,13 +85,33 @@ private:
 	void FinalizeDraft();
 	bool GetSelectedPoint(FVector& OutPos) const;
 	void ClearSelection();
+
+	// ---- multi-point selection helpers ------------------------------------
+	// Is (Road,Point) currently in the multi-selection?
+	bool IsPointSelected(int32 Road, int32 Point) const;
+	// Replace the selection with a single point (plain click).
+	void SelectSinglePoint(int32 Road, int32 Point);
+	// Add the point if absent, remove it if present (Shift+click).
+	void ToggleSelPoint(int32 Road, int32 Point);
+	// Average world position of every selected point (transform-widget anchor).
+	bool GetSelectionCentroid(FVector& OutPos) const;
+	// Offset every selected point by Delta (widget drag). No rebuild (on release).
+	void MoveSelectedPoints(const FVector& Delta);
+	// Delete every selected point (safe order: roads + points descending so
+	// index shifts and whole-road removals never invalidate pending deletes).
+	// Returns the number of points removed.
+	int32 DeleteSelectedPoints();
+	// Select every visible control point whose screen position falls inside the
+	// marquee box (bAdd keeps the current selection, else replaces it).
+	void SelectPointsInMarquee(FEditorViewportClient* ViewportClient, bool bAdd);
 	// Mark BOTH the actor and its network dirty for the open transaction so the
 	// road source-of-truth (URoadNetwork::Roads) is captured by undo/redo.
 	void ModifyForEdit();
 	// Proximity pick under the cursor (used when the carriageway mesh occludes
-	// the thin point/segment hit proxies). Selects the nearest hand-drawn control
-	// point, else the nearest road centreline. Returns true when it selected.
-	bool TrySelectUnderCursor(FEditorViewportClient* ViewportClient);
+	// the thin point/segment hit proxies). Selects the nearest editable control
+	// point, else the nearest road centreline. bToggle (Shift) adds/removes the
+	// picked point from the multi-selection. Returns true when it selected.
+	bool TrySelectUnderCursor(FEditorViewportClient* ViewportClient, bool bToggle);
 
 	TArray<FVector> DraftPoints;
 	FVector HoverPoint = FVector::ZeroVector;
@@ -95,9 +120,29 @@ private:
 	FVector SnapPoint = FVector::ZeroVector;
 
 	// Edit selection (valid only when a draft is NOT in progress).
+	//   * Whole-road selection: SelRoad set, SelPoint == INDEX_NONE, SelPoints empty.
+	//   * Point selection: SelPoints holds every selected (Road,Point); SelRoad /
+	//     SelPoint mirror the PRIMARY (first) point so lane/median/junction ops
+	//     still have a road context and the road isn't drawn as whole-selected.
 	int32 SelRoad = INDEX_NONE;
 	int32 SelPoint = INDEX_NONE;
 	bool bDirtyDuringDrag = false;
+
+	// Multi-point selection: (RoadIndex, PointIndex) pairs. Move/delete act on all.
+	TArray<FIntPoint> SelPoints;
+
+	// Marquee box-select drag state (screen pixels).
+	bool bMarquee = false;
+	bool bMarqueeMoved = false;
+	FIntPoint MarqueeStart = FIntPoint::ZeroValue;
+	FIntPoint MarqueeCur   = FIntPoint::ZeroValue;
+
+	// "Edit all points" toggle (hotkey P). When ON, EVERY road's control points
+	// (imported OR hand-drawn) render as draggable handles and become
+	// select/move/delete targets — not just hand-drawn roads. Off by default
+	// because a city-scale OSM import has thousands of nodes; opt in to edit
+	// imported geometry (edits persist until the next re-import of that road).
+	bool bShowAllPoints = false;
 
 	TWeakObjectPtr<ARoadNetActor> NetActorPtr;
 };

@@ -50,6 +50,18 @@ namespace RoadNetMath
 	ROADNET_API void SmoothG2Spline(
 		const TArray<FVector>& In, double MaxChordCm, TArray<FVector>& Out);
 
+	// Smooth the LONGITUDINAL profile (Z vs arc-length) of a polyline into a
+	// clean grade, IN PLACE. At each vertex a line z = a + b·s is fit by weighted
+	// least squares to every vertex within ±HalfWindowCm of arc length (triangular
+	// weights), and Z is replaced by the fitted value at that vertex.
+	//
+	// Why a *linear* fit: on a constant slope it returns that slope EXACTLY (the
+	// bed stays a straight ramp), while averaging out the terrain micro-bumps a
+	// draped centreline inherits and the up/down OVERSHOOT a cubic spline adds
+	// between sparse knots — those are the "steps"/washboard under the road.
+	// X/Y are left untouched (plan geometry unchanged); only the height ramps.
+	ROADNET_API void SmoothProfileZ(TArray<FVector>& Poly, double HalfWindowCm);
+
 	// ---- §10.4 Offset ------------------------------------------------------
 	// Offset a polyline laterally by SignedOffset (cm, +right). Uses miter joins
 	// clamped to MiterLimit*|offset|, falling back to the plain per-vertex offset

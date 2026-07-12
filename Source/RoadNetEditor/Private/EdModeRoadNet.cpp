@@ -7,6 +7,8 @@
 #include "EditorViewportClient.h"
 #include "SceneView.h"
 #include "SceneManagement.h"
+#include "CanvasItem.h"
+#include "CanvasTypes.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "ScopedTransaction.h"
@@ -29,6 +31,7 @@ namespace
 	const FColor     kColorEditPt = FColor(120, 180, 255);
 	const FColor     kColorEditLine = FColor(90, 120, 160);
 	const FColor     kColorOsmLine = FColor(230, 150, 60);   // imported roads (selectable for lane edits)
+	const FColor     kColorOsmPt = FColor(255, 170, 70);     // imported road points (shown with "edit all points")
 
 	const TCHAR* PresetName(ERoadNetJunctionPreset P)
 	{
@@ -61,12 +64,13 @@ void FEdModeRoadNet::Enter()
 	GetOrSpawnNetActor();
 	DraftPoints.Reset();
 	bHasHover = false;
-	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw mode: LMB draw/select | Alt+LMB force-draw | Ctrl+LMB split | Enter/RMB finish | Del delete | =/- lane (Shift=left) | [ ] junction smoothing | J mark | K island | M median (, . width) | Ctrl+Z undo. Full list: 'OSM Roads' panel > Legend tab."));
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw mode: LMB draw/select | Alt+LMB force-draw | Ctrl+LMB split | Enter/RMB finish | Del delete | P edit-all-points | LMB-drag marquee-select | U merge selected roads | =/- lane (Shift=left) | [ ] junction smoothing | J mark | K island | M median (, . width) | Ctrl+Z undo. Full list: 'OSM Roads' panel > Legend tab."));
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 9.0f, FColor::Cyan,
 			TEXT("RoadNet Draw:  LMB draw/select  |  Alt+LMB force-draw  |  Ctrl+LMB split  |  Enter/RMB finish  |  Del delete\n"
-			     "=/- lane (Shift=left)  |  [ ] smoothing  |  J junction mark  |  K corner island  |  M median (, . width)  |  Ctrl+Z undo\n"
+			     "P edit ALL points  |  LMB-drag = marquee select points  |  Shift+click add/remove  |  drag widget = move all  |  Del = delete all\n"
+			     "U force-merge selected roads  |  =/- lane (Shift=left)  |  [ ] smoothing  |  J junction mark  |  K corner island  |  M median (, . width)  |  Ctrl+Z undo\n"
 			     "Full cheat-sheet: 'OSM Roads' panel > Legend tab"));
 	}
 }
@@ -90,7 +94,172 @@ void FEdModeRoadNet::ClearSelection()
 {
 	SelRoad = INDEX_NONE;
 	SelPoint = INDEX_NONE;
+	SelPoints.Reset();
 	bDirtyDuringDrag = false;
+}
+
+bool FEdModeRoadNet::IsPointSelected(int32 Road, int32 Point) const
+{
+	return SelPoints.Contains(FIntPoint(Road, Point));
+}
+
+void FEdModeRoadNet::SelectSinglePoint(int32 Road, int32 Point)
+{
+	SelPoints.Reset();
+	SelPoints.Add(FIntPoint(Road, Point));
+	SelRoad = Road;
+	SelPoint = Point;   // >= 0 so this is a POINT selection, not a whole-road one
+}
+
+void FEdModeRoadNet::ToggleSelPoint(int32 Road, int32 Point)
+{
+	const FIntPoint Key(Road, Point);
+	const int32 Existing = SelPoints.Find(Key);
+	if (Existing != INDEX_NONE)
+	{
+		SelPoints.RemoveAt(Existing);
+	}
+	else
+	{
+		SelPoints.Add(Key);
+	}
+	// Keep the primary (road context) pointing at a still-selected point.
+	if (SelPoints.Num() > 0)
+	{
+		SelRoad  = SelPoints[0].X;
+		SelPoint = SelPoints[0].Y;
+	}
+	else
+	{
+		SelRoad = INDEX_NONE;
+		SelPoint = INDEX_NONE;
+	}
+}
+
+bool FEdModeRoadNet::GetSelectionCentroid(FVector& OutPos) const
+{
+	const URoadNetwork* Net = GetNetwork();
+	if (!Net || SelPoints.Num() == 0) { return false; }
+	const TArray<FRoadDef>& Roads = Net->GetRoads();
+	FVector Sum = FVector::ZeroVector;
+	int32 N = 0;
+	for (const FIntPoint& S : SelPoints)
+	{
+		if (Roads.IsValidIndex(S.X) && Roads[S.X].Ref.IsValidIndex(S.Y))
+		{
+			Sum += Roads[S.X].Ref[S.Y];
+			++N;
+		}
+	}
+	if (N == 0) { return false; }
+	OutPos = Sum / (double)N;
+	return true;
+}
+
+void FEdModeRoadNet::MoveSelectedPoints(const FVector& Delta)
+{
+	URoadNetwork* Net = GetNetwork();
+	if (!Net || SelPoints.Num() == 0) { return; }
+	const TArray<FRoadDef>& Roads = Net->GetRoads();
+	for (const FIntPoint& S : SelPoints)
+	{
+		if (Roads.IsValidIndex(S.X) && Roads[S.X].Ref.IsValidIndex(S.Y))
+		{
+			Net->MoveRoadPoint(S.X, S.Y, Roads[S.X].Ref[S.Y] + Delta);   // rebuild on release
+		}
+	}
+}
+
+int32 FEdModeRoadNet::DeleteSelectedPoints()
+{
+	URoadNetwork* Net = GetNetwork();
+	if (!Net || SelPoints.Num() == 0) { return 0; }
+
+	// Group the selection by road so we can delete highest indices first (index
+	// shifts within a road never invalidate a lower pending delete), and process
+	// roads highest-first (a whole-road removal only shifts higher road indices,
+	// which are already done).
+	TMap<int32, TArray<int32>> ByRoad;
+	for (const FIntPoint& S : SelPoints) { ByRoad.FindOrAdd(S.X).AddUnique(S.Y); }
+
+	TArray<int32> RoadKeys;
+	ByRoad.GetKeys(RoadKeys);
+	RoadKeys.Sort([](const int32& A, const int32& B) { return A > B; });
+
+	int32 Removed = 0;
+	for (int32 r : RoadKeys)
+	{
+		TArray<int32>& Pts = ByRoad[r];
+		Pts.Sort([](const int32& A, const int32& B) { return A > B; });
+		for (int32 p : Pts)
+		{
+			bool bRoadRemoved = false;
+			if (Net->DeleteRoadPoint(r, p, bRoadRemoved))
+			{
+				++Removed;
+				// Road collapsed (< 2 points): its remaining selected points no
+				// longer exist — stop deleting on this road.
+				if (bRoadRemoved) { break; }
+			}
+		}
+	}
+	return Removed;
+}
+
+void FEdModeRoadNet::SelectPointsInMarquee(FEditorViewportClient* ViewportClient, bool bAdd)
+{
+	URoadNetwork* Net = GetNetwork();
+	if (!Net || !ViewportClient || !ViewportClient->Viewport) { return; }
+
+	FViewport* Viewport = ViewportClient->Viewport;
+	FSceneViewFamilyContext ViewFamily(FSceneViewFamily::ConstructionValues(
+		Viewport, ViewportClient->GetScene(), ViewportClient->EngineShowFlags).SetRealtimeUpdate(ViewportClient->IsRealtime()));
+	FSceneView* View = ViewportClient->CalcSceneView(&ViewFamily);
+	if (!View) { return; }
+
+	const int32 MinX = FMath::Min(MarqueeStart.X, MarqueeCur.X);
+	const int32 MaxX = FMath::Max(MarqueeStart.X, MarqueeCur.X);
+	const int32 MinY = FMath::Min(MarqueeStart.Y, MarqueeCur.Y);
+	const int32 MaxY = FMath::Max(MarqueeStart.Y, MarqueeCur.Y);
+
+	if (!bAdd) { SelPoints.Reset(); }
+
+	const TArray<FRoadDef>& Roads = Net->GetRoads();
+	for (int32 r = 0; r < Roads.Num(); ++r)
+	{
+		const FRoadDef& Rd = Roads[r];
+		// Only points that are actually SHOWN are selectable (hand-drawn always,
+		// imported only while "edit all points" is on).
+		if (!(Rd.Source == ERoadNetSource::HandDrawn || bShowAllPoints)) { continue; }
+		for (int32 i = 0; i < Rd.Ref.Num(); ++i)
+		{
+			FVector2D Px;
+			if (!View->WorldToPixel(Rd.Ref[i], Px)) { continue; } // behind camera
+			if (Px.X >= MinX && Px.X <= MaxX && Px.Y >= MinY && Px.Y <= MaxY)
+			{
+				SelPoints.AddUnique(FIntPoint(r, i));
+			}
+		}
+	}
+
+	// Refresh the primary (road context) from the resulting selection.
+	if (SelPoints.Num() > 0)
+	{
+		SelRoad  = SelPoints[0].X;
+		SelPoint = SelPoints[0].Y;
+	}
+	else
+	{
+		SelRoad = INDEX_NONE;
+		SelPoint = INDEX_NONE;
+	}
+
+	if (GEngine && SelPoints.Num() > 0)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+			FString::Printf(TEXT("RoadNet: %d control point(s) selected — drag widget to move, Del to delete (Shift+drag to add)"),
+				SelPoints.Num()));
+	}
 }
 
 void FEdModeRoadNet::ModifyForEdit()
@@ -104,7 +273,7 @@ void FEdModeRoadNet::ModifyForEdit()
 	}
 }
 
-bool FEdModeRoadNet::TrySelectUnderCursor(FEditorViewportClient* ViewportClient)
+bool FEdModeRoadNet::TrySelectUnderCursor(FEditorViewportClient* ViewportClient, bool bToggle)
 {
 	URoadNetwork* Net = GetNetwork();
 	if (!Net || !ViewportClient) { return false; }
@@ -120,9 +289,9 @@ bool FEdModeRoadNet::TrySelectUnderCursor(FEditorViewportClient* ViewportClient)
 	for (int32 r = 0; r < Roads.Num(); ++r)
 	{
 		const FRoadDef& Rd = Roads[r];
-		// Per-point handles only exist for hand-drawn roads (OSM points are
-		// re-derived on import), so only they are point-selectable.
-		if (Rd.Source == ERoadNetSource::HandDrawn)
+		// Per-point handles exist for hand-drawn roads always, and for imported
+		// roads while "edit all points" (P) is on. Only those are point-selectable.
+		if (Rd.Source == ERoadNetSource::HandDrawn || bShowAllPoints)
 		{
 			for (int32 i = 0; i < Rd.Ref.Num(); ++i)
 			{
@@ -138,8 +307,18 @@ bool FEdModeRoadNet::TrySelectUnderCursor(FEditorViewportClient* ViewportClient)
 		}
 	}
 
-	if (PtRoad != INDEX_NONE) { SelRoad = PtRoad; SelPoint = PtIdx; }
-	else if (RdRoad != INDEX_NONE) { SelRoad = RdRoad; SelPoint = INDEX_NONE; }
+	if (PtRoad != INDEX_NONE)
+	{
+		if (bToggle) { ToggleSelPoint(PtRoad, PtIdx); }
+		else         { SelectSinglePoint(PtRoad, PtIdx); }
+	}
+	else if (RdRoad != INDEX_NONE)
+	{
+		// Whole-road select (not a point pick) — drop any point selection.
+		SelPoints.Reset();
+		SelRoad = RdRoad;
+		SelPoint = INDEX_NONE;
+	}
 	else { return false; }
 
 	if (ViewportClient) { ViewportClient->Invalidate(); }
@@ -302,17 +481,19 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 					return true;
 				}
 			}
-			// Plain click on a point proxy selects that point.
+			// Click a point proxy: plain = single-select; Shift = add/remove it
+			// from the multi-selection.
 			if (HRoadNetPointProxy* P = HitProxyCast<HRoadNetPointProxy>(HitProxy))
 			{
-				SelRoad = P->RoadIndex;
-				SelPoint = P->PointIndex;
+				if (Click.IsShiftDown()) { ToggleSelPoint(P->RoadIndex, P->PointIndex); }
+				else                     { SelectSinglePoint(P->RoadIndex, P->PointIndex); }
 				if (InViewportClient) { InViewportClient->Invalidate(); }
 				return true;
 			}
 			// Plain click on a segment selects the whole road (SelPoint = NONE).
 			if (HRoadNetSegmentProxy* S = HitProxyCast<HRoadNetSegmentProxy>(HitProxy))
 			{
+				SelPoints.Reset();
 				SelRoad = S->RoadIndex;
 				SelPoint = INDEX_NONE;
 				if (InViewportClient) { InViewportClient->Invalidate(); }
@@ -323,7 +504,7 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 			// returns the mesh's proxy instead. Fall back to a proximity pick (as
 			// the delete/lane hotkeys do) so control points stay grabbable. Only
 			// when nothing is near the cursor do we drop through to DRAW.
-			if (TrySelectUnderCursor(InViewportClient))
+			if (TrySelectUnderCursor(InViewportClient, Click.IsShiftDown()))
 			{
 				return true;
 			}
@@ -367,6 +548,27 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
 			}
+			// Multi-point delete: if a set of control points is selected (marquee
+			// or Shift+click), delete them all in one undoable step.
+			if (SelPoints.Num() > 0)
+			{
+				if (URoadNetwork* Net = GetNetwork())
+				{
+					const FScopedTransaction Transaction(LOCTEXT("RoadNetDeletePoints", "Delete RoadNet Points"));
+					ModifyForEdit();
+					const int32 N = DeleteSelectedPoints();
+					Net->Rebuild();
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+							FString::Printf(TEXT("RoadNet: deleted %d selected control point(s)"), N));
+					}
+				}
+				ClearSelection();
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
+
 			// Idle delete. Resolve a target from the explicit selection, else
 			// hover-pick under the cursor (mirrors the lane hotkeys so no prior
 			// click is needed — clicks were easy to lose to draft placement).
@@ -391,7 +593,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 						for (int32 r = 0; r < Roads.Num(); ++r)
 						{
 							const FRoadDef& Rd = Roads[r];
-							if (Rd.Source == ERoadNetSource::HandDrawn)
+							if (Rd.Source == ERoadNetSource::HandDrawn || bShowAllPoints)
 							{
 								for (int32 i = 0; i < Rd.Ref.Num(); ++i)
 								{
@@ -467,6 +669,59 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 		// Targets the selected road, else auto-picks the road under the cursor.
 		if (DraftPoints.Num() == 0)
 		{
+			// 'P' → toggle "edit all points": reveal + enable move/delete on EVERY
+			// road's control points (imported included), not just hand-drawn ones.
+			if (Key == EKeys::P)
+			{
+				bShowAllPoints = !bShowAllPoints;
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Cyan,
+						bShowAllPoints
+							? TEXT("RoadNet: EDIT ALL POINTS on — every road's control points are draggable/deletable (P to hide)")
+							: TEXT("RoadNet: edit all points off — only hand-drawn roads show point handles (P to show all)"));
+				}
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
+
+			// 'U' → force-merge the roads owning the selected points into ONE
+			// multi-lane road (ignores the import proximity test). Select points
+			// on 2+ roads (marquee / Shift+click), then press U.
+			if (Key == EKeys::U)
+			{
+				TArray<int32> RoadIdx;
+				for (const FIntPoint& S : SelPoints) { RoadIdx.AddUnique(S.X); }
+				// A whole-road selection (segment click) contributes its road too.
+				if (SelRoad != INDEX_NONE && SelPoint == INDEX_NONE) { RoadIdx.AddUnique(SelRoad); }
+
+				if (RoadIdx.Num() < 2)
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: select control points on 2+ roads (marquee / Shift+click), then U to force-merge"));
+					}
+					return true;
+				}
+				if (URoadNetwork* Net = GetNetwork())
+				{
+					const FScopedTransaction Transaction(LOCTEXT("RoadNetMergeRoads", "Merge RoadNet Roads"));
+					ModifyForEdit();
+					const bool bOk = Net->MergeRoads(RoadIdx);
+					if (bOk) { Net->Rebuild(); }
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, bOk ? FColor::Cyan : FColor::Orange,
+							bOk ? FString::Printf(TEXT("RoadNet: merged %d roads into one multi-lane road"), RoadIdx.Num())
+							    : TEXT("RoadNet: merge failed (need 2+ valid roads)"));
+					}
+				}
+				ClearSelection();
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
+
 			const bool bAdd = (Key == EKeys::Equals || Key == EKeys::Add);
 			const bool bRem = (Key == EKeys::Hyphen || Key == EKeys::Subtract);
 			if (bAdd || bRem)
@@ -788,13 +1043,18 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 					PDI->SetHitProxy(nullptr);
 				}
 
-				if (bHand)
+				// Per-point handles: hand-drawn roads always, imported roads only
+				// while "edit all points" (P) is on. Imported handles use a warmer
+				// tint so it's clear which points came from OSM.
+				if (bHand || bShowAllPoints)
 				{
+					const FColor PtCol = bHand ? kColorEditPt : kColorOsmPt;
 					for (int32 i = 0; i < Road.Ref.Num(); ++i)
 					{
-						const bool bSel = (r == SelRoad && i == SelPoint) || bWholeRoadSel;
+						const bool bSel = IsPointSelected(r, i) || bWholeRoadSel;
 						PDI->SetHitProxy(new HRoadNetPointProxy(r, i));
-						PDI->DrawPoint(Road.Ref[i], bSel ? kColorSnap : kColorEditPt, kPointSize, SDPG_Foreground);
+						PDI->DrawPoint(Road.Ref[i], bSel ? kColorSnap : PtCol,
+							bSel ? kPointSize + 4.f : kPointSize, SDPG_Foreground);
 						PDI->SetHitProxy(nullptr);
 					}
 				}
@@ -832,13 +1092,13 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 bool FEdModeRoadNet::ShouldDrawWidget() const
 {
 	FVector Ignored;
-	return DraftPoints.Num() == 0 && GetSelectedPoint(Ignored);
+	return DraftPoints.Num() == 0 && GetSelectionCentroid(Ignored);
 }
 
 FVector FEdModeRoadNet::GetWidgetLocation() const
 {
 	FVector Pos;
-	if (GetSelectedPoint(Pos)) { return Pos; }
+	if (GetSelectionCentroid(Pos)) { return Pos; }
 	return FEdMode::GetWidgetLocation();
 }
 
@@ -850,31 +1110,74 @@ EAxisList::Type FEdModeRoadNet::GetWidgetAxisToDraw(UE::Widget::EWidgetMode InWi
 
 bool FEdModeRoadNet::InputDelta(FEditorViewportClient* InViewportClient, FViewport* InViewport, FVector& InDrag, FRotator& InRot, FVector& InScale)
 {
-	if (InViewportClient && InViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
+	if (InViewportClient && InViewportClient->GetCurrentWidgetAxis() != EAxisList::None && SelPoints.Num() > 0)
 	{
-		FVector Pos;
-		if (GetSelectedPoint(Pos))
+		if (URoadNetwork* Net = GetNetwork())
 		{
-			if (URoadNetwork* Net = GetNetwork())
+			// Open a drag-spanning transaction on the first delta and capture the
+			// pre-move state, so a single Undo reverts the whole (multi-point) drag.
+			if (!bDirtyDuringDrag && GEditor)
 			{
-				// Open a drag-spanning transaction on the first delta and capture
-				// the pre-move state, so a single Undo reverts the whole drag.
-				if (!bDirtyDuringDrag && GEditor)
-				{
-					GEditor->BeginTransaction(LOCTEXT("RoadNetMovePoint", "Move RoadNet Point"));
-					ModifyForEdit();
-					bDirtyDuringDrag = true;
-				}
-				Net->MoveRoadPoint(SelRoad, SelPoint, Pos + InDrag);   // rebuild on release
+				GEditor->BeginTransaction(LOCTEXT("RoadNetMovePoints", "Move RoadNet Points"));
+				ModifyForEdit();
+				bDirtyDuringDrag = true;
 			}
-			return true;
+			MoveSelectedPoints(InDrag);   // moves the WHOLE selection; rebuild on release
 		}
+		return true;
 	}
 	return false;
 }
 
+bool FEdModeRoadNet::StartTracking(FEditorViewportClient* InViewportClient, FViewport* InViewport)
+{
+	// Left-drag on EMPTY space (no transform-widget axis grabbed) while editing
+	// (not drafting) begins a marquee box-select of control points. Grabbing the
+	// widget (axis != None) falls through to the normal move path.
+	if (DraftPoints.Num() == 0 && InViewportClient &&
+		InViewportClient->GetCurrentWidgetAxis() == EAxisList::None && InViewport)
+	{
+		bMarquee = true;
+		bMarqueeMoved = false;
+		MarqueeStart = FIntPoint(InViewport->GetMouseX(), InViewport->GetMouseY());
+		MarqueeCur = MarqueeStart;
+		return true;
+	}
+	return FEdMode::StartTracking(InViewportClient, InViewport);
+}
+
+bool FEdModeRoadNet::CapturedMouseMove(FEditorViewportClient* InViewportClient, FViewport* InViewport, int32 InMouseX, int32 InMouseY)
+{
+	if (bMarquee)
+	{
+		MarqueeCur = FIntPoint(InMouseX, InMouseY);
+		// Only treat it as a box once it has meaningfully moved (a tiny jitter on
+		// a click shouldn't wipe the selection).
+		if (FMath::Abs(MarqueeCur.X - MarqueeStart.X) > 3 || FMath::Abs(MarqueeCur.Y - MarqueeStart.Y) > 3)
+		{
+			bMarqueeMoved = true;
+		}
+		if (InViewportClient) { InViewportClient->Invalidate(); }
+		return true;
+	}
+	return FEdMode::CapturedMouseMove(InViewportClient, InViewport, InMouseX, InMouseY);
+}
+
 bool FEdModeRoadNet::EndTracking(FEditorViewportClient* InViewportClient, FViewport* InViewport)
 {
+	if (bMarquee)
+	{
+		bMarquee = false;
+		if (bMarqueeMoved)
+		{
+			const bool bAdd = InViewport &&
+				(InViewport->KeyState(EKeys::LeftShift) || InViewport->KeyState(EKeys::RightShift));
+			SelectPointsInMarquee(InViewportClient, bAdd);
+		}
+		bMarqueeMoved = false;
+		if (InViewportClient) { InViewportClient->Invalidate(); }
+		return true;
+	}
 	if (bDirtyDuringDrag)
 	{
 		bDirtyDuringDrag = false;
@@ -883,6 +1186,23 @@ bool FEdModeRoadNet::EndTracking(FEditorViewportClient* InViewportClient, FViewp
 		return true;
 	}
 	return FEdMode::EndTracking(InViewportClient, InViewport);
+}
+
+void FEdModeRoadNet::DrawHUD(FEditorViewportClient* ViewportClient, FViewport* Viewport, const FSceneView* View, FCanvas* Canvas)
+{
+	FEdMode::DrawHUD(ViewportClient, Viewport, View, Canvas);
+
+	if (bMarquee && bMarqueeMoved && Canvas)
+	{
+		const float X = (float)FMath::Min(MarqueeStart.X, MarqueeCur.X);
+		const float Y = (float)FMath::Min(MarqueeStart.Y, MarqueeCur.Y);
+		const float W = (float)FMath::Abs(MarqueeCur.X - MarqueeStart.X);
+		const float H = (float)FMath::Abs(MarqueeCur.Y - MarqueeStart.Y);
+		FCanvasBoxItem Box(FVector2D(X, Y), FVector2D(W, H));
+		Box.SetColor(FLinearColor(0.35f, 0.8f, 1.0f, 1.0f));
+		Box.LineThickness = 1.5f;
+		Canvas->DrawItem(Box);
+	}
 }
 
 void FEdModeRoadNet::FinalizeDraft()

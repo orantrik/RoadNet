@@ -28,6 +28,21 @@ struct FRoadCurves
 	double Length = 0.0;
 };
 
+// ---- Terrain-conform corridor (exposed to OSMRoadCore) ---------------------
+// One per ground-level road after a rebuild: the SAME smoothed + densified
+// centreline the mesh is built from (world cm, Z = draped road bed), plus the
+// flat half-width of the paved+walk footprint. OSMRoadCore ramps the landscape
+// continuously between these dense points (so terrain can never lap over the
+// road between sparse source knots — that gap was the disc-per-point look).
+struct FRoadNetDeformCorridor
+{
+	TArray<FVector> Points;    // densified, G2-smoothed centreline (world cm, Z = bed)
+	double FlatHalfCm = 0.0;   // half of carriageway (+median gap) + sidewalk footprint
+	bool   bBridge = false;
+	bool   bTunnel = false;
+	int32  Layer   = 0;        // grade-separation layer (only Layer 0 deforms terrain)
+};
+
 // ---- Derived topology node (§10.7) -----------------------------------------
 struct FRoadNetJoint
 {
@@ -132,6 +147,16 @@ public:
 		meta = (ClampMin = "25.0", UIMin = "50.0", UIMax = "500.0"))
 	double PolylineDensityCm = 200.0;
 
+	// Longitudinal GRADE smoothing half-window (metres). The road bed's height
+	// profile (Z vs arc length) is fit to a local straight line within ±this
+	// distance, turning the draped/cubic-overshoot centreline into a clean ramp
+	// so the terrain conform stops stepping/washboarding under the road. On a
+	// constant slope the fit is exact (grade preserved); larger = smoother ramp
+	// but longer cut/fill approach to real grade changes. 0 disables.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Sampling",
+		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "60.0"))
+	double GradeSmoothingM = 20.0;
+
 	// ---- lanes (§12.1) ----------------------------------------------------
 	// Render each resolved lane as its own ribbon strip (alternating shades)
 	// layered above the carriageway. Reflects lane add/remove + authored widths.
@@ -170,8 +195,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
 	TObjectPtr<UMaterialInterface> CurbMaterial1;
 
-	// Along-line spacing (cm) of kerb pieces. Each piece is stretched to tile
-	// its run gaplessly, so this is a target length per segment.
+	// Standard kerb-piece length (cm). Pieces are tiled at EXACTLY this length on
+	// straights (uniform, no stretch) and only compress SHORTER at corners/curves
+	// so the stone follows the arc. Lower = finer corners + more instances.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs",
 		meta = (ClampMin = "50.0", UIMin = "50.0", UIMax = "600.0"))
 	double CurbSpacingCm = 100.0;
@@ -263,6 +289,14 @@ public:
 	const TArray<FRoadDef>& GetRoads() const { return Roads; }
 	int32 NumRoads() const { return Roads.Num(); }
 
+	// ---- terrain conform (§ landscape deform) -----------------------------
+	// Per-road smoothed+densified centrelines + flat half-widths from the LAST
+	// rebuild, so OSMRoadCore can ramp the landscape continuously under the road
+	// (see FRoadNetDeformCorridor). Regenerated every Rebuild; empty until the
+	// first rebuild. RoadNet itself never touches the landscape (dependency only
+	// points OSMRoadCore -> RoadNet).
+	const TArray<FRoadNetDeformCorridor>& GetDeformCorridors() const { return DeformCorridors; }
+
 	// ---- interactive edit API (§9.3 edit/split controllers) ---------------
 	// Move one reference point of a road to a new world position. Returns false
 	// if indices are invalid. Caller triggers Rebuild().
@@ -281,6 +315,16 @@ public:
 	// shifts later indices, so callers must drop cached selections. Caller
 	// triggers Rebuild().
 	bool RemoveRoad(int32 RoadIdx);
+
+	// Force-merge two or more roads (by index) into ONE multi-lane road,
+	// regardless of the automatic import proximity test. The longest member is
+	// the primary (keeps its class/name/grade/source); the merged centreline is
+	// the cluster MIDLINE (primary resampled, averaged with the nearest point on
+	// each other member) and the lane count is the SUM of the members' lanes
+	// (→ wider carriageway). Member roads are removed and the merged road added,
+	// so cached selections/indices are invalid afterwards. Returns false if
+	// fewer than two valid distinct roads were given. Caller triggers Rebuild().
+	bool MergeRoads(TArrayView<const int32> RoadIndices);
 
 	// ---- junction marking authoring (§2 junctions) ------------------------
 	// A junction as surfaced to the editor tool after a rebuild: its world
@@ -350,6 +394,10 @@ private:
 	// Transient snapshot of the last rebuild's junctions (>=3 arms) for the
 	// editor tool to render + hit-test. Not serialized.
 	TArray<FRoadNetJunctionView> JunctionViews;
+
+	// Transient per-road terrain-conform corridors from the last rebuild (see
+	// GetDeformCorridors / FRoadNetDeformCorridor). Not serialized.
+	TArray<FRoadNetDeformCorridor> DeformCorridors;
 
 	// ---- pipeline stages (§10.18) --------------------------------------
 	void DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const;

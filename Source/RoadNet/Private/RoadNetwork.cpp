@@ -128,6 +128,106 @@ bool URoadNetwork::RemoveRoad(int32 RoadIdx)
 	return true;
 }
 
+namespace
+{
+	// Closest point on a polyline to a 2-D query, returning the lerped 3-D point
+	// (so the merged midline carries a sensible Z from each member).
+	FVector RoadNetClosestOnPolyline(const FVector2D& Q, const TArray<FVector>& Poly)
+	{
+		double Best = TNumericLimits<double>::Max();
+		FVector BestPt = Poly.Num() ? Poly[0] : FVector::ZeroVector;
+		for (int32 i = 0; i + 1 < Poly.Num(); ++i)
+		{
+			const FVector2D A(Poly[i]);
+			const FVector2D B(Poly[i + 1]);
+			const FVector2D AB = B - A;
+			const double LenSq = AB.SizeSquared();
+			const double T = LenSq > UE_DOUBLE_SMALL_NUMBER
+				? FMath::Clamp((double)FVector2D::DotProduct(Q - A, AB) / LenSq, 0.0, 1.0) : 0.0;
+			const FVector2D Cl = A + AB * T;
+			const double D = FVector2D::Distance(Q, Cl);
+			if (D < Best) { Best = D; BestPt = FMath::Lerp(Poly[i], Poly[i + 1], T); }
+		}
+		return BestPt;
+	}
+}
+
+bool URoadNetwork::MergeRoads(TArrayView<const int32> RoadIndices)
+{
+	// Unique, valid indices only.
+	TArray<int32> Idx;
+	for (int32 i : RoadIndices) { if (Roads.IsValidIndex(i)) { Idx.AddUnique(i); } }
+	if (Idx.Num() < 2) { return false; }
+
+	// Primary = longest centreline (keeps its identity/tags for the merged road).
+	auto ArcLen = [&](int32 r) { return RoadNetMath::TotalLength(Roads[r].Ref); };
+	Idx.Sort([&](const int32& A, const int32& B) { return ArcLen(A) > ArcLen(B); });
+	const int32 Primary = Idx[0];
+
+	// Resample the primary centreline evenly, then at each sample average the
+	// nearest point of every other member → the cluster midline.
+	const double PrimLen = FMath::Max(1.0, ArcLen(Primary));
+	const int32  NS      = FMath::Clamp(Roads[Primary].Ref.Num(), 2, 512);
+	TArray<FVector> Base;
+	RoadNetMath::ResampleByArcLength(Roads[Primary].Ref, FMath::Max(50.0, PrimLen / (NS - 1)), Base);
+	if (Base.Num() < 2) { Base = Roads[Primary].Ref; }
+
+	TArray<FVector> Mid;
+	Mid.Reserve(Base.Num());
+	for (const FVector& P : Base)
+	{
+		FVector Sum = P;
+		int32   Cnt = 1;
+		for (int32 k = 1; k < Idx.Num(); ++k)
+		{
+			Sum += RoadNetClosestOnPolyline(FVector2D(P), Roads[Idx[k]].Ref);
+			++Cnt;
+		}
+		Mid.Add(Sum / (double)Cnt);
+	}
+
+	// Lane count = sum of members' effective lanes; sidewalks = OR (widest wins).
+	int32 TotalLanes = 0;
+	bool  bSwL = false, bSwR = false;
+	float SwW = 0.f;
+	for (int32 r : Idx)
+	{
+		TotalLanes += FMath::Max(1, Roads[r].Lanes.EffectiveLaneCount());
+		bSwL |= Roads[r].Lanes.bSidewalkLeft;
+		bSwR |= Roads[r].Lanes.bSidewalkRight;
+		SwW = FMath::Max(SwW, Roads[r].Lanes.SidewalkWidth);
+	}
+
+	FRoadDef Merged = Roads[Primary];   // inherit class / source / name / grade
+	Merged.Id = FGuid::NewGuid();
+	Merged.Ref = MoveTemp(Mid);
+	Merged.Elev.Reset();
+	Merged.NodeIds.Reset();             // synthetic midline shares no OSM node
+	Merged.StartLinks.Reset();
+	Merged.EndLinks.Reset();
+
+	FRoadNetLaneSpec& L = Merged.Lanes;
+	L.DetailedLanes.Reset();            // fall back to the summed count model
+	L.LaneWidths.Reset();
+	L.Total    = FMath::Max(1, TotalLanes);
+	L.Forward  = 0;
+	L.Backward = 0;
+	L.bOneway  = false;
+	L.bSidewalkLeft  = bSwL;
+	L.bSidewalkRight = bSwR;
+	if (SwW > 0.f) { L.SidewalkWidth = SwW; }
+
+	// Remove members high-index-first (so earlier indices stay valid), then add.
+	TArray<int32> ToRemove = Idx;
+	ToRemove.Sort([](const int32& A, const int32& B) { return A > B; });
+	for (int32 r : ToRemove) { Roads.RemoveAt(r); }
+	AddRoad(Merged);
+
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] MergeRoads: folded %d roads into 1 (%d lanes)."),
+		Idx.Num(), L.Total);
+	return true;
+}
+
 bool URoadNetwork::InsertRoadPoint(int32 RoadIdx, int32 AfterIdx, const FVector& Pos)
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return false; }
@@ -290,6 +390,29 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified)
 	DeterminePendingRoads(Ctx);   // §10.17 scope
 	BuildCurves(Ctx);             // §10.2–§10.4 reference line + outer edges
 	const double tCurves = Now();  Trace(TEXT("curves"), tCurves - tA);
+
+	// Snapshot the smoothed+densified centrelines for OSMRoadCore's terrain
+	// conform (see GetDeformCorridors). These are the SAME polylines the mesh is
+	// built from, so ramping the landscape along them makes the flattened
+	// corridor hug the real road instead of the sparse source knots.
+	DeformCorridors.Reset(Ctx.Curves.Num());
+	for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+	{
+		const int32 RoadIdx = KV.Key;
+		const FRoadCurves& C = KV.Value;
+		if (!Roads.IsValidIndex(RoadIdx) || C.Sampled.Num() < 2) { continue; }
+		const FRoadDef& R = Roads[RoadIdx];
+		FRoadNetDeformCorridor Cor;
+		Cor.Points  = C.Sampled;
+		const double Half = FMath::Max(50.0, (double)R.Lanes.HalfWidthCm());
+		const double Walk = (R.Lanes.bSidewalkLeft || R.Lanes.bSidewalkRight)
+			? (double)FMath::Max(0.f, R.Lanes.SidewalkWidth) : 0.0;
+		Cor.FlatHalfCm = Half + Walk;
+		Cor.bBridge = R.bBridge;
+		Cor.bTunnel = R.bTunnel;
+		Cor.Layer   = R.Layer;
+		DeformCorridors.Add(MoveTemp(Cor));
+	}
 	BuildCrossings(Ctx);          // §10.12 grid broadphase (shared by zones+surface)
 	const double tCross = Now();   Trace(TEXT("crossings"), tCross - tCurves);
 	BuildEndpointJoints(Ctx);     // §10.7 topology from shared node ids
@@ -361,6 +484,15 @@ void URoadNetwork::BuildCurves(FRoadNetRebuildContext& Ctx) const
 		RoadNetMath::SmoothG2Spline(R.Ref, DensityCm, Smooth);
 		RoadNetMath::ResampleByArcLength(Smooth, DensityCm, C.Sampled, kAdaptiveTurnRad);
 		if (C.Sampled.Num() < 2) { continue; }
+
+		// Grade the longitudinal profile into a clean ramp: the G2 spline through
+		// draped knots OVERSHOOTS in Z between sparse points, and the drape itself
+		// carries terrain micro-bumps — both show up as steps/washboard once the
+		// terrain is conformed to the bed. A local straight-line fit of Z vs arc
+		// length removes those while preserving the real slope exactly. Plan (XY)
+		// geometry is untouched; the SAME sampled Z feeds the mesh AND the terrain
+		// corridor, so they stay in agreement (no re-introduced poke-through).
+		RoadNetMath::SmoothProfileZ(C.Sampled, FMath::Max(0.0, GradeSmoothingM) * 100.0);
 
 		const double Half = FMath::Max(50.0, (double)R.Lanes.HalfWidthCm());
 		RoadNetMath::OffsetPolyline(C.Sampled, +Half, C.LeftEdge);

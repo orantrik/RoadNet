@@ -24,8 +24,16 @@ namespace RoadNetCurbs
 			return false;
 		}
 
-		// Walk a chained kerb run (>=2 points) and append evenly spaced pieces.
-		// Points are pre-oriented so the sidewalk is on the LEFT of travel.
+		// Walk a chained kerb run (>=2 points) and append pieces. Points are
+		// pre-oriented so the sidewalk is on the LEFT of travel.
+		//
+		// Constant length on straights, deform only at corners: pieces are tiled
+		// at EXACTLY SpacingCm (the standard kerb length) by ARC LENGTH — cutting
+		// segments mid-way instead of ending at boundary vertices — so every
+		// straight stone is the same size (mesh scale 1, no stretch). A piece is
+		// cut SHORT only where the boundary bends away from the piece's start
+		// heading before a full standard length, so the mesh compresses to follow
+		// the arc just at corners/curves.
 		void EmitRun(const TArray<FVector2D>& Pts,
 			const FCenterlineHeightField& Height, double SpacingCm, double ZLiftCm,
 			TArray<FCurbInstance>& Out)
@@ -34,29 +42,46 @@ namespace RoadNetCurbs
 			if (N < 2) { return; }
 			const double Fallback = Height.FirstZ();
 
-			// Adaptive chunking: each piece is a CHORD [S..E] of the boundary
-			// polyline, so consecutive pieces meet end-to-end and hug the curve.
-			// A piece grows up to SpacingCm on straights but is cut early on bends
-			// (when the chord deviates from the piece's start heading), so corners
-			// get short pieces that follow the arc — the mesh is then stretched to
-			// each chord's length (§ "kerbs adjust in size for nice corners").
-			constexpr double kMaxPieceTurnRad = 0.20;                 // ~11.5° per piece
-			const double MinPieceCm = FMath::Max(20.0, SpacingCm * 0.15);
+			// Cumulative arc length of the boundary polyline.
+			TArray<double> S; S.SetNumUninitialized(N);
+			S[0] = 0.0;
+			for (int32 i = 1; i < N; ++i) { S[i] = S[i - 1] + FVector2D::Distance(Pts[i - 1], Pts[i]); }
+			const double Total = S[N - 1];
+			if (Total < 1.0) { return; }
 
-			auto Emit = [&](const FVector2D& S, const FVector2D& E)
+			const double StdLenCm   = FMath::Max(20.0, SpacingCm);       // standard piece length
+			const double MinPieceCm = FMath::Max(15.0, StdLenCm * 0.25); // shortest corner sliver
+			constexpr double kMaxPieceTurnRad = 0.20;                    // ~11.5° → cut on curves
+
+			// Position along the polyline at arc length s (forward-only hint).
+			auto PosAt = [&](double s, int32& Hint) -> FVector2D
 			{
-				const double L = FVector2D::Distance(S, E);
+				s = FMath::Clamp(s, 0.0, Total);
+				while (Hint + 1 < N && S[Hint + 1] < s) { ++Hint; }
+				const double SegLen = S[Hint + 1] - S[Hint];
+				const double a = SegLen > 1e-6 ? (s - S[Hint]) / SegLen : 0.0;
+				return FMath::Lerp(Pts[Hint], Pts[Hint + 1], a);
+			};
+			// Unit heading of the segment that contains arc length s.
+			auto HeadingAt = [&](double s) -> FVector2D
+			{
+				int32 k = 0;
+				while (k + 1 < N - 1 && S[k + 1] <= s) { ++k; }
+				return (Pts[k + 1] - Pts[k]).GetSafeNormal();
+			};
+
+			auto Emit = [&](const FVector2D& A, const FVector2D& B)
+			{
+				const double L = FVector2D::Distance(A, B);
 				if (L < 1.0) { return; }
-				const FVector2D M = 0.5 * (S + E);
-				FVector2D Dir = E - S;
+				FVector2D Dir = B - A;
 				if (!Dir.Normalize()) { return; }
+				const FVector2D M = 0.5 * (A + B);
 
 				// Sample terrain at BOTH ends so the piece follows the longitudinal
-				// grade instead of sitting flat at its mid-height (which staircases
-				// on a slope). Seat it at the mean height and pitch it to span the
-				// end-to-end rise over its horizontal length.
-				const double Zs = Height.SampleHeight(S.X, S.Y, Fallback) + ZLiftCm;
-				const double Ze = Height.SampleHeight(E.X, E.Y, Fallback) + ZLiftCm;
+				// grade (seat at mean height, pitch over its horizontal length).
+				const double Zs = Height.SampleHeight(A.X, A.Y, Fallback) + ZLiftCm;
+				const double Ze = Height.SampleHeight(B.X, B.Y, Fallback) + ZLiftCm;
 
 				FCurbInstance CI;
 				CI.Location = FVector(M.X, M.Y, 0.5 * (Zs + Ze));
@@ -66,34 +91,30 @@ namespace RoadNetCurbs
 				Out.Add(CI);
 			};
 
-			FVector2D S = Pts[0];          // current piece start
-			FVector2D Dir0 = FVector2D::ZeroVector;
-			bool bHaveDir0 = false;
-			for (int32 i = 1; i < N; ++i)
+			double s = 0.0;
+			int32  HintS = 0, HintE = 0, Guard = 0;
+			while (s < Total - 1.0 && Guard++ < 200000)
 			{
-				if (!bHaveDir0)
-				{
-					Dir0 = (Pts[i] - S);
-					if (Dir0.Normalize()) { bHaveDir0 = true; }
-					else { continue; }
-				}
-				const double ChordLen = FVector2D::Distance(S, Pts[i]);
-				FVector2D Chord = (Pts[i] - S).GetSafeNormal();
-				const double Turn = FMath::Acos(FMath::Clamp((double)FVector2D::DotProduct(Dir0, Chord), -1.0, 1.0));
+				double e = s + FMath::Min(StdLenCm, Total - s);
 
-				const bool bLong = ChordLen >= SpacingCm;
-				const bool bBend = (Turn >= kMaxPieceTurnRad) && (ChordLen >= MinPieceCm);
-				if (bLong || bBend)
+				// Cut early at the first boundary vertex (beyond a min length) whose
+				// heading has turned away from the piece's start heading — that is
+				// the corner/curve where the stone must shorten to follow the arc.
+				const FVector2D Dir0 = HeadingAt(s);
+				for (int32 k = 1; k + 1 < N; ++k)
 				{
-					Emit(S, Pts[i]);
-					S = Pts[i];
-					bHaveDir0 = false;
+					if (S[k] <= s + MinPieceCm) { continue; }
+					if (S[k] >= e) { break; }
+					const FVector2D Hk = (Pts[k + 1] - Pts[k]).GetSafeNormal();
+					const double Turn = FMath::Acos(FMath::Clamp((double)FVector2D::DotProduct(Dir0, Hk), -1.0, 1.0));
+					if (Turn > kMaxPieceTurnRad) { e = S[k]; break; }
 				}
-			}
-			// Tail: fold a short remainder into the last piece rather than slivering.
-			if (FVector2D::Distance(S, Pts.Last()) >= MinPieceCm || Out.Num() == 0)
-			{
-				Emit(S, Pts.Last());
+				// Fold a short tail into this piece rather than slivering.
+				if (Total - e < MinPieceCm) { e = Total; }
+
+				HintE = HintS;
+				Emit(PosAt(s, HintS), PosAt(e, HintE));
+				s = e;
 			}
 		}
 

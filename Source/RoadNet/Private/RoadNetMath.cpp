@@ -44,6 +44,49 @@ namespace RoadNetMath
 		return Acc;
 	}
 
+	void SmoothProfileZ(TArray<FVector>& Poly, double HalfWindowCm)
+	{
+		const int32 N = Poly.Num();
+		if (N < 3 || HalfWindowCm <= KINDA_SMALL_NUMBER) { return; }
+
+		// Arc length along the (planar) polyline — the profile's independent var.
+		TArray<double> S; CumulativeLength(Poly, S);
+		if (S.Last() <= KINDA_SMALL_NUMBER) { return; }
+
+		// Fit z = a + b·(s - s0) locally at each vertex; keep only the intercept a
+		// (the fitted height AT that vertex). Endpoints get a one-sided window, so
+		// they stay anchored near their original height (junction ends barely move).
+		TArray<double> Out; Out.SetNumUninitialized(N);
+		for (int32 i = 0; i < N; ++i)
+		{
+			const double s0 = S[i];
+			double sw = 0, ss = 0, sz = 0, sss = 0, ssz = 0;
+			for (int32 j = 0; j < N; ++j)
+			{
+				const double ds = S[j] - s0;
+				const double ad = FMath::Abs(ds);
+				if (ad > HalfWindowCm) { continue; }
+				const double wj = 1.0 - ad / HalfWindowCm; // triangular weight in [0,1]
+				const double z  = Poly[j].Z;
+				sw  += wj;
+				ss  += wj * ds;
+				sz  += wj * z;
+				sss += wj * ds * ds;
+				ssz += wj * ds * z;
+			}
+			const double denom = sw * sss - ss * ss;
+			if (FMath::Abs(denom) > 1e-6)
+			{
+				Out[i] = (sz * sss - ss * ssz) / denom; // intercept a = fit at ds = 0
+			}
+			else
+			{
+				Out[i] = (sw > 0.0) ? (sz / sw) : Poly[i].Z; // window collapsed → mean
+			}
+		}
+		for (int32 i = 0; i < N; ++i) { Poly[i].Z = Out[i]; }
+	}
+
 	void ResampleByArcLength(const TArray<FVector>& In, double Spacing, TArray<FVector>& Out, double MaxTurnRad)
 	{
 		Out.Reset();
