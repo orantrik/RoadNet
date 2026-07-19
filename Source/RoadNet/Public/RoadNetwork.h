@@ -43,6 +43,16 @@ struct FRoadNetDeformCorridor
 	int32  Layer   = 0;        // grade-separation layer (only Layer 0 deforms terrain)
 };
 
+// ---- Per-cell terrain-conform cache (§ tiling) -----------------------------
+// World-space ground triangle soup contributed by ONE grid cell. Cached so a
+// windowed rebuild can reassemble the WHOLE-network conform arrays (clean cells
+// from cache + dirty cells recomputed) — the landscape sculpt always sees the
+// complete surface, never just the edited region.
+struct FRoadNetTileConform
+{
+	TArray<FVector> Verts; // world cm, one triple per triangle
+};
+
 // ---- Derived topology node (§10.7) -----------------------------------------
 struct FRoadNetJoint
 {
@@ -64,6 +74,16 @@ struct FRoadNetCrossing
 	FVector2D Point = FVector2D::ZeroVector;
 	double Za = 0.0;            // Z on RoadA at the crossing
 	double Zb = 0.0;            // Z on RoadB at the crossing
+};
+
+// ---- Street-furniture placements for one rebuild ----------------------------
+// One bucket per URoadNetwork::FurnitureTypes entry (parallel by TypeIndex).
+// Instances are world-space transforms; CommitFurniture turns each bucket into a
+// HISM (or spawned actors) using that type's mesh / Blueprint / cube fallback.
+struct FRoadNetFurnitureBucket
+{
+	int32 TypeIndex = INDEX_NONE;
+	TArray<FTransform> Instances;
 };
 
 // ---- Compute bus for one rebuild (§2 FRebuildContext) -----------------------
@@ -96,6 +116,11 @@ struct FRoadNetRebuildContext
 	// (an "additional" layer above the unified carriageway).
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneLaneEvenPolys;
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneLaneOddPolys;
+	// Typed-lane overlay banks, per zone: lanes cycled to Bicycle / Parking get
+	// their own thin surface (their material or a green/amber tint) lifted just
+	// above the carriageway, so those lanes read distinctly.
+	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneLaneBikePolys;
+	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneLaneParkPolys;
 	// Per-zone junction CLIP region (§2.1 "שטח הצומת"): the true junction area
 	// bounded by the roads' edge lines and their imaginary extension — computed as
 	// the mutual overlap of crossing carriageways, then dilated by the stop-line
@@ -105,6 +130,9 @@ struct FRoadNetRebuildContext
 	// § junction traffic-signal placeholder placements (location, yawDeg) for
 	// this rebuild — committed as a HISM.
 	TArray<TPair<FVector, float>> Signals;
+	// § street-furniture placements for this rebuild (one bucket per enabled
+	// FurnitureTypes entry). Committed as HISMs / spawned actors.
+	TArray<FRoadNetFurnitureBucket> FurnitureBuckets;
 	// Flattened unions (for logging/QA only).
 	TArray<UE::Geometry::FGeneralPolygon2d> SurfacePolys;
 	TArray<UE::Geometry::FGeneralPolygon2d> SidewalkPolys;
@@ -112,11 +140,26 @@ struct FRoadNetRebuildContext
 	TArray<FRoadNetLoop> PerimeterLoops;
 	// §12.2 lane-connectivity graph (derived from joints + resolved lanes).
 	TArray<FRoadNetLaneConnection> LaneConnections;
+
+	// ---- spatial-commit control (§ tiling) --------------------------------
+	// The set of grid cells being (re)committed this pass. When bFullCommit is
+	// true every cell is dirty (a full rebuild) and DirtyTiles is ignored;
+	// otherwise only cells in DirtyTiles are cleared + repopulated and all other
+	// tiles are left untouched (windowed edit). Populated by DeterminePendingRoads.
+	TSet<FIntPoint> DirtyTiles;
+	bool bFullCommit = true;
+	// Optional explicit dirty region (world XY). When valid it OVERRIDES the
+	// modified-road corridors when choosing DirtyTiles, so a junction edit
+	// (markings / islands / smoothing) re-commits only the junction's own tiles
+	// instead of the full length of its (possibly long) arm roads. Invalid box
+	// (the default) = derive dirty tiles from the modified roads' corridors.
+	FBox2D ExplicitDirtyBox = FBox2D(ForceInit);
 	// Later phases populate: overlap masks, details.
 };
 
 class UMaterialInterface;
 class UStaticMesh;
+class ARoadNetTileActor;
 
 UCLASS(BlueprintType, EditInlineNew, DefaultToInstanced)
 class ROADNET_API URoadNetwork : public UObject
@@ -124,6 +167,23 @@ class ROADNET_API URoadNetwork : public UObject
 	GENERATED_BODY()
 
 public:
+	URoadNetwork();
+
+	// ---- spatial tiling (§ tiling) ----------------------------------------
+	// Committed geometry is partitioned into a world-aligned grid of square
+	// cells this many cm on a side. Each populated cell is its own
+	// ARoadNetTileActor so (a) an edit only re-commits the cells it touches and
+	// (b) World Partition can stream the network by location. Default 256 m.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Tiling",
+		meta = (ClampMin = "2000.0", UIMin = "6400.0", UIMax = "102400.0"))
+	double TileSizeCm = 25600.0;
+
+	// Stable identity for this network, stamped onto every tile actor it spawns
+	// so the tile registry can be rebuilt from the level (and multiple networks
+	// in one level never claim each other's tiles). Assigned lazily.
+	UPROPERTY()
+	FGuid NetworkId;
+
 	// ---- optional per-layer materials (§10.16). If unset, the layer falls back
 	// to its constant vertex-colour override so geometry is always visible. ----
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Materials")
@@ -137,6 +197,15 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Materials")
 	TObjectPtr<UMaterialInterface> MarkingYellowMaterial;
+
+	// ---- sidewalk (§8.12) -------------------------------------------------
+	// Default sidewalk width (cm) used for newly-drawn roads and by the panel's
+	// "Apply Sidewalk Width" action (which also pushes it onto existing roads).
+	// Per-road width lives on FRoadNetLaneSpec::SidewalkWidth and can be nudged
+	// live with the Edge tool ',' / '.' hotkeys.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Sidewalk",
+		meta = (ClampMin = "50.0", UIMin = "100.0", UIMax = "600.0"))
+	float DefaultSidewalkWidthCm = 200.f;
 
 	// ---- sampling (§2.6) --------------------------------------------------
 	// Arc-length spacing (cm) used to resample every road's reference polyline
@@ -166,6 +235,15 @@ public:
 	// Optional material for the per-lane ribbon layer (else a flat shade).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
 	TObjectPtr<UMaterialInterface> LaneMaterial;
+
+	// Materials for the typed-lane overlay (drawn just above the carriageway for
+	// Bicycle / Parking lanes so they read distinctly). If unset, a flat tint is
+	// used (green for bike, amber for parking).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
+	TObjectPtr<UMaterialInterface> BikeLaneMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
+	TObjectPtr<UMaterialInterface> ParkingMaterial;
 
 	// Build + export the lane-connectivity graph (§12.2) as tagged splines for
 	// PCG / traffic. Disable to skip the graph stages on large imports.
@@ -243,6 +321,43 @@ public:
 		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "400.0"))
 	double JunctionIslandInsetCm = 90.0;
 
+	// ---- street furniture (street features) -------------------------------
+	// Master toggle for automatic street-furniture placement along roads.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Furniture")
+	bool bBuildFurniture = true;
+
+	// Furniture types placed each rebuild. Placeholder-first: a null MeshOverride
+	// and BlueprintClass instances a grey cube so the layout is visible; assign a
+	// Static Mesh to swap the HISM mesh, or a Blueprint/actor class to spawn
+	// actors instead. Seeded with Bench / GuardRail / BusStop / Kiosk defaults in
+	// the constructor.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Furniture")
+	TArray<FRoadNetFurnitureType> FurnitureTypes;
+
+	// ---- standard parking bays (street features) --------------------------
+	// Default stall dimensions used by AddStandardParkingBay for each layout
+	// (the per-bay FRoadNetParkingBay copies then stores its own values so bays
+	// stay stable if the defaults change).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parking",
+		meta = (ClampMin = "150.0", UIMin = "200.0", UIMax = "400.0"))
+	float ParkingStallWidthCm = 250.f;      // along-kerb width (perp/angled)
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parking",
+		meta = (ClampMin = "150.0", UIMin = "200.0", UIMax = "700.0"))
+	float ParkingStallDepthCm = 500.f;      // out-from-kerb depth (perp/angled)
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parking",
+		meta = (ClampMin = "300.0", UIMin = "400.0", UIMax = "900.0"))
+	float ParkingParallelLengthCm = 600.f;  // along-kerb stall length (parallel)
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parking",
+		meta = (ClampMin = "180.0", UIMin = "200.0", UIMax = "350.0"))
+	float ParkingParallelDepthCm = 250.f;   // out-from-kerb depth (parallel)
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parking",
+		meta = (ClampMin = "30.0", UIMin = "30.0", UIMax = "90.0"))
+	float ParkingAngleDeg = 45.f;           // angled layout stall angle
+
 	// Nudge JunctionSmoothingCm by DeltaCm (clamped ≥ 0). Returns the new value.
 	// Caller triggers Rebuild(). Wired to the [ / ] hotkeys.
 	double AdjustJunctionSmoothing(double DeltaCm);
@@ -268,6 +383,12 @@ public:
 	// per-lane edit ops below take that same left→right index. Empty on bad idx.
 	TArray<FRoadNetLane> GetLanesLeftToRight(int32 RoadIdx) const;
 
+	// Materialise a road's lanes as authored DetailedLanes (each with a stable
+	// LaneId) so the interactive editor can track a selection across rebuilds.
+	// A no-op if already authored; geometry is unchanged. Returns false on bad
+	// index. Caller should Modify()/persist as needed (no Rebuild required).
+	bool MaterializeLanes(int32 RoadIdx);
+
 	// Insert a new normal lane immediately to the RIGHT (bRightSide) or LEFT of
 	// the lane at left→right index LaneLtoR. Converts the road to authored
 	// DetailedLanes on first use, then relays out all offsets. Returns the new
@@ -280,6 +401,34 @@ public:
 	// to that type's default. Converts to authored DetailedLanes on first use.
 	// Returns the new type. Caller triggers Rebuild().
 	ERoadNetLaneType CycleLaneType(int32 RoadIdx, int32 LaneLtoR, int32 Dir);
+
+	// ---- outer-edge authoring (Edge tool, §Phase 4) -----------------------
+	// Side Right = +offset outer edge, Left = −offset. Distances are arc length
+	// along the reference polyline (cm); Offset is signed lateral (cm, +right).
+
+	// Fill Out with the road's authored profile for the side, or — if none is
+	// authored yet — a synthesized FLAT profile (evenly spaced knots at the
+	// current uniform ±HalfWidth) so the Edge tool always has handles to show.
+	// The synthesized layout matches EnsureOuterEdgeProfile, so knot indices line
+	// up. Out is emptied on a bad index.
+	void GetOuterEdgeForDisplay(int32 RoadIdx, ERoadNetSide Side, TArray<FRoadNetEdgeKnot>& Out) const;
+
+	// Materialise the synthesized flat profile onto the road if the side is empty
+	// (no geometry change — it reproduces the uniform edge). Returns true if the
+	// side now has a profile. Caller wraps in a transaction / Modify.
+	bool EnsureOuterEdgeProfile(int32 RoadIdx, ERoadNetSide Side);
+
+	// Set the lateral offset of knot KnotIdx on the side (materialises the
+	// profile first). Clamped to keep the edge on its own side (≥/≤ ±50 cm).
+	// Caller triggers Rebuild().
+	void SetOuterEdgeKnotOffset(int32 RoadIdx, ERoadNetSide Side, int32 KnotIdx, double Offset);
+
+	// Insert a knot at arc length Distance with lateral Offset (materialises the
+	// profile first), kept sorted by Distance. Returns the new knot index.
+	int32 AddOuterEdgeKnot(int32 RoadIdx, ERoadNetSide Side, double Distance, double Offset);
+
+	// Remove knot KnotIdx, keeping at least two knots. Returns true if removed.
+	bool RemoveOuterEdgeKnot(int32 RoadIdx, ERoadNetSide Side, int32 KnotIdx);
 
 	// ---- median editing (RoadNet Draw hotkeys) ----------------------------
 	// Toggle the central median on a road. Returns the new bMedian state.
@@ -297,6 +446,26 @@ public:
 	bool IsMedian(int32 RoadIdx) const;
 	float GetMedianWidth(int32 RoadIdx) const;
 
+	// ---- sidewalk width (street features) ---------------------------------
+	// Set every road's sidewalk width (cm) and enable both sides where a width
+	// is present. Also updates DefaultSidewalkWidthCm. Caller triggers Rebuild().
+	void SetAllSidewalkWidth(float WidthCm);
+
+	// Nudge one road's sidewalk width by DeltaCm (clamped ≥ 0). Enables both
+	// sides on first widening. Returns the new width. Caller triggers Rebuild().
+	float AdjustSidewalkWidth(int32 RoadIdx, float DeltaCm);
+
+	// ---- standard parking bays (street features) --------------------------
+	// Append a standard parking bay to a road on the given side + layout, using
+	// the network's default stall dimensions. Returns the new bay index in the
+	// road's ParkingBays, or INDEX_NONE on a bad road index. Caller triggers
+	// Rebuild().
+	int32 AddStandardParkingBay(int32 RoadIdx, ERoadNetSide Side, ERoadNetParkingLayout Layout);
+
+	// Remove all standard parking bays from a road. Returns the count removed.
+	// Caller triggers Rebuild().
+	int32 ClearParkingBays(int32 RoadIdx);
+
 	// Clear all roads (e.g. before a fresh OSM import).
 	void ResetRoads();
 
@@ -306,6 +475,17 @@ public:
 
 	const TArray<FRoadDef>& GetRoads() const { return Roads; }
 	int32 NumRoads() const { return Roads.Num(); }
+
+	// Find a road by its stable FGuid (survives index shifts from delete/insert/
+	// merge). Returns INDEX_NONE if not present.
+	int32 FindRoadById(const FGuid& Id) const;
+
+	// Ensure NetworkId is valid (lazily assigns one). Returns it.
+	const FGuid& EnsureNetworkId();
+
+	// Destroy every tile actor belonging to this network (used before a full
+	// re-import / reset so no stale geometry survives). Clears the registry.
+	void RetireAllTiles();
 
 	// ---- terrain conform (§ landscape deform) -----------------------------
 	// Per-road smoothed+densified centrelines + flat half-widths from the LAST
@@ -381,8 +561,23 @@ public:
 	// entry if needed). Returns the new state. Caller triggers Rebuild().
 	bool ToggleJunctionIslandsNear(const FVector2D& Loc);
 
+	// Resolve the effective morphological-close (smoothing) radius for the
+	// junction nearest Loc: its per-junction override if set, else the network
+	// default (JunctionSmoothingCm).
+	double ResolveJunctionSmoothingNear(const FVector2D& Loc) const;
+
+	// Nudge the PER-JUNCTION smoothing of the junction nearest Loc by DeltaCm
+	// (clamped 0..300), creating/seeding the override from the current effective
+	// value. Returns the new value; OutJunctionLoc is the matched junction's
+	// location (for a disc-scoped rebuild). Caller triggers Rebuild().
+	double AdjustJunctionSmoothingNear(const FVector2D& Loc, double DeltaCm, FVector2D& OutJunctionLoc);
+
 	// Staged rebuild entry point (§10.18). Empty Modified = rebuild everything.
-	void Rebuild(TArrayView<const int32> Modified = TArrayView<const int32>());
+	// DirtyRegionWorld (when valid) scopes the COMMIT to the grid cells over that
+	// world-XY box instead of the modified roads' full corridors — used by
+	// junction edits so a change re-commits only the junction's tiles.
+	void Rebuild(TArrayView<const int32> Modified = TArrayView<const int32>(),
+		const FBox2D& DirtyRegionWorld = FBox2D(ForceInit));
 
 	// Bind a target world for the (future) commit stage that spawns geometry.
 	void SetWorld(UWorld* InWorld) { WorldPtr = InWorld; }
@@ -400,20 +595,40 @@ private:
 
 	TWeakObjectPtr<UWorld> WorldPtr;
 
-	// Spawned surface actors (reused across rebuilds of this network).
-	TWeakObjectPtr<AActor> GeoActor;              // road carriageway
-	TWeakObjectPtr<AActor> GeoSidewalkActor;      // sidewalk band
-	TWeakObjectPtr<AActor> GeoMarkingWhiteActor;  // white markings (edge + lane dividers)
-	TWeakObjectPtr<AActor> GeoMarkingYellowActor; // yellow markings (centre line)
-	TWeakObjectPtr<AActor> GeoPerimeterActor;     // §8.4 PCG spline loops (road edges + blocks)
-	TWeakObjectPtr<AActor> GeoLaneGraphActor;     // §12.2 lane-connectivity splines for PCG/traffic
-	TWeakObjectPtr<AActor> GeoLaneEvenActor;      // §12.1 per-lane ribbons (even bank)
-	TWeakObjectPtr<AActor> GeoLaneOddActor;       // §12.1 per-lane ribbons (odd bank)
-	TWeakObjectPtr<AActor> GeoCurbActor;          // §8.12 kerb-line HISM (road/sidewalk edge)
-	TWeakObjectPtr<AActor> GeoSignalActor;        // § junction traffic-signal placeholder HISM
-	TWeakObjectPtr<AActor> GeoMedianActor;        // § raised median strip mesh (soil / plantable)
-	TWeakObjectPtr<AActor> GeoMedianWalkActor;    // § raised median strip mesh (concrete / walkable)
-	TWeakObjectPtr<AActor> GeoMedianSplineActor;  // § median centre splines (PCG tree scatter)
+	// ---- spatial tile registry (§ tiling) ---------------------------------
+	// Live map of grid cell -> tile actor for this network. Transient: rebuilt
+	// from the level (scanning ARoadNetTileActor with our NetworkId) on demand
+	// via EnsureTileRegistry(), so it survives editor reloads without being
+	// serialized. GetOrCreateTile spawns a tile the first time a cell is used.
+	TMap<FIntPoint, TWeakObjectPtr<ARoadNetTileActor>> TileActors;
+	bool bTileRegistryLoaded = false;
+
+	// ---- incremental caches (§ conform-cache) -----------------------------
+	// A windowed rebuild recomputes only the roads in the edit window, so the
+	// WHOLE-network terrain-conform outputs (GetDeformCorridors / GetConformVerts
+	// / GetConformTris) are reassembled from clean cache entries (untouched
+	// roads / cells) + freshly recomputed ones after every rebuild. Transient:
+	// empty on load, so the first rebuild is a full rebuild that fills them.
+	mutable TMap<FGuid, FRoadNetDeformCorridor> DeformCache;
+	TMap<FIntPoint, FRoadNetTileConform> ConformCache;
+
+	// Last-known tile CORRIDOR (the grid cells the road's polyline passes through,
+	// plus a reach ring) per road GUID, so a windowed rebuild can dirty a MOVED
+	// road's OLD cells as well as its new ones (its geometry must be cleared from
+	// where it used to be). Stored as a corridor — NOT an AABB — so a long or
+	// diagonal road only marks the thin band of cells it actually occupies, not
+	// the whole bounding rectangle. Refreshed every rebuild.
+	mutable TMap<FGuid, TArray<FIntPoint>> LastRoadCells;
+
+	// Rebuild TileActors from the level if not already loaded this session.
+	void EnsureTileRegistry();
+	// Get (spawning on first use) the tile actor for grid cell Coord.
+	ARoadNetTileActor* GetOrCreateTile(const FIntPoint& Coord);
+	// Grid cell containing a world point, using this network's TileSizeCm.
+	FIntPoint TileOf(const FVector& WorldPos) const;
+
+	// (Former network-wide Geo* actors removed — all committed geometry now lives
+	// in per-cell ARoadNetTileActor components; see the tile registry above.)
 
 	// Persistent per-junction marking overrides (keyed by location).
 	UPROPERTY()
@@ -446,19 +661,38 @@ private:
 	void BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const;    // §12.1 per-lane ribbon polys
 	void BuildJunctionMarkings(FRoadNetRebuildContext& Ctx);     // §2 junction paint + signals
 	void BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const;// § corner channelizing grass islands
+	void BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const; // § standard stalls → park overlay + white lines
+	void BuildFurniture(FRoadNetRebuildContext& Ctx) const;      // § street-furniture placement sampling
 	void CommitGeometry(FRoadNetRebuildContext& Ctx);            // §10.15 mesh + spawn
 	void CommitCurbs(FRoadNetRebuildContext& Ctx);               // §8.12 kerb-line HISM
+	void CommitFurniture(FRoadNetRebuildContext& Ctx);           // § street-furniture HISM / actors
 	void CommitJunctionSignals(FRoadNetRebuildContext& Ctx);     // § signal placeholder HISM
 	void CommitMedian(FRoadNetRebuildContext& Ctx);              // § raised median strip + centre splines
 	void CommitPerimeters(FRoadNetRebuildContext& Ctx);          // §8.4 spline loops for PCG
 	void CommitLaneGraph(FRoadNetRebuildContext& Ctx);           // §12.2 lane-graph splines for PCG
 
-	// Mesh a set of per-zone polygons and spawn/update a colored actor. If
-	// Material is set it is applied to slot 0; otherwise the constant Color is
-	// used as a vertex-colour override so the layer is always visible.
-	int32 CommitLayer(TWeakObjectPtr<AActor>& ActorPtr, const TCHAR* Label,
+	// Mesh a set of per-zone polygons and route the result into the spatial tile
+	// actors (§ tiling): each zone's polygons are clipped to every grid cell they
+	// overlap and appended to that cell's named UDynamicMeshComponent (LayerName).
+	// If Material is set it is applied to slot 0; otherwise the constant Color is
+	// used as a vertex-colour override so the layer is always visible. Only cells
+	// allowed by the commit scope (Ctx.bFullCommit / Ctx.DirtyTiles) are written.
+	int32 CommitLayer(FName LayerName,
 		const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
 		double ExtraLiftCm, FColor Color, UMaterialInterface* Material, FRoadNetRebuildContext& Ctx,
 		bool bBakeLaneColors = false, bool bWorldUVs = false, bool bConformSurface = false);
+
+	// True if grid cell Coord may be written this commit pass (full rebuild, or
+	// Coord is in the dirty set).
+	bool IsTileInCommitScope(const FIntPoint& Coord, const FRoadNetRebuildContext& Ctx) const;
+
+	// Clear (or retire) tile actors before repopulating: full rebuild clears ALL
+	// registered tiles; a windowed pass clears only the dirty cells. Called once
+	// at the top of CommitGeometry.
+	void PrepareTilesForCommit(FRoadNetRebuildContext& Ctx);
+
+	// Destroy any tile actor that ended a commit empty (retires cells an edit
+	// emptied out). Called at the end of CommitGeometry.
+	void RetireEmptyTiles(FRoadNetRebuildContext& Ctx);
 	// TODO: overlap masks (§10.10), per-road perimeter loops (§10.11), markings.
 };

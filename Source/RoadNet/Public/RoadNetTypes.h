@@ -1,5 +1,6 @@
 #pragma once
 #include "CoreMinimal.h"
+#include "UObject/SoftObjectPtr.h"
 #include "RoadNetTypes.generated.h"
 
 // ===========================================================================
@@ -88,6 +89,28 @@ struct ROADNET_API FRoadNetJunctionConfig
 	// areas (the pavement wedges between adjacent arms). Toggled per junction.
 	UPROPERTY()
 	bool bCornerIslands = false;
+
+	// Per-junction morphological-close (smoothing) radius in cm. Negative =
+	// inherit the network default (URoadNetwork::JunctionSmoothingCm). Set with
+	// the [ / ] hotkeys on the junction under the cursor so each junction can be
+	// rounded independently without touching (or rebuilding) the others.
+	UPROPERTY()
+	float SmoothingCm = -1.f;
+};
+
+// Active RoadNet Draw sub-tool. Exactly ONE is active at a time, so a click /
+// hotkey has a single unambiguous meaning (no Alt/Ctrl guessing). Driven by the
+// roadnet.DrawTool CVar, toggled from the OSM Roads panel segmented control and
+// the 1-5 number keys in the viewport. Kept in this shared header so both the
+// RoadNet runtime (CVar) and the OSMRoadCore panel (labels) agree on the values.
+UENUM(BlueprintType)
+enum class ERoadNetDrawTool : uint8
+{
+	Draw      = 0,  // click drops road points; never selects
+	Points    = 1,  // select/move/delete control points, marquee, split, merge
+	Lanes     = 2,  // select a lane, insert lanes, cycle lane type
+	Junctions = 3,  // junction presets, islands, smoothing, medians
+	Edge      = 4   // drag the outer-edge vertices (sidewalk/curb/markings follow)
 };
 
 // Lane semantic type — mirrors RoadBLD ELaneType (minus deprecated None; our
@@ -361,6 +384,119 @@ struct ROADNET_API FRoadNetLaneSpec
 };
 
 // ---------------------------------------------------------------------------
+// Street furniture (street features). A configurable prop type placed
+// automatically along the road. Placeholder-first workflow: with no overrides a
+// grey box is instanced (HISM) so the layout reads at a glance; assign a
+// StaticMesh to swap the instanced mesh, or a Blueprint/actor class to spawn
+// real actors instead. Commit resolution order: BlueprintClass > MeshOverride >
+// engine cube placeholder.
+// ---------------------------------------------------------------------------
+UENUM(BlueprintType)
+enum class ERoadNetFurniturePlacement : uint8
+{
+	SpacedPoints,   // one item every SpacingCm (bench, bus stop, kiosk…)
+	Continuous      // tiled end-to-end segments along the run (guard rail…)
+};
+
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetFurnitureType
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture")
+	bool bEnabled = true;
+
+	// Label only (helps identify rows in the array editor / instance tags).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture")
+	FName Name;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture")
+	ERoadNetFurniturePlacement Placement = ERoadNetFurniturePlacement::SpacedPoints;
+
+	// Spacing between items (SpacedPoints) or the tile length (Continuous), cm.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture",
+		meta=(ClampMin="20.0", UIMin="50.0", UIMax="10000.0"))
+	float SpacingCm = 3000.f;
+
+	// Lateral offset (cm) from the carriageway edge. + pushes outward (onto the
+	// sidewalk / away from the road), − pulls back toward the centerline.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture",
+		meta=(ClampMin="-1000.0", UIMin="-500.0", UIMax="1000.0"))
+	float SideOffsetCm = 120.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture")
+	bool bLeft = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture")
+	bool bRight = true;
+
+	// Extra yaw (deg) on top of the road-facing orientation.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture")
+	float YawOffsetDeg = 0.f;
+
+	// Box extent (cm) of the grey placeholder when no mesh/BP is assigned. For a
+	// Continuous run the along-road extent is overridden to the tile length so
+	// segments join up.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture")
+	FVector PlaceholderExtentCm = FVector(60.f, 40.f, 90.f);
+
+	// Assign to swap the instanced placeholder for a real mesh (HISM).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture")
+	TSoftObjectPtr<class UStaticMesh> MeshOverride;
+
+	// Assign to spawn actors of this class instead of instancing a mesh.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Furniture")
+	TSoftClassPtr<class AActor> BlueprintClass;
+};
+
+// ---------------------------------------------------------------------------
+// Standard parking bay (street features). A run of marked stalls along one side
+// of a road, generated to standard dimensions — the counterpart to the
+// free-form Edge-tool bulge. Stored on the road so it persists and reshapes
+// with the centerline.
+// ---------------------------------------------------------------------------
+UENUM(BlueprintType)
+enum class ERoadNetParkingLayout : uint8
+{
+	Parallel,        // stalls parallel to the kerb
+	Perpendicular,   // 90° stalls
+	Angled           // stalls at AngleDeg to the kerb
+};
+
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetParkingBay
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking")
+	ERoadNetSide Side = ERoadNetSide::Right;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking")
+	ERoadNetParkingLayout Layout = ERoadNetParkingLayout::Parallel;
+
+	// Stall size (cm): Width runs ALONG the kerb, Depth runs OUT from the kerb.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking",
+		meta=(ClampMin="150.0", UIMin="200.0", UIMax="800.0"))
+	float StallWidthCm = 250.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking",
+		meta=(ClampMin="150.0", UIMin="200.0", UIMax="800.0"))
+	float StallDepthCm = 250.f;
+
+	// Angled layout only: stall angle to the kerb (deg).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking",
+		meta=(ClampMin="30.0", UIMin="30.0", UIMax="90.0"))
+	float AngleDeg = 45.f;
+
+	// Arc-length window along the road (cm). LengthCm<=0 ⇒ to the road end.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking")
+	float StartArcCm = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking")
+	float LengthCm = 0.f;
+};
+
+// ---------------------------------------------------------------------------
 // Endpoint link — authored/derived topology at a road end (§1.3 / §10.7).
 // Persisted on the first (Start) or last (End) point of a road.
 // ---------------------------------------------------------------------------
@@ -414,6 +550,25 @@ struct ROADNET_API FRoadDef
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
 	FRoadNetLaneSpec Lanes;
+
+	// Authored outer-edge profiles (Edge tool). Each knot is (Distance along the
+	// reference arc length, signed lateral Offset in cm). When non-empty, the
+	// carriageway outer edge on that side follows the profile instead of the
+	// uniform ±HalfWidth — and because the sidewalk, curb and edge marking are
+	// all derived from the carriageway boundary, they reshape with it (e.g. a
+	// parking-bay bulge). OuterEdgeRight is the +offset side, OuterEdgeLeft the
+	// −offset side. Empty ⇒ uniform edge.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Geometry")
+	TArray<FRoadNetEdgeKnot> OuterEdgeRight;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Geometry")
+	TArray<FRoadNetEdgeKnot> OuterEdgeLeft;
+
+	// Standard parking bays authored on this road (street features). Persist with
+	// the road and are regenerated to standard stall dimensions each rebuild,
+	// alongside (not replacing) any Edge-tool outer-edge bulge.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking")
+	TArray<FRoadNetParkingBay> ParkingBays;
 
 	// Grade separation (§10.12). Layer/bridge/tunnel decide which road is on top.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Grade")

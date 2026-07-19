@@ -320,6 +320,48 @@ namespace RoadNetMath
 		}
 	}
 
+	void OffsetPolylineVariable(const TArray<FVector>& In, const TArray<double>& PerVertexOffset,
+		TArray<FVector>& Out, double MiterLimit)
+	{
+		Out.Reset();
+		const int32 N = In.Num();
+		if (N < 2 || PerVertexOffset.Num() != N) { Out = In; return; }
+		Out.SetNumUninitialized(N);
+
+		for (int32 i = 0; i < N; ++i)
+		{
+			const FVector2D T = TangentAt(In, i);
+			FVector2D R = RightAxis(T);
+
+			if (i > 0 && i < N - 1)
+			{
+				const FVector2D Ta = (XY(In[i]) - XY(In[i - 1])).GetSafeNormal();
+				const FVector2D Tb = (XY(In[i + 1]) - XY(In[i])).GetSafeNormal();
+				const FVector2D Ra = RightAxis(Ta);
+				const FVector2D Rb = RightAxis(Tb);
+				if (Ra.IsNearlyZero() || Rb.IsNearlyZero())
+				{
+					R = Ra.IsNearlyZero() ? Rb : Ra;
+				}
+				else
+				{
+					FVector2D M = (Ra + Rb);
+					const double MLen = M.Size();
+					if (MLen > KINDA_SMALL_NUMBER)
+					{
+						M /= MLen;
+						const double CosHalf = FMath::Abs(FVector2D::DotProduct(M, Ra));
+						const double Scale = CosHalf > KINDA_SMALL_NUMBER ? (1.0 / CosHalf) : MiterLimit;
+						R = (Scale <= MiterLimit) ? (M * Scale) : (M * MiterLimit);
+					}
+				}
+			}
+
+			const FVector2D P = XY(In[i]) + R * PerVertexOffset[i];
+			Out[i] = FVector(P.X, P.Y, In[i].Z);
+		}
+	}
+
 	FVector2D ClosestOnSegment(const FVector2D& A, const FVector2D& B, const FVector2D& Q, double& OutT)
 	{
 		const FVector2D AB = B - A;

@@ -70,6 +70,14 @@ namespace RoadNetMath
 		const TArray<FVector>& In, double SignedOffset, TArray<FVector>& Out,
 		double MiterLimit = 4.0);
 
+	// Offset a polyline by a PER-VERTEX signed offset (cm, +right). Same miter
+	// convention as OffsetPolyline but each vertex uses its own magnitude, so an
+	// authored outer-edge profile (e.g. a parking-bay bulge) can push the edge in
+	// and out along the road. PerVertexOffset must have In.Num() entries.
+	ROADNET_API void OffsetPolylineVariable(
+		const TArray<FVector>& In, const TArray<double>& PerVertexOffset,
+		TArray<FVector>& Out, double MiterLimit = 4.0);
+
 	// ---- §10.5 Projection --------------------------------------------------
 	struct FProjectResult
 	{

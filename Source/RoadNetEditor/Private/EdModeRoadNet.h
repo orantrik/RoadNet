@@ -3,6 +3,7 @@
 #include "EdMode.h"
 #include "EditorModeManager.h"
 #include "HitProxies.h"
+#include "RoadNetTypes.h"
 
 // ===========================================================================
 // FEdModeRoadNet — click-to-draw + edit road authoring (§9.3).
@@ -43,6 +44,33 @@ struct HRoadNetSegmentProxy : public HHitProxy
 	int32 SegIndex;
 };
 
+// Hit proxy for one lane band of a road (Lanes tool). LaneLtoR is the left→right
+// lane index (see URoadNetwork::GetLanesLeftToRight); drawn on top of the segment
+// proxy so a click in the Lanes tool selects the exact lane under the cursor.
+struct HRoadNetLaneProxy : public HHitProxy
+{
+	DECLARE_HIT_PROXY();
+	HRoadNetLaneProxy(int32 InRoad, int32 InLaneLtoR)
+		: HHitProxy(HPP_UI), RoadIndex(InRoad), LaneLtoR(InLaneLtoR) {}
+	virtual EMouseCursor::Type GetMouseCursor() override { return EMouseCursor::Crosshairs; }
+	int32 RoadIndex;
+	int32 LaneLtoR;
+};
+
+// Hit proxy for one outer-edge vertex handle (Edge tool). SideRight selects the
+// +offset edge (else −offset); KnotIndex is the handle's index in the side's
+// (possibly synthesized) profile.
+struct HRoadNetEdgeProxy : public HHitProxy
+{
+	DECLARE_HIT_PROXY();
+	HRoadNetEdgeProxy(int32 InRoad, bool bInSideRight, int32 InKnot)
+		: HHitProxy(HPP_UI), RoadIndex(InRoad), bSideRight(bInSideRight), KnotIndex(InKnot) {}
+	virtual EMouseCursor::Type GetMouseCursor() override { return EMouseCursor::Crosshairs; }
+	int32 RoadIndex;
+	bool  bSideRight;
+	int32 KnotIndex;
+};
+
 class FEdModeRoadNet : public FEdMode
 {
 public:
@@ -56,6 +84,7 @@ public:
 	virtual bool MouseMove(FEditorViewportClient* ViewportClient, FViewport* Viewport, int32 MouseX, int32 MouseY) override;
 	virtual void Render(const FSceneView* View, FViewport* Viewport, FPrimitiveDrawInterface* PDI) override;
 	virtual void DrawHUD(FEditorViewportClient* ViewportClient, FViewport* Viewport, const FSceneView* View, FCanvas* Canvas) override;
+	virtual void Tick(FEditorViewportClient* ViewportClient, float DeltaTime) override;
 
 	// Marquee box-select of control points (left-drag on empty space).
 	virtual bool StartTracking(FEditorViewportClient* InViewportClient, FViewport* InViewport) override;
@@ -73,9 +102,20 @@ public:
 	virtual bool ShowModeWidgets() const override { return false; }
 	virtual bool UsesToolkits() const override { return false; }
 
+	// Panel bridge: add a standard parking bay to the currently-selected road,
+	// using LayoutInt (0=Parallel, 1=Perpendicular, 2=Angled) and the selected
+	// lane's side (defaults to the right side when no lane is picked). Returns
+	// true on success; OutMsg carries a status / error message for the panel.
+	bool AddParkingBayToActiveSelection(uint8 LayoutInt, FString& OutMsg);
+
 private:
 	ARoadNetActor* GetOrSpawnNetActor();
 	class URoadNetwork* GetNetwork() const;
+	// Active sub-tool, read from the roadnet.DrawTool CVar (driven by the OSM
+	// Roads panel + 1-5 keys). Exactly one tool is live so every click/hotkey is
+	// unambiguous. SetActiveTool writes the CVar (used by the number-key shortcuts).
+	ERoadNetDrawTool ActiveTool() const;
+	void SetActiveTool(ERoadNetDrawTool Tool);
 	bool LineTraceCursor(FEditorViewportClient* ViewportClient, FVector& OutHit) const;
 	// Snap Query to the nearest existing road vertex / draft point within radius.
 	// Returns true and writes OutSnap when a candidate is found.
@@ -111,11 +151,31 @@ private:
 	// the thin point/segment hit proxies). Selects the nearest editable control
 	// point, else the nearest road centreline. bToggle (Shift) adds/removes the
 	// picked point from the multi-selection. Returns true when it selected.
-	bool TrySelectUnderCursor(FEditorViewportClient* ViewportClient, bool bToggle);
+	// bRoadOnly skips control-point picking (used by the Lanes/Junctions/Edge
+	// tools, which only ever target a whole road, never a point).
+	bool TrySelectUnderCursor(FEditorViewportClient* ViewportClient, bool bToggle, bool bRoadOnly = false);
 	// Which lane (left→right index, see URoadNetwork::GetLanesLeftToRight) of
 	// RoadIdx the world point sits over, by nearest lane-centre offset line;
 	// INDEX_NONE if none. Used to pick the lane to highlight/edit.
 	int32 PickLaneAt(int32 RoadIdx, const FVector& WorldHit) const;
+	// Select lane LaneLtoR of RoadIdx: sets SelRoad/SelLane, materialises the
+	// road's lanes (so they gain stable LaneIds), and remembers the picked
+	// lane's LaneId so the highlight survives a rebuild (index re-derived from
+	// the id). LaneLtoR == INDEX_NONE clears the lane selection.
+	void SelectLaneOnRoad(int32 RoadIdx, int32 LaneLtoR);
+	// Re-derive SelLane from SelLaneId after a rebuild may have reordered lanes.
+	void ResolveSelLaneFromId();
+
+	// ---- Edge tool helpers ------------------------------------------------
+	// Reference point + right-axis (unit, +right of travel) at arc length ArcCm
+	// along road RoadIdx's Ref polyline. Returns false on a bad index.
+	bool RefFrameAt(int32 RoadIdx, double ArcCm, FVector& OutPoint, FVector2D& OutRight) const;
+	// World position of outer-edge knot (Side/Knot) of RoadIdx, using the
+	// (possibly synthesized) display profile. Returns false if unavailable.
+	bool GetEdgeKnotWorld(int32 RoadIdx, bool bSideRight, int32 Knot, FVector& OutWorld) const;
+	// Signed lateral offset (+right) of world point W from RoadIdx's reference at
+	// the nearest arc position; also returns that arc length. False on bad index.
+	bool ProjectToEdgeOffset(int32 RoadIdx, const FVector& W, double& OutOffset, double& OutArc) const;
 
 	TArray<FVector> DraftPoints;
 	FVector HoverPoint = FVector::ZeroVector;
@@ -135,6 +195,15 @@ private:
 	// as a highlighted ribbon, and targeted by Shift+= / Shift+- (insert a lane
 	// on that side) and B (cycle its type: driving → bicycle → parking).
 	int32 SelLane = INDEX_NONE;
+	// Stable id of the selected lane (from the road's materialised DetailedLanes)
+	// so the highlight/edit anchor follows the lane across rebuilds even when
+	// left→right indices shift. Invalid when no lane is selected.
+	FGuid SelLaneId;
+	// Edge tool: selected outer-edge handle of SelRoad (side + knot index), the
+	// transform-widget drag target. SelEdgeKnot == INDEX_NONE when no handle is
+	// picked. bSelEdgeRight chooses the +offset (true) or −offset (false) side.
+	int32 SelEdgeKnot = INDEX_NONE;
+	bool  bSelEdgeRight = true;
 	bool bDirtyDuringDrag = false;
 
 	// Multi-point selection: (RoadIndex, PointIndex) pairs. Move/delete act on all.
@@ -152,6 +221,25 @@ private:
 	// because a city-scale OSM import has thousands of nodes; opt in to edit
 	// imported geometry (edits persist until the next re-import of that road).
 	bool bShowAllPoints = false;
+
+	// Last observed sub-tool; Tick() watches the CVar and, when it changes,
+	// discards a stray draft / marquee so tools never bleed into each other.
+	ERoadNetDrawTool LastTool = ERoadNetDrawTool::Draw;
+
+	// Junction-smoothing debounce. '[' / ']' change a GLOBAL smoothing parameter
+	// that reshapes EVERY junction, so each change is a full-network rebuild (no
+	// way to window a global param). Tapping the key repeatedly to dial the value
+	// in would otherwise stack a full rebuild per press (tens of seconds each).
+	// Instead the value change is applied immediately (cheap) and the rebuild is
+	// deferred, so a burst of taps coalesces into ONE rebuild once the user
+	// pauses. Flushed on tool change / mode exit.
+	bool   bSmoothingRebuildPending = false;
+	double SmoothingLastEditTime    = 0.0;
+	// World-XY location of the junction whose smoothing is queued, so the flush
+	// scopes the rebuild to that one junction's tiles.
+	FVector2D SmoothingPendingLoc   = FVector2D::ZeroVector;
+	// Flush a pending debounced smoothing rebuild now (no-op if none pending).
+	void FlushPendingSmoothing(FEditorViewportClient* ViewportClient);
 
 	TWeakObjectPtr<ARoadNetActor> NetActorPtr;
 };

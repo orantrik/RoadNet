@@ -48,11 +48,26 @@ namespace RoadNetSurface
 		Out.SetOuter(Poly);
 	}
 
+	// Morphological close (dilate +e then erode -e): rounds concave corners and
+	// bridges micro-gaps without changing the overall outer size. In-place on Io.
+	static void MorphClose(TArray<FGeneralPolygon2d>& Io, double e)
+	{
+		if (e <= 0.0 || Io.Num() == 0) { return; }
+		TArray<FGeneralPolygon2d> Closed;
+		if (PolygonsOffsets(
+				+e, -e, Io, Closed, /*bCopyInputOnFailure*/true,
+				/*MiterLimit*/2.0, EPolygonOffsetJoinType::Round, EPolygonOffsetEndType::Polygon))
+		{
+			Io = MoveTemp(Closed);
+		}
+	}
+
 	bool BuildMergedSurface(
 		const TArray<const FRoadCurves*>& Curves,
 		TArray<FGeneralPolygon2d>& OutMerged,
 		double InflateEpsilonCm,
-		const TArray<FGeneralPolygon2d>* ExtraPolys)
+		const TArray<FGeneralPolygon2d>* ExtraPolys,
+		const TArray<FJunctionClose>* PerJunction)
 	{
 		OutMerged.Reset();
 
@@ -74,17 +89,51 @@ namespace RoadNetSurface
 			return true; // OutMerged holds the copied input (bCopyInputOnFailure)
 		}
 
-		// Morphological "close" (dilate +e, erode -e) bridges micro-gaps between
-		// arms meeting at oblique angles without changing overall size.
-		if (InflateEpsilonCm > 0.0 && OutMerged.Num() > 0)
+		const bool bPerJunction = (PerJunction && PerJunction->Num() > 0);
+		if (!bPerJunction)
 		{
-			TArray<FGeneralPolygon2d> Closed;
-			if (PolygonsOffsets(
-					+InflateEpsilonCm, -InflateEpsilonCm,
-					OutMerged, Closed, /*bCopyInputOnFailure*/true,
-					/*MiterLimit*/2.0, EPolygonOffsetJoinType::Round, EPolygonOffsetEndType::Polygon))
+			// Original path: one global morphological "close" bridges micro-gaps
+			// between arms meeting at oblique angles without changing overall size.
+			MorphClose(OutMerged, InflateEpsilonCm);
+			return true;
+		}
+
+		// ---- per-junction smoothing -----------------------------------------
+		// Weld the whole surface with only a hairline epsilon (so abutting arms
+		// still connect), then round EACH junction locally with its own radius.
+		// A junction's rounding is computed on the local surface patch (surface ∩
+		// disc) and unioned back, so junctions carry independent smoothing while
+		// straight road runs are untouched.
+		const double WeldCm = FMath::Min(InflateEpsilonCm, 5.0);
+		MorphClose(OutMerged, WeldCm);
+
+		TArray<FGeneralPolygon2d> Patches;
+		Patches.Reserve(PerJunction->Num());
+		for (const FJunctionClose& J : *PerJunction)
+		{
+			if (J.CloseCm <= WeldCm) { continue; } // no extra rounding at this junction
+			FGeneralPolygon2d Disc;
+			MakeDisc(J.Center, J.FillRadiusCm + J.CloseCm + 50.0, /*Segments*/48, Disc);
+			const TArray<FGeneralPolygon2d> DiscArr = { MoveTemp(Disc) };
+
+			TArray<FGeneralPolygon2d> Region;
+			if (!PolygonsIntersection(OutMerged, DiscArr, Region) || Region.Num() == 0) { continue; }
+			MorphClose(Region, J.CloseCm);
+			Patches.Append(MoveTemp(Region));
+		}
+
+		if (Patches.Num() > 0)
+		{
+			TArray<FGeneralPolygon2d> All = MoveTemp(OutMerged);
+			All.Append(MoveTemp(Patches));
+			TArray<FGeneralPolygon2d> Merged2;
+			if (PolygonsUnion(All, Merged2, /*bCopyInputOnFailure*/true))
 			{
-				OutMerged = MoveTemp(Closed);
+				OutMerged = MoveTemp(Merged2);
+			}
+			else
+			{
+				OutMerged = MoveTemp(All); // union failed → keep base + patches
 			}
 		}
 		return true;

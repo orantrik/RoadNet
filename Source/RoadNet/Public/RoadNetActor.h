@@ -40,6 +40,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "RoadNet|HandDraw")
 	bool bDraftSidewalks = true;
 
+	// Sidewalk width (cm) applied to newly hand-drawn roads when bDraftSidewalks.
+	UPROPERTY(EditAnywhere, Category = "RoadNet|HandDraw",
+		meta = (ClampMin = "50.0", UIMin = "100.0", UIMax = "600.0"))
+	float DraftSidewalkWidthCm = 200.f;
+
 	UPROPERTY(EditAnywhere, Category = "RoadNet|HandDraw", meta = (ClampMin = "150.0"))
 	float DraftLaneWidthCm = 350.f;
 

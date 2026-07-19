@@ -6,6 +6,9 @@
 #include "RoadNetCurbs.h"
 #include "RoadNetJunctionMarks.h"
 #include "RoadNetZones.h"
+#include "RoadNetTileActor.h"
+#include "RoadNetTiles.h"
+#include "EngineUtils.h"        // TActorIterator (tile registry rebuild)
 #include "Polygon2.h"
 #include "Algo/Reverse.h"
 #include "RoadNetMarkings.h"
@@ -23,6 +26,15 @@
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInterface.h"
 #include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
+
+// Safety valve for the windowed (per-tile scoped) rebuild. When 0 every edit
+// falls back to a full-network rebuild — the pre-tiling behaviour — so any
+// suspected windowing artifact can be ruled out live without a recompile.
+static TAutoConsoleVariable<int32> CVarRoadNetWindowedRebuild(
+	TEXT("roadnet.WindowedRebuild"), 1,
+	TEXT("1 = scope single-road edits to the spatial tiles they touch (fast). 0 = always full rebuild (safe fallback)."),
+	ECVF_Default);
 
 // Pipeline tunables (§2.6). Kept local until a settings object is added.
 namespace
@@ -89,6 +101,82 @@ void URoadNetwork::ResetRoads()
 int32 URoadNetwork::RemoveRoadsBySource(ERoadNetSource Source)
 {
 	return Roads.RemoveAll([Source](const FRoadDef& R) { return R.Source == Source; });
+}
+
+int32 URoadNetwork::FindRoadById(const FGuid& Id) const
+{
+	if (!Id.IsValid()) { return INDEX_NONE; }
+	for (int32 i = 0; i < Roads.Num(); ++i) { if (Roads[i].Id == Id) { return i; } }
+	return INDEX_NONE;
+}
+
+const FGuid& URoadNetwork::EnsureNetworkId()
+{
+	if (!NetworkId.IsValid()) { NetworkId = FGuid::NewGuid(); }
+	return NetworkId;
+}
+
+FIntPoint URoadNetwork::TileOf(const FVector& WorldPos) const
+{
+	return RoadNetTiles::WorldToTile(WorldPos, TileSizeCm);
+}
+
+void URoadNetwork::EnsureTileRegistry()
+{
+	if (bTileRegistryLoaded) { return; }
+	bTileRegistryLoaded = true;
+
+	TileActors.Reset();
+	UWorld* World = WorldPtr.Get();
+	if (!World) { return; }
+
+	const FGuid& MyId = EnsureNetworkId();
+	for (TActorIterator<ARoadNetTileActor> It(World); It; ++It)
+	{
+		ARoadNetTileActor* Tile = *It;
+		if (!Tile || Tile->OwningNetworkId != MyId) { continue; }
+		TileActors.Add(Tile->TileCoord, Tile);
+	}
+}
+
+ARoadNetTileActor* URoadNetwork::GetOrCreateTile(const FIntPoint& Coord)
+{
+	EnsureTileRegistry();
+
+	if (TWeakObjectPtr<ARoadNetTileActor>* Found = TileActors.Find(Coord))
+	{
+		if (ARoadNetTileActor* Existing = Found->Get()) { return Existing; }
+		TileActors.Remove(Coord);
+	}
+
+	UWorld* World = WorldPtr.Get();
+	if (!World) { return nullptr; }
+
+	// Spawn at the origin with identity transform: committed geometry is stored
+	// in WORLD coordinates (matching the former network-wide actors), so the
+	// component-to-world transform must be identity. The actor's render/streaming
+	// bounds still resolve to the cell because they derive from the (world-space)
+	// mesh, not the pivot. (Local-space pivot handled in the streaming phase.)
+	FActorSpawnParameters Params;
+	Params.ObjectFlags |= RF_Transient; // made persistent in the streaming phase
+	ARoadNetTileActor* Tile = World->SpawnActor<ARoadNetTileActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
+	if (!Tile) { return nullptr; }
+	Tile->Configure(Coord, TileSizeCm, EnsureNetworkId());
+#if WITH_EDITOR
+	Tile->SetActorLabel(FString::Printf(TEXT("RoadNet_Tile_%d_%d"), Coord.X, Coord.Y));
+#endif
+	TileActors.Add(Coord, Tile);
+	return Tile;
+}
+
+void URoadNetwork::RetireAllTiles()
+{
+	EnsureTileRegistry();
+	for (TPair<FIntPoint, TWeakObjectPtr<ARoadNetTileActor>>& KV : TileActors)
+	{
+		if (ARoadNetTileActor* Tile = KV.Value.Get()) { Tile->Destroy(); }
+	}
+	TileActors.Reset();
 }
 
 bool URoadNetwork::MoveRoadPoint(int32 RoadIdx, int32 PointIdx, const FVector& NewWorldPos)
@@ -375,6 +463,13 @@ TArray<FRoadNetLane> URoadNetwork::GetLanesLeftToRight(int32 RoadIdx) const
 	return Lanes;
 }
 
+bool URoadNetwork::MaterializeLanes(int32 RoadIdx)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return false; }
+	EnsureDetailedLanes(Roads[RoadIdx].Lanes);
+	return true;
+}
+
 int32 URoadNetwork::InsertLaneRelative(int32 RoadIdx, int32 LaneLtoR, bool bRightSide)
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return INDEX_NONE; }
@@ -416,6 +511,93 @@ ERoadNetLaneType URoadNetwork::CycleLaneType(int32 RoadIdx, int32 LaneLtoR, int3
 	Ln.Width = (float)LaneTypeDefaultWidthCm(Ln.Type);
 	RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
 	return Ln.Type;
+}
+
+namespace
+{
+	// Reference-polyline arc length (2-D, cm).
+	double RefArcLength(const TArray<FVector>& Ref)
+	{
+		double L = 0.0;
+		for (int32 i = 1; i < Ref.Num(); ++i) { L += FVector::Dist2D(Ref[i - 1], Ref[i]); }
+		return L;
+	}
+
+	// Evenly spaced flat knot count for an outer-edge profile: ~1 knot / 15 m,
+	// clamped so short roads still get a handful and long roads stay editable.
+	int32 EdgeKnotCountFor(double LengthCm)
+	{
+		return FMath::Clamp(FMath::FloorToInt(LengthCm / 1500.0) + 1, 3, 24);
+	}
+
+	TArray<FRoadNetEdgeKnot>& OuterEdgeSide(FRoadDef& R, ERoadNetSide Side)
+	{
+		return (Side == ERoadNetSide::Left) ? R.OuterEdgeLeft : R.OuterEdgeRight;
+	}
+}
+
+void URoadNetwork::GetOuterEdgeForDisplay(int32 RoadIdx, ERoadNetSide Side, TArray<FRoadNetEdgeKnot>& Out) const
+{
+	Out.Reset();
+	if (!Roads.IsValidIndex(RoadIdx)) { return; }
+	const FRoadDef& R = Roads[RoadIdx];
+	const TArray<FRoadNetEdgeKnot>& Existing = (Side == ERoadNetSide::Left) ? R.OuterEdgeLeft : R.OuterEdgeRight;
+	if (Existing.Num() > 0) { Out = Existing; return; }
+
+	// Synthesize a flat profile at the uniform ±HalfWidth so the Edge tool has
+	// handles even before the road is edited (materialised on first drag).
+	const double Len  = RefArcLength(R.Ref);
+	const double Half = FMath::Max(50.0, (double)R.Lanes.HalfWidthCm());
+	const double Sign = (Side == ERoadNetSide::Left) ? -1.0 : +1.0;
+	const int32  N    = EdgeKnotCountFor(Len);
+	Out.SetNum(N);
+	for (int32 k = 0; k < N; ++k)
+	{
+		Out[k].Distance = (N > 1) ? (Len * k / (N - 1)) : 0.0;
+		Out[k].Offset   = Sign * Half;
+	}
+}
+
+bool URoadNetwork::EnsureOuterEdgeProfile(int32 RoadIdx, ERoadNetSide Side)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return false; }
+	TArray<FRoadNetEdgeKnot>& Arr = OuterEdgeSide(Roads[RoadIdx], Side);
+	if (Arr.Num() == 0) { GetOuterEdgeForDisplay(RoadIdx, Side, Arr); }
+	return Arr.Num() > 0;
+}
+
+void URoadNetwork::SetOuterEdgeKnotOffset(int32 RoadIdx, ERoadNetSide Side, int32 KnotIdx, double Offset)
+{
+	if (!EnsureOuterEdgeProfile(RoadIdx, Side)) { return; }
+	TArray<FRoadNetEdgeKnot>& Arr = OuterEdgeSide(Roads[RoadIdx], Side);
+	if (!Arr.IsValidIndex(KnotIdx)) { return; }
+	// Keep the edge on its own side of the centreline (≥ +50 for Right, ≤ −50
+	// for Left) so a drag can't fold the carriageway inside-out.
+	Arr[KnotIdx].Offset = (Side == ERoadNetSide::Left)
+		? FMath::Min(Offset, -50.0)
+		: FMath::Max(Offset, +50.0);
+}
+
+int32 URoadNetwork::AddOuterEdgeKnot(int32 RoadIdx, ERoadNetSide Side, double Distance, double Offset)
+{
+	if (!EnsureOuterEdgeProfile(RoadIdx, Side)) { return INDEX_NONE; }
+	TArray<FRoadNetEdgeKnot>& Arr = OuterEdgeSide(Roads[RoadIdx], Side);
+	FRoadNetEdgeKnot K;
+	K.Distance = FMath::Max(0.0, Distance);
+	K.Offset   = (Side == ERoadNetSide::Left) ? FMath::Min(Offset, -50.0) : FMath::Max(Offset, +50.0);
+	int32 Pos = 0;
+	while (Pos < Arr.Num() && Arr[Pos].Distance < K.Distance) { ++Pos; }
+	Arr.Insert(K, Pos);
+	return Pos;
+}
+
+bool URoadNetwork::RemoveOuterEdgeKnot(int32 RoadIdx, ERoadNetSide Side, int32 KnotIdx)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return false; }
+	TArray<FRoadNetEdgeKnot>& Arr = OuterEdgeSide(Roads[RoadIdx], Side);
+	if (!Arr.IsValidIndex(KnotIdx) || Arr.Num() <= 2) { return false; }
+	Arr.RemoveAt(KnotIdx);
+	return true;
 }
 
 bool URoadNetwork::ToggleMedian(int32 RoadIdx)
@@ -461,6 +643,89 @@ double URoadNetwork::AdjustJunctionSmoothing(double DeltaCm)
 	return JunctionSmoothingCm;
 }
 
+URoadNetwork::URoadNetwork()
+{
+	// Seed the street-furniture menu. Types default to DISABLED so a fresh
+	// network (and city-scale OSM imports) stay clean — tick a type in the panel
+	// to place it. With no mesh/Blueprint assigned each enabled type instances a
+	// grey placeholder box so the layout reads before real assets are wired.
+	auto MakeType = [](const TCHAR* InName, ERoadNetFurniturePlacement Place,
+		float Spacing, float SideOffset, const FVector& Extent) -> FRoadNetFurnitureType
+	{
+		FRoadNetFurnitureType T;
+		T.bEnabled            = false;
+		T.Name                = FName(InName);
+		T.Placement           = Place;
+		T.SpacingCm           = Spacing;
+		T.SideOffsetCm        = SideOffset;
+		T.PlaceholderExtentCm = Extent;
+		return T;
+	};
+	FurnitureTypes.Add(MakeType(TEXT("Bench"),     ERoadNetFurniturePlacement::SpacedPoints,  2500.f, 140.f, FVector(90.f,  35.f,  45.f)));
+	FurnitureTypes.Add(MakeType(TEXT("GuardRail"), ERoadNetFurniturePlacement::Continuous,      400.f,  20.f, FVector(200.f,  8.f,  55.f)));
+	FurnitureTypes.Add(MakeType(TEXT("BusStop"),   ERoadNetFurniturePlacement::SpacedPoints, 30000.f, 180.f, FVector(300.f, 120.f, 120.f)));
+	FurnitureTypes.Add(MakeType(TEXT("Kiosk"),     ERoadNetFurniturePlacement::SpacedPoints, 20000.f, 200.f, FVector(200.f, 200.f, 250.f)));
+}
+
+void URoadNetwork::SetAllSidewalkWidth(float WidthCm)
+{
+	DefaultSidewalkWidthCm = FMath::Clamp(WidthCm, 0.f, 2000.f);
+	for (FRoadDef& R : Roads)
+	{
+		R.Lanes.SidewalkWidth = DefaultSidewalkWidthCm;
+		if (DefaultSidewalkWidthCm > 0.f)
+		{
+			R.Lanes.bSidewalkLeft  = true;
+			R.Lanes.bSidewalkRight = true;
+		}
+	}
+}
+
+float URoadNetwork::AdjustSidewalkWidth(int32 RoadIdx, float DeltaCm)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return 0.f; }
+	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+	L.SidewalkWidth = FMath::Clamp(L.SidewalkWidth + DeltaCm, 0.f, 2000.f);
+	// First widening from nothing turns the sidewalk on (both sides) so the
+	// nudge is immediately visible.
+	if (L.SidewalkWidth > 0.f && !L.bSidewalkLeft && !L.bSidewalkRight)
+	{
+		L.bSidewalkLeft  = true;
+		L.bSidewalkRight = true;
+	}
+	return L.SidewalkWidth;
+}
+
+int32 URoadNetwork::AddStandardParkingBay(int32 RoadIdx, ERoadNetSide Side, ERoadNetParkingLayout Layout)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return INDEX_NONE; }
+	FRoadNetParkingBay Bay;
+	Bay.Side    = (Side == ERoadNetSide::Left) ? ERoadNetSide::Left : ERoadNetSide::Right;
+	Bay.Layout  = Layout;
+	Bay.AngleDeg = ParkingAngleDeg;
+	if (Layout == ERoadNetParkingLayout::Parallel)
+	{
+		Bay.StallWidthCm = ParkingParallelLengthCm; // along-kerb stall length
+		Bay.StallDepthCm = ParkingParallelDepthCm;  // out-from-kerb depth
+	}
+	else
+	{
+		Bay.StallWidthCm = ParkingStallWidthCm;
+		Bay.StallDepthCm = ParkingStallDepthCm;
+	}
+	Bay.StartArcCm = 0.f;
+	Bay.LengthCm   = 0.f; // whole road
+	return Roads[RoadIdx].ParkingBays.Add(Bay);
+}
+
+int32 URoadNetwork::ClearParkingBays(int32 RoadIdx)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return 0; }
+	const int32 N = Roads[RoadIdx].ParkingBays.Num();
+	Roads[RoadIdx].ParkingBays.Reset();
+	return N;
+}
+
 #if WITH_EDITOR
 void URoadNetwork::PostEditUndo()
 {
@@ -478,11 +743,12 @@ void URoadNetwork::PostEditUndo()
 }
 #endif
 
-void URoadNetwork::Rebuild(TArrayView<const int32> Modified)
+void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& DirtyRegionWorld)
 {
 	const double T0 = FPlatformTime::Seconds();
 
 	FRoadNetRebuildContext Ctx;
+	Ctx.ExplicitDirtyBox = DirtyRegionWorld;
 	if (Modified.IsEmpty())
 	{
 		Ctx.Modified.SetNumUninitialized(Roads.Num());
@@ -515,23 +781,42 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified)
 	// conform (see GetDeformCorridors). These are the SAME polylines the mesh is
 	// built from, so ramping the landscape along them makes the flattened
 	// corridor hug the real road instead of the sparse source knots.
-	DeformCorridors.Reset(Ctx.Curves.Num());
-	for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+	//
+	// Under a WINDOWED rebuild Ctx.Curves only holds the edit window, so update
+	// the per-GUID corridor cache for the roads we recomputed, prune dead roads,
+	// then reassemble the WHOLE-network DeformCorridors from the cache — the
+	// landscape sculpt always receives every ground corridor, not just the edit.
 	{
-		const int32 RoadIdx = KV.Key;
-		const FRoadCurves& C = KV.Value;
-		if (!Roads.IsValidIndex(RoadIdx) || C.Sampled.Num() < 2) { continue; }
-		const FRoadDef& R = Roads[RoadIdx];
-		FRoadNetDeformCorridor Cor;
-		Cor.Points  = C.Sampled;
-		const double Half = FMath::Max(50.0, (double)R.Lanes.HalfWidthCm());
-		const double Walk = (R.Lanes.bSidewalkLeft || R.Lanes.bSidewalkRight)
-			? (double)FMath::Max(0.f, R.Lanes.SidewalkWidth) : 0.0;
-		Cor.FlatHalfCm = Half + Walk;
-		Cor.bBridge = R.bBridge;
-		Cor.bTunnel = R.bTunnel;
-		Cor.Layer   = R.Layer;
-		DeformCorridors.Add(MoveTemp(Cor));
+		for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+		{
+			const int32 RoadIdx = KV.Key;
+			const FRoadCurves& C = KV.Value;
+			if (!Roads.IsValidIndex(RoadIdx) || C.Sampled.Num() < 2) { continue; }
+			const FRoadDef& R = Roads[RoadIdx];
+			FRoadNetDeformCorridor Cor;
+			Cor.Points  = C.Sampled;
+			const double Half = FMath::Max(50.0, (double)R.Lanes.HalfWidthCm());
+			const double Walk = (R.Lanes.bSidewalkLeft || R.Lanes.bSidewalkRight)
+				? (double)FMath::Max(0.f, R.Lanes.SidewalkWidth) : 0.0;
+			Cor.FlatHalfCm = Half + Walk;
+			Cor.bBridge = R.bBridge;
+			Cor.bTunnel = R.bTunnel;
+			Cor.Layer   = R.Layer;
+			DeformCache.Add(R.Id, MoveTemp(Cor));
+		}
+		// Prune corridors for roads that no longer exist.
+		TSet<FGuid> Live;
+		for (const FRoadDef& R : Roads) { Live.Add(R.Id); }
+		for (auto It = DeformCache.CreateIterator(); It; ++It)
+		{
+			if (!Live.Contains(It.Key())) { It.RemoveCurrent(); }
+		}
+		// Reassemble the full-network corridor list.
+		DeformCorridors.Reset(DeformCache.Num());
+		for (const TPair<FGuid, FRoadNetDeformCorridor>& KV : DeformCache)
+		{
+			DeformCorridors.Add(KV.Value);
+		}
 	}
 	BuildCrossings(Ctx);          // §10.12 grid broadphase (shared by zones+surface)
 	const double tCross = Now();   Trace(TEXT("crossings"), tCross - tCurves);
@@ -550,8 +835,11 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified)
 	const double tGraph = Now();   Trace(TEXT("lanegraph"), tGraph - tPerim);
 	BuildLaneRibbons(Ctx);        // §12.1 per-lane ribbon polys
 	const double tRibbon = Now();  Trace(TEXT("laneribbon"), tRibbon - tGraph);
+	BuildStandardParkingBays(Ctx);// § standard stalls → parking overlay + white stall lines
+	BuildFurniture(Ctx);          // § street-furniture placement sampling (spaced + continuous)
+	const double tExtras = Now();  Trace(TEXT("streetextras"), tExtras - tRibbon);
 	CommitGeometry(Ctx);          // §10.15 triangulate + spawn surface actor
-	const double tCommit = Now();  Trace(TEXT("commit"), tCommit - tRibbon);
+	const double tCommit = Now();  Trace(TEXT("commit"), tCommit - tExtras);
 
 	int32 Intersections = 0, Seams = 0;
 	for (const FRoadNetJoint& J : Ctx.Joints)
@@ -578,11 +866,154 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified)
 
 void URoadNetwork::DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const
 {
-	// Phase-0 scoping: pending = modified; test-against = all. Endpoint-link and
-	// octree broadphase expansion (§10.17) come with the incremental phase.
-	Ctx.Pending = Ctx.Modified;
-	Ctx.TestAgainst.SetNumUninitialized(Roads.Num());
-	for (int32 i = 0; i < Roads.Num(); ++i) { Ctx.TestAgainst[i] = i; }
+	const int32 N = Roads.Num();
+
+	// Max distance a road's geometry (half-width + sidewalk + junction fillet/
+	// clearance) can reach from its centreline; generous so a border junction is
+	// always recomputed with its neighbours.
+	constexpr double kGeomReachCm = 12000.0; // 120 m
+
+	// CORRIDOR of grid cells a road occupies: every cell its polyline passes
+	// through, plus a ring of neighbours within ExpandCm. This is the key to
+	// cheap windowed edits — a long/diagonal road marks only the thin band of
+	// cells along its length, NOT the full bounding rectangle (which for a
+	// diagonal arterial covers half the city and drags in every road inside it).
+	// The walk samples each source segment at <= half a tile so no crossed cell
+	// is skipped.
+	auto RoadCorridorCells = [this](int32 Idx, double ExpandCm, TSet<FIntPoint>& Out)
+	{
+		if (!Roads.IsValidIndex(Idx)) { return; }
+		const TArray<FVector>& Ref = Roads[Idx].Ref;
+		if (Ref.Num() == 0) { return; }
+		const int32 Ring = FMath::CeilToInt(ExpandCm / FMath::Max(1.0, TileSizeCm));
+		const double Step = 0.5 * FMath::Max(1.0, TileSizeCm);
+		auto AddPt = [&](double X, double Y)
+		{
+			const FIntPoint C = RoadNetTiles::WorldToTile(X, Y, TileSizeCm);
+			for (int32 dy = -Ring; dy <= Ring; ++dy)
+			{
+				for (int32 dx = -Ring; dx <= Ring; ++dx)
+				{
+					Out.Add(FIntPoint(C.X + dx, C.Y + dy));
+				}
+			}
+		};
+		if (Ref.Num() == 1) { AddPt(Ref[0].X, Ref[0].Y); return; }
+		for (int32 i = 0; i + 1 < Ref.Num(); ++i)
+		{
+			const FVector& A = Ref[i];
+			const FVector& B = Ref[i + 1];
+			const double Len = FVector2D::Distance(FVector2D(A.X, A.Y), FVector2D(B.X, B.Y));
+			const int32 Steps = FMath::Max(1, (int32)FMath::CeilToInt(Len / Step));
+			for (int32 s = 0; s <= Steps; ++s)
+			{
+				const double t = (double)s / (double)Steps;
+				AddPt(FMath::Lerp(A.X, B.X, t), FMath::Lerp(A.Y, B.Y, t));
+			}
+		}
+	};
+
+	// Precompute every road's corridor once (reused for the dirty set, the
+	// pending test, and the per-GUID cache refresh). Cheap: cost scales with
+	// total road length / tile size, not with road count squared.
+	TArray<TSet<FIntPoint>> Corridors;
+	Corridors.SetNum(N);
+	for (int32 i = 0; i < N; ++i) { RoadCorridorCells(i, kGeomReachCm, Corridors[i]); }
+
+	// Refresh the per-GUID corridor tracker for the NEXT rebuild (its previous
+	// value is read below to clear a moved road's old cells). Prunes dead GUIDs.
+	auto RefreshFootprints = [&]()
+	{
+		TSet<FGuid> Live;
+		for (int32 i = 0; i < N; ++i)
+		{
+			const FGuid& Id = Roads[i].Id;
+			if (!Id.IsValid()) { continue; }
+			Live.Add(Id);
+			LastRoadCells.Add(Id, Corridors[i].Array());
+		}
+		for (auto It = LastRoadCells.CreateIterator(); It; ++It)
+		{
+			if (!Live.Contains(It.Key())) { It.RemoveCurrent(); }
+		}
+	};
+
+	// A full rebuild: Rebuild() fills Modified with every index when the caller
+	// passes none, and any caller that touches all roads lands here too. The
+	// CVar safety valve forces full when windowing is disabled.
+	const bool bWindowingEnabled = CVarRoadNetWindowedRebuild.GetValueOnAnyThread() != 0;
+	// An explicit dirty region (junction edit) is always a windowed commit — the
+	// caller has told us exactly which area changed, so never fall back to full
+	// just because every road was passed as "modified".
+	const bool bFull = !bWindowingEnabled ||
+		(Ctx.Modified.Num() >= N && !Ctx.ExplicitDirtyBox.bIsValid);
+	if (bFull)
+	{
+		Ctx.bFullCommit = true;
+		Ctx.DirtyTiles.Reset();
+		Ctx.Pending.SetNumUninitialized(N);
+		Ctx.TestAgainst.SetNumUninitialized(N);
+		for (int32 i = 0; i < N; ++i) { Ctx.Pending[i] = i; Ctx.TestAgainst[i] = i; }
+		RefreshFootprints();
+		return;
+	}
+
+	// ---- windowed scope --------------------------------------------------
+	Ctx.DirtyTiles.Reset();
+	if (Ctx.ExplicitDirtyBox.bIsValid)
+	{
+		// Junction edit: dirty ONLY the cells over the explicit region (the
+		// junction disc), regardless of how long the arm roads are. Expanded by
+		// the geometry reach so a junction near a cell border still commits the
+		// neighbour cell its fillet/paint spills into.
+		RoadNetTiles::TilesOverlappingBox(
+			Ctx.ExplicitDirtyBox.Min, Ctx.ExplicitDirtyBox.Max,
+			TileSizeCm, kGeomReachCm, Ctx.DirtyTiles);
+	}
+	else
+	{
+		// Dirty cells = the corridor of every modified road's CURRENT geometry,
+		// UNION its previous corridor (so a move clears the cells it left behind).
+		for (int32 Idx : Ctx.Modified)
+		{
+			if (!Roads.IsValidIndex(Idx)) { continue; }
+			Ctx.DirtyTiles.Append(Corridors[Idx]);
+			if (const TArray<FIntPoint>* Prev = LastRoadCells.Find(Roads[Idx].Id))
+			{
+				for (const FIntPoint& C : *Prev) { Ctx.DirtyTiles.Add(C); }
+			}
+		}
+	}
+
+	// Nothing valid to scope → safest is a full rebuild.
+	if (Ctx.DirtyTiles.Num() == 0)
+	{
+		Ctx.bFullCommit = true;
+		Ctx.Pending.SetNumUninitialized(N);
+		Ctx.TestAgainst.SetNumUninitialized(N);
+		for (int32 i = 0; i < N; ++i) { Ctx.Pending[i] = i; Ctx.TestAgainst[i] = i; }
+		RefreshFootprints();
+		return;
+	}
+
+	Ctx.bFullCommit = false;
+
+	// Window roads = any road whose corridor shares a cell with the dirty set,
+	// so junction unions/height blends at the window border see their
+	// neighbours. Because each corridor already carries a reach ring, a road
+	// abutting the dirty region (e.g. across a junction) is included.
+	Ctx.Pending.Reset();
+	for (int32 i = 0; i < N; ++i)
+	{
+		bool bHit = false;
+		for (const FIntPoint& C : Corridors[i])
+		{
+			if (Ctx.DirtyTiles.Contains(C)) { bHit = true; break; }
+		}
+		if (bHit) { Ctx.Pending.Add(i); }
+	}
+	Ctx.TestAgainst = Ctx.Pending;
+	RefreshFootprints();
 }
 
 void URoadNetwork::BuildCurves(FRoadNetRebuildContext& Ctx) const
@@ -615,9 +1046,61 @@ void URoadNetwork::BuildCurves(FRoadNetRebuildContext& Ctx) const
 		RoadNetMath::SmoothProfileZ(C.Sampled, FMath::Max(0.0, GradeSmoothingM) * 100.0);
 
 		const double Half = FMath::Max(50.0, (double)R.Lanes.HalfWidthCm());
-		RoadNetMath::OffsetPolyline(C.Sampled, +Half, C.LeftEdge);
-		RoadNetMath::OffsetPolyline(C.Sampled, -Half, C.RightEdge);
 		C.Length = RoadNetMath::TotalLength(C.Sampled);
+
+		// Outer edges: uniform ±Half unless an authored profile exists for that
+		// side (Edge tool), in which case sample the profile (arc length → signed
+		// lateral offset) per densified vertex and offset variably. The +offset
+		// side maps to LeftEdge (see FRoadCurves), the −offset side to RightEdge.
+		auto SampleProfile = [](const TArray<FRoadNetEdgeKnot>& Knots, double S, double Fallback) -> double
+		{
+			if (Knots.Num() == 0) { return Fallback; }
+			if (Knots.Num() == 1) { return Knots[0].Offset; }
+			if (S <= Knots[0].Distance) { return Knots[0].Offset; }
+			if (S >= Knots.Last().Distance) { return Knots.Last().Offset; }
+			for (int32 k = 0; k + 1 < Knots.Num(); ++k)
+			{
+				const double D0 = Knots[k].Distance, D1 = Knots[k + 1].Distance;
+				if (S >= D0 && S <= D1)
+				{
+					const double T = (D1 - D0) > KINDA_SMALL_NUMBER ? (S - D0) / (D1 - D0) : 0.0;
+					return FMath::Lerp(Knots[k].Offset, Knots[k + 1].Offset, T);
+				}
+			}
+			return Fallback;
+		};
+
+		auto ArcLengths = [](const TArray<FVector>& P, TArray<double>& Out)
+		{
+			Out.SetNumUninitialized(P.Num());
+			double Acc = 0.0;
+			Out[0] = 0.0;
+			for (int32 i = 1; i < P.Num(); ++i)
+			{
+				Acc += FVector::Dist2D(P[i - 1], P[i]);
+				Out[i] = Acc;
+			}
+		};
+
+		if (R.OuterEdgeRight.Num() > 0 || R.OuterEdgeLeft.Num() > 0)
+		{
+			TArray<double> S; ArcLengths(C.Sampled, S);
+			TArray<double> OffR, OffL;
+			OffR.SetNumUninitialized(C.Sampled.Num());
+			OffL.SetNumUninitialized(C.Sampled.Num());
+			for (int32 i = 0; i < C.Sampled.Num(); ++i)
+			{
+				OffR[i] = SampleProfile(R.OuterEdgeRight, S[i], +Half); // +side
+				OffL[i] = SampleProfile(R.OuterEdgeLeft,  S[i], -Half); // −side
+			}
+			RoadNetMath::OffsetPolylineVariable(C.Sampled, OffR, C.LeftEdge);
+			RoadNetMath::OffsetPolylineVariable(C.Sampled, OffL, C.RightEdge);
+		}
+		else
+		{
+			RoadNetMath::OffsetPolyline(C.Sampled, +Half, C.LeftEdge);
+			RoadNetMath::OffsetPolyline(C.Sampled, -Half, C.RightEdge);
+		}
 
 		Ctx.Curves.Add(Idx, MoveTemp(C));
 	}
@@ -925,7 +1408,44 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 		// JunctionSmoothingCm drives the morphological close (round corners / gap
 		// bridging). Keep a small floor so abutting arms always weld.
 		const double CloseCm = FMath::Max(2.0, JunctionSmoothingCm);
-		RoadNetSurface::BuildMergedSurface(Ptrs, Ctx.ZoneSurfacePolys[z], CloseCm, &Discs);
+
+		// Per-junction smoothing: if ANY junction touched by this zone carries an
+		// override, switch the merge to per-junction local closes; otherwise use
+		// the single global close (identical to the original output). Cheap: for a
+		// windowed junction edit JPts holds only the edited junction.
+		TArray<RoadNetSurface::FJunctionClose> JClose;
+		bool bAnyOverride = false;
+		{
+			// Match a JPt to a stored override the same way the interactive picker
+			// does (nearest config within tolerance).
+			constexpr double kJunctionMatchCm = 600.0; // 6 m
+			JClose.Reserve(JPts.Num());
+			for (const TPair<FVector2D, double>& E : JPts)
+			{
+				double e = JunctionSmoothingCm;
+				double BestD2 = FMath::Square(kJunctionMatchCm);
+				for (const FRoadNetJunctionConfig& Cfg : JunctionConfigs)
+				{
+					if (Cfg.SmoothingCm < 0.f) { continue; }
+					const double D2 = FVector2D::DistSquared(Cfg.Location, E.Key);
+					if (D2 < BestD2) { BestD2 = D2; e = Cfg.SmoothingCm; bAnyOverride = true; }
+				}
+				RoadNetSurface::FJunctionClose J;
+				J.Center = E.Key;
+				J.FillRadiusCm = E.Value;
+				J.CloseCm = FMath::Max(0.0, e);
+				JClose.Add(J);
+			}
+		}
+
+		if (bAnyOverride)
+		{
+			RoadNetSurface::BuildMergedSurface(Ptrs, Ctx.ZoneSurfacePolys[z], CloseCm, &Discs, &JClose);
+		}
+		else
+		{
+			RoadNetSurface::BuildMergedSurface(Ptrs, Ctx.ZoneSurfacePolys[z], CloseCm, &Discs);
+		}
 		Ctx.SurfacePolys.Append(Ctx.ZoneSurfacePolys[z]);
 
 		// ---- true junction area (§2.1 "שטח הצומת") for clipping paint ----------
@@ -1395,8 +1915,67 @@ void URoadNetwork::BuildLaneGraph(FRoadNetRebuildContext& Ctx) const
 	}
 }
 
+bool URoadNetwork::IsTileInCommitScope(const FIntPoint& Coord, const FRoadNetRebuildContext& Ctx) const
+{
+	return Ctx.bFullCommit || Ctx.DirtyTiles.Contains(Coord);
+}
+
+void URoadNetwork::PrepareTilesForCommit(FRoadNetRebuildContext& Ctx)
+{
+	EnsureTileRegistry();
+	if (Ctx.bFullCommit)
+	{
+		for (TPair<FIntPoint, TWeakObjectPtr<ARoadNetTileActor>>& KV : TileActors)
+		{
+			if (ARoadNetTileActor* T = KV.Value.Get()) { T->ClearForRebuild(); }
+		}
+	}
+	else
+	{
+		for (const FIntPoint& C : Ctx.DirtyTiles)
+		{
+			if (TWeakObjectPtr<ARoadNetTileActor>* F = TileActors.Find(C))
+			{
+				if (ARoadNetTileActor* T = F->Get()) { T->ClearForRebuild(); }
+			}
+		}
+	}
+}
+
+void URoadNetwork::RetireEmptyTiles(FRoadNetRebuildContext& Ctx)
+{
+	TArray<FIntPoint> ToRemove;
+	for (TPair<FIntPoint, TWeakObjectPtr<ARoadNetTileActor>>& KV : TileActors)
+	{
+		ARoadNetTileActor* T = KV.Value.Get();
+		if (!T) { ToRemove.Add(KV.Key); continue; }
+		// Only retire tiles this pass was allowed to rewrite; clean tiles keep
+		// whatever they already hold (a windowed edit must not delete them).
+		const bool bConsider = Ctx.bFullCommit || Ctx.DirtyTiles.Contains(KV.Key);
+		if (bConsider && T->IsEmptyTile()) { T->Destroy(); ToRemove.Add(KV.Key); }
+	}
+	for (const FIntPoint& C : ToRemove) { TileActors.Remove(C); }
+}
+
+// CCW world-space square polygon for grid cell Coord.
+static UE::Geometry::FGeneralPolygon2d MakeTileSquarePoly(const FIntPoint& Coord, double TileSizeCm)
+{
+	const FBox2D B = RoadNetTiles::TileBounds2D(Coord, TileSizeCm);
+	TArray<FVector2d> Loop;
+	Loop.Reserve(4);
+	Loop.Emplace(B.Min.X, B.Min.Y);
+	Loop.Emplace(B.Max.X, B.Min.Y);
+	Loop.Emplace(B.Max.X, B.Max.Y);
+	Loop.Emplace(B.Min.X, B.Max.Y);
+	UE::Geometry::FPolygon2d P(Loop);
+	if (P.IsClockwise()) { P.Reverse(); }
+	UE::Geometry::FGeneralPolygon2d G;
+	G.SetOuter(P);
+	return G;
+}
+
 int32 URoadNetwork::CommitLayer(
-	TWeakObjectPtr<AActor>& ActorPtr, const TCHAR* Label,
+	FName LayerName,
 	const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
 	double ExtraLiftCm, FColor Color, UMaterialInterface* Material, FRoadNetRebuildContext& Ctx,
 	bool bBakeLaneColors, bool bWorldUVs, bool bConformSurface)
@@ -1431,9 +2010,18 @@ int32 URoadNetwork::CommitLayer(
 	const FVector3f OddCol (FLinearColor(FColor(44, 44, 49)).R, FLinearColor(FColor(44, 44, 49)).G, FLinearColor(FColor(44, 44, 49)).B);
 	const bool bBake = bBakeLaneColors && bShowLaneRibbons;
 
-	// Mesh each grade zone with ONLY its own centerline heights, so overpasses
-	// keep their elevation instead of snapping to whatever is below them.
-	UE::Geometry::FDynamicMesh3 Mesh;
+	// Mesh each grade zone with ONLY its own centerline heights (so overpasses
+	// keep their elevation), but CLIP each zone's polygons to every grid cell
+	// they overlap and accumulate one mesh PER CELL — so the layer is committed
+	// into the per-cell tile actors instead of one network-wide actor. Clipping
+	// to the tile square (rather than assigning whole triangles) keeps tile
+	// borders clean, and passing the FULL zone centrelines to every cell means
+	// adjacent cells agree on Z at the shared border (no cracks in elevation).
+	// Heap-allocated per cell so the mesh keeps a STABLE address: appending a new
+	// cell can grow/rehash the map, and FDynamicMesh3's attribute overlays hold a
+	// raw back-pointer to their parent mesh — relocating a by-value mesh would
+	// leave those pointers dangling and crash the next append (SetTriangle).
+	TMap<FIntPoint, TUniquePtr<UE::Geometry::FDynamicMesh3>> TileMeshes;
 	int32 Tris = 0;
 	for (int32 z = 0; z < ZonePolys.Num(); ++z)
 	{
@@ -1474,90 +2062,99 @@ int32 URoadNetwork::CommitLayer(
 			return BaseCol;
 		};
 
-		const int32 TID0 = Mesh.MaxTriangleID();
-		Tris += RoadNetMesh::AppendSurfaceMesh(
-			ZonePolys[z], CenterLines, kRoadZLiftCm + ExtraLiftCm, Mesh,
-			bBake ? &ShadeFn : nullptr,
-			/*bComputeUVs*/true, /*UVUnitCm*/100.0, /*bGradientNormals*/true,
-			/*bWorldUVs*/bWorldUVs);
+		const bool bZoneGround = bConformSurface && ZoneIsGround(z);
 
-		// Capture this zone's triangles (world cm — the layer actor is spawned at
-		// the origin with identity transform) into the terrain-conform soup so
-		// OSMRoadCore can deform the landscape to the ACTUAL built surface. Only
-		// ground zones of conform layers contribute; verts are duplicated per
-		// triangle (the rasteriser treats triangles independently).
-		if (bConformSurface && ZoneIsGround(z))
+		// Route each polygon to the cell(s) it covers. The common case — a small
+		// polygon (a marking dash, a stall stripe) whose bounding box fits inside
+		// ONE cell — is assigned directly with NO boolean clip. Only a polygon
+		// that genuinely straddles cell borders (the few large merged surface /
+		// sidewalk zone polys) pays for a Clipper intersection, and only against
+		// the cells it actually overlaps. This removes the O(polys x tiles)
+		// boolean storm that made markings dominate the commit stage.
+		TMap<FIntPoint, TArray<UE::Geometry::FGeneralPolygon2d>> ZoneTilePolys;
+		for (const UE::Geometry::FGeneralPolygon2d& GP : ZonePolys[z])
 		{
-			for (int32 tid = TID0; tid < Mesh.MaxTriangleID(); ++tid)
+			FBox2D PB(ForceInit);
+			for (const FVector2d& V : GP.GetOuter().GetVertices()) { PB += FVector2D(V.X, V.Y); }
+			if (!PB.bIsValid) { continue; }
+
+			const FIntPoint Lo = RoadNetTiles::WorldToTile(PB.Min.X, PB.Min.Y, TileSizeCm);
+			const FIntPoint Hi = RoadNetTiles::WorldToTile(PB.Max.X, PB.Max.Y, TileSizeCm);
+			if (Lo == Hi)
 			{
-				if (!Mesh.IsTriangle(tid)) { continue; }
-				const UE::Geometry::FIndex3i T = Mesh.GetTriangle(tid);
-				const int32 Base = ConformVerts.Num();
-				ConformVerts.Add((FVector)Mesh.GetVertex(T.A));
-				ConformVerts.Add((FVector)Mesh.GetVertex(T.B));
-				ConformVerts.Add((FVector)Mesh.GetVertex(T.C));
-				ConformTris.Add(Base + 0);
-				ConformTris.Add(Base + 1);
-				ConformTris.Add(Base + 2);
+				// Whole polygon lives in one cell — assign as-is (no clip).
+				if (IsTileInCommitScope(Lo, Ctx)) { ZoneTilePolys.FindOrAdd(Lo).Add(GP); }
+				continue;
+			}
+			// Straddles cell borders — clip to each overlapping in-scope cell.
+			for (int32 ty = Lo.Y; ty <= Hi.Y; ++ty)
+			{
+				for (int32 tx = Lo.X; tx <= Hi.X; ++tx)
+				{
+					const FIntPoint Coord(tx, ty);
+					if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
+					const TArray<UE::Geometry::FGeneralPolygon2d> One = { GP };
+					const TArray<UE::Geometry::FGeneralPolygon2d> SquareArr = { MakeTileSquarePoly(Coord, TileSizeCm) };
+					TArray<UE::Geometry::FGeneralPolygon2d> Clipped;
+					if (PolygonsIntersection(One, SquareArr, Clipped) && Clipped.Num() > 0)
+					{
+						ZoneTilePolys.FindOrAdd(Coord).Append(MoveTemp(Clipped));
+					}
+				}
+			}
+		}
+
+		for (TPair<FIntPoint, TArray<UE::Geometry::FGeneralPolygon2d>>& KV : ZoneTilePolys)
+		{
+			const FIntPoint Coord = KV.Key;
+			TArray<UE::Geometry::FGeneralPolygon2d>& Polys = KV.Value;
+			if (Polys.Num() == 0) { continue; }
+
+			TUniquePtr<UE::Geometry::FDynamicMesh3>& TMPtr = TileMeshes.FindOrAdd(Coord);
+			if (!TMPtr) { TMPtr = MakeUnique<UE::Geometry::FDynamicMesh3>(); }
+			UE::Geometry::FDynamicMesh3& TM = *TMPtr;
+			const int32 TID0 = TM.MaxTriangleID();
+			Tris += RoadNetMesh::AppendSurfaceMesh(
+				Polys, CenterLines, kRoadZLiftCm + ExtraLiftCm, TM,
+				bBake ? &ShadeFn : nullptr,
+				/*bComputeUVs*/true, /*UVUnitCm*/100.0, /*bGradientNormals*/true,
+				/*bWorldUVs*/bWorldUVs);
+
+			// Terrain-conform soup (world cm; tiles are spawned at origin/identity),
+			// cached PER CELL so a windowed rebuild can reassemble the whole-network
+			// conform arrays from clean cells + this pass's dirty cells.
+			if (bZoneGround)
+			{
+				FRoadNetTileConform& TC = ConformCache.FindOrAdd(Coord);
+				for (int32 tid = TID0; tid < TM.MaxTriangleID(); ++tid)
+				{
+					if (!TM.IsTriangle(tid)) { continue; }
+					const UE::Geometry::FIndex3i T = TM.GetTriangle(tid);
+					TC.Verts.Add((FVector)TM.GetVertex(T.A));
+					TC.Verts.Add((FVector)TM.GetVertex(T.B));
+					TC.Verts.Add((FVector)TM.GetVertex(T.C));
+				}
 			}
 		}
 	}
 
 	if (Tris == 0) { return 0; }
 	// Normals are set from the height-field gradient inside AppendSurfaceMesh
-	// (smooth, grade-following) — recomputing here would overwrite them with the
+	// (smooth, grade-following) — recomputing would overwrite them with the
 	// jittery per-triangle average that caused the facet blotches.
 
-	bool bNewActor = false;
-	ADynamicMeshActor* Actor = Cast<ADynamicMeshActor>(ActorPtr.Get());
-	if (!Actor)
+	// Push each cell's accumulated mesh onto its tile actor's layer component.
+	for (TPair<FIntPoint, TUniquePtr<UE::Geometry::FDynamicMesh3>>& KV : TileMeshes)
 	{
-		FActorSpawnParameters Params;
-		Params.ObjectFlags |= RF_Transient;
-		Actor = World->SpawnActor<ADynamicMeshActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
-		if (!Actor) { return 0; }
-#if WITH_EDITOR
-		Actor->SetActorLabel(Label);
-#endif
-		ActorPtr = Actor;
-		bNewActor = true;
-	}
-
-	if (UDynamicMeshComponent* Comp = Actor->GetDynamicMeshComponent())
-	{
-		Comp->SetMesh(MoveTemp(Mesh));
-
-		// Render every road element two-sided so thin ribbons / island edges and
-		// any downward-facing triangles are never culled to a hole.
-		Comp->SetTwoSided(true);
-
-		// Keep the assigned material in sync every rebuild (cheap, idempotent).
-		if (Material) { Comp->SetMaterial(0, Material); }
-
-		if (Material)
+		if (!KV.Value || KV.Value->TriangleCount() == 0) { continue; }
+		ARoadNetTileActor* Tile = GetOrCreateTile(KV.Key);
+		if (!Tile) { continue; }
+		if (UDynamicMeshComponent* Comp =
+			Tile->GetOrCreateMeshLayer(LayerName, Material, Color, bBakeLaneColors && bShowLaneRibbons))
 		{
-			// A real material ALWAYS wins: force Color Override to None every
-			// rebuild, so assigning a default material re-skins the layer and
-			// clears any tint — whether it was Constant OR baked VertexColors.
-			Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::None);
+			Comp->SetMesh(MoveTemp(*KV.Value));
+			Comp->NotifyMeshUpdated();
 		}
-		else if (bNewActor)
-		{
-			// No material: pick the visible fallback ONCE, on creation, so a
-			// manual Color Override chosen later in the details panel is kept.
-			if (bBake)
-			{
-				// Baked per-lane shading lives in the mesh vertex colours.
-				Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::VertexColors);
-			}
-			else
-			{
-				// Flat colour so the layer is visible.
-				Comp->SetColorOverrideMode(EDynamicMeshComponentColorOverrideMode::Constant);
-				Comp->SetConstantOverrideColor(Color);
-			}
-		}
-		Comp->NotifyMeshUpdated();
 	}
 	return Tris;
 }
@@ -1567,7 +2164,11 @@ void URoadNetwork::BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const
 	const int32 NumZones = Ctx.Zones.Num();
 	Ctx.ZoneLaneEvenPolys.Reset(); Ctx.ZoneLaneEvenPolys.SetNum(NumZones);
 	Ctx.ZoneLaneOddPolys.Reset();  Ctx.ZoneLaneOddPolys.SetNum(NumZones);
-	if (!bShowLaneRibbons || NumZones == 0) { return; }
+	Ctx.ZoneLaneBikePolys.Reset(); Ctx.ZoneLaneBikePolys.SetNum(NumZones);
+	Ctx.ZoneLaneParkPolys.Reset(); Ctx.ZoneLaneParkPolys.SetNum(NumZones);
+	// Typed-lane overlays (bike/parking) are built regardless of the even/odd
+	// shading ribbons, so only bail on an empty network.
+	if (NumZones == 0) { return; }
 
 	// Small per-side inset so adjacent lanes read as separate strips (a visible
 	// seam) rather than one continuous slab.
@@ -1585,8 +2186,6 @@ void URoadNetwork::BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const
 			for (int32 i = 0; i < Lanes.Num(); ++i)
 			{
 				const FRoadNetLane& Ln = Lanes[i];
-				const double HalfInner = 0.5 * (double)Ln.Width - kLaneGapCm;
-				if (HalfInner < 5.0) { continue; } // too thin after the seam inset
 
 				// Thicken the lane centreline through Clipper (round joins, butt
 				// ends) instead of looping two raw miter offsets — this dissolves
@@ -1594,15 +2193,40 @@ void URoadNetwork::BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const
 				TArray<FVector> CL;
 				RoadNetLanes::BuildLaneCenterline(C->Sampled, Ln, CL);
 
-				TArray<UE::Geometry::FGeneralPolygon2d> Strip;
-				if (RoadNetSurface::BuildPathRibbon(CL, HalfInner, Strip))
+				// Even/odd shading ribbons (opt-in): contrasting asphalt banks.
+				const double HalfInner = 0.5 * (double)Ln.Width - kLaneGapCm;
+				if (bShowLaneRibbons && HalfInner >= 5.0)
 				{
-					TArray<UE::Geometry::FGeneralPolygon2d>& Dst =
-						((i % 2) == 0 ? Ctx.ZoneLaneEvenPolys : Ctx.ZoneLaneOddPolys)[z];
-					for (UE::Geometry::FGeneralPolygon2d& GP : Strip)
+					TArray<UE::Geometry::FGeneralPolygon2d> Strip;
+					if (RoadNetSurface::BuildPathRibbon(CL, HalfInner, Strip))
 					{
-						Dst.Add(MoveTemp(GP));
-						++Ribbons;
+						TArray<UE::Geometry::FGeneralPolygon2d>& Dst =
+							((i % 2) == 0 ? Ctx.ZoneLaneEvenPolys : Ctx.ZoneLaneOddPolys)[z];
+						for (UE::Geometry::FGeneralPolygon2d& GP : Strip)
+						{
+							Dst.Add(MoveTemp(GP));
+							++Ribbons;
+						}
+					}
+				}
+
+				// Typed-lane overlay: bike / parking lanes get a fuller-coverage
+				// strip in their own bank so they can be skinned distinctly.
+				const bool bBike = (Ln.Type == ERoadNetLaneType::Bicycle);
+				const bool bPark = (Ln.Type == ERoadNetLaneType::Parking);
+				const double HalfTyped = 0.5 * (double)Ln.Width - 4.0;
+				if ((bBike || bPark) && HalfTyped >= 5.0)
+				{
+					TArray<UE::Geometry::FGeneralPolygon2d> Strip;
+					if (RoadNetSurface::BuildPathRibbon(CL, HalfTyped, Strip))
+					{
+						TArray<UE::Geometry::FGeneralPolygon2d>& Dst =
+							(bBike ? Ctx.ZoneLaneBikePolys : Ctx.ZoneLaneParkPolys)[z];
+						for (UE::Geometry::FGeneralPolygon2d& GP : Strip)
+						{
+							Dst.Add(MoveTemp(GP));
+							++Ribbons;
+						}
 					}
 				}
 			}
@@ -1623,6 +2247,8 @@ void URoadNetwork::BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const
 			};
 			ClipBank(Ctx.ZoneLaneEvenPolys[z]);
 			ClipBank(Ctx.ZoneLaneOddPolys[z]);
+			ClipBank(Ctx.ZoneLaneBikePolys[z]);
+			ClipBank(Ctx.ZoneLaneParkPolys[z]);
 		}
 	}
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] BuildLaneRibbons: %d lane ribbons across %d zones."), Ribbons, NumZones);
@@ -1636,54 +2262,82 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 		return;
 	}
 
-	// Fresh terrain-conform soup for this rebuild. Ground surface layers append
-	// their world triangles here (see CommitLayer bConformSurface); markings /
-	// lanes / perimeters do not. Consumed by OSMRoadCore's mesh conform.
-	ConformVerts.Reset();
-	ConformTris.Reset();
+	// Clear the cells we're allowed to rewrite before repopulating (full rebuild
+	// = all tiles; windowed = only the dirty cells).
+	PrepareTilesForCommit(Ctx);
+
+	// Drop the terrain-conform cache for the cells we're about to rebuild (ground
+	// surface layers repopulate them in CommitLayer); clean cells keep theirs.
+	// The whole-network ConformVerts/ConformTris are reassembled from the cache
+	// at the end of this function.
+	if (Ctx.bFullCommit) { ConformCache.Reset(); }
+	else { for (const FIntPoint& C : Ctx.DirtyTiles) { ConformCache.Remove(C); } }
 
 	// Road carriageway (dark asphalt) and sidewalk band (light concrete, raised
 	// one curb height above the road so the kerb reads correctly). Lane shading
 	// is BAKED into the carriageway's vertex colours (bBakeLaneColors=true) so
 	// lanes no longer need a separate lifted overlay that dove in/out of the road.
-	const int32 RoadTris = CommitLayer(GeoActor, TEXT("RoadNet_Surface"),
+	const int32 RoadTris = CommitLayer(TEXT("Surface"),
 		Ctx.ZoneSurfacePolys, /*ExtraLift*/0.0, FColor(38, 38, 42), RoadMaterial, Ctx,
 		/*bBakeLaneColors*/true, /*bWorldUVs*/false, /*bConformSurface*/true);
-	const int32 WalkTris = CommitLayer(GeoSidewalkActor, TEXT("RoadNet_Sidewalks"),
+	const int32 WalkTris = CommitLayer(TEXT("Sidewalks"),
 		Ctx.ZoneSidewalkPolys, /*ExtraLift*/15.0, FColor(165, 162, 155), SidewalkMaterial, Ctx,
 		/*bBakeLaneColors*/false, /*bWorldUVs*/false, /*bConformSurface*/true);
-	const int32 WhiteTris = CommitLayer(GeoMarkingWhiteActor, TEXT("RoadNet_Markings_White"),
+	const int32 WhiteTris = CommitLayer(TEXT("MarkingsWhite"),
 		Ctx.ZoneMarkingWhitePolys, /*ExtraLift*/4.0, FColor(232, 232, 226), MarkingWhiteMaterial, Ctx);
-	const int32 YellowTris = CommitLayer(GeoMarkingYellowActor, TEXT("RoadNet_Markings_Yellow"),
+	const int32 YellowTris = CommitLayer(TEXT("MarkingsYellow"),
 		Ctx.ZoneMarkingYellowPolys, /*ExtraLift*/4.0, FColor(240, 190, 30), MarkingYellowMaterial, Ctx);
 
-	// Retire the old separate lane-ribbon actors (their lifted meshes were the
-	// source of the "dive in/out of the road" artifact — now baked into surface).
-	auto RetireActor = [](TWeakObjectPtr<AActor>& Ptr)
-	{
-		if (AActor* A = Ptr.Get()) { A->Destroy(); }
-		Ptr = nullptr;
-	};
-	RetireActor(GeoLaneEvenActor);
-	RetireActor(GeoLaneOddActor);
+	// Typed-lane overlays: bike paths (green) + parking bays (amber) as thin
+	// surfaces lifted a hair above the carriageway and the paint, skinned with
+	// their Assets-tab material when set (else the tint fallback). Not part of
+	// the terrain conform (they ride the road surface). Empty layers stay empty
+	// (cleared above), so removing the last bike/parking lane clears its surface.
+	const int32 BikeTris = CommitLayer(TEXT("LanesBike"),
+		Ctx.ZoneLaneBikePolys, /*ExtraLift*/6.0, FColor(60, 170, 90), BikeLaneMaterial, Ctx,
+		/*bBakeLaneColors*/false, /*bWorldUVs*/false, /*bConformSurface*/false);
+	const int32 ParkTris = CommitLayer(TEXT("LanesParking"),
+		Ctx.ZoneLaneParkPolys, /*ExtraLift*/6.0, FColor(200, 165, 45), ParkingMaterial, Ctx,
+		/*bBakeLaneColors*/false, /*bWorldUVs*/false, /*bConformSurface*/false);
 
 	UE_LOG(LogRoadNet, Log,
-		TEXT("[RoadNet] CommitGeometry: road %d tris (lane shading baked), sidewalk %d tris, markings %d white + %d yellow tris."),
-		RoadTris, WalkTris, WhiteTris, YellowTris);
+		TEXT("[RoadNet] CommitGeometry: road %d tris (lane shading baked), sidewalk %d tris, markings %d white + %d yellow tris, bike %d + parking %d tris."),
+		RoadTris, WalkTris, WhiteTris, YellowTris, BikeTris, ParkTris);
 
 	// Kerb line rides on the same merged surface + sidewalk polys, so it must be
 	// committed AFTER the sidewalk band exists (it reads Ctx.ZoneSidewalkPolys).
 	CommitCurbs(Ctx);
+	CommitFurniture(Ctx);         // § street furniture (HISM instances / spawned Blueprint actors)
 	CommitJunctionSignals(Ctx);   // § traffic-signal placeholders at signalized junctions
 	CommitMedian(Ctx);            // § raised median strip + centre planting splines
 	CommitPerimeters(Ctx);
 	CommitLaneGraph(Ctx);
+
+	// Retire any cell this pass emptied out (all its layers/instances/splines
+	// gone). Clean tiles outside the commit scope are left untouched.
+	RetireEmptyTiles(Ctx);
+
+	// Reassemble the whole-network terrain-conform soup from the per-cell cache
+	// (clean cells + this pass's dirty cells), dropping any retired cell, so the
+	// landscape sculpt (OSMOverpassRoadImport GetConformTris) always receives the
+	// complete ground surface — never just the edited window.
+	for (auto It = ConformCache.CreateIterator(); It; ++It)
+	{
+		if (!TileActors.Contains(It.Key())) { It.RemoveCurrent(); }
+	}
+	ConformVerts.Reset();
+	ConformTris.Reset();
+	for (const TPair<FIntPoint, FRoadNetTileConform>& KV : ConformCache)
+	{
+		const int32 Base = ConformVerts.Num();
+		ConformVerts.Append(KV.Value.Verts);
+		for (int32 i = 0; i < KV.Value.Verts.Num(); ++i) { ConformTris.Add(Base + i); }
+	}
 }
 
 void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 {
-	UWorld* World = WorldPtr.Get();
-	if (!World) { return; }
+	if (!WorldPtr.IsValid()) { return; }
 
 	// Default to the PCG kerb kit mesh; fall back to an engine cube only if that
 	// asset can't be found, so the kerb line is always visible.
@@ -1698,17 +2352,9 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 		Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
 	}
 
-	auto Retire = [this]()
-	{
-		if (AActor* A = GeoCurbActor.Get()) { A->Destroy(); }
-		GeoCurbActor = nullptr;
-	};
-
-	if (!bBuildCurbs || !Mesh)
-	{
-		Retire();
-		return;
-	}
+	// (Tiles were cleared in PrepareTilesForCommit, so an early return simply
+	// leaves the dirty cells with no kerb HISM this pass.)
+	if (!bBuildCurbs || !Mesh) { return; }
 
 	// Gather kerb placements from every zone (each zone samples its own heights
 	// so overpasses keep their elevation).
@@ -1782,58 +2428,18 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 		}
 	}
 
-	if (Insts.Num() == 0) { Retire(); return; }
+	if (Insts.Num() == 0) { return; }
 
-	// Spawn/reuse the kerb container actor (kept across rebuilds).
-	AActor* Actor = GeoCurbActor.Get();
-	if (!Actor)
+	// Per-cell zebra kerb HISMs (piece i → A / B), routed by each piece's world
+	// position into its tile actor. Each cell gets its own CurbA/CurbB pair
+	// (materials 0/1 respectively), created on first use and reused thereafter.
+	auto TileHISM = [&](const FIntPoint& Coord, bool bA) -> UHierarchicalInstancedStaticMeshComponent*
 	{
-		FActorSpawnParameters Params;
-		Params.ObjectFlags |= RF_Transient;
-		Actor = World->SpawnActor<AActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
-		if (!Actor) { return; }
-		USceneComponent* Root = NewObject<USceneComponent>(Actor, TEXT("Root"));
-		Actor->SetRootComponent(Root);
-		Root->RegisterComponent();
-#if WITH_EDITOR
-		Actor->SetActorLabel(TEXT("RoadNet_Curbs"));
-#endif
-		GeoCurbActor = Actor;
-	}
-
-	// Two alternating kerb HISMs → a zebra pattern (piece i → A / B). Each HISM
-	// carries one of the two override materials, so alternate pieces read in
-	// contrasting colours. Found/created by tag so material↔HISM stays stable
-	// across rebuilds (GetComponents order is not guaranteed).
-	auto GetOrMakeHISM = [&](FName Tag) -> UHierarchicalInstancedStaticMeshComponent*
-	{
-		TArray<UHierarchicalInstancedStaticMeshComponent*> Existing;
-		Actor->GetComponents<UHierarchicalInstancedStaticMeshComponent>(Existing);
-		for (UHierarchicalInstancedStaticMeshComponent* C : Existing)
-		{
-			if (C && C->ComponentHasTag(Tag)) { return C; }
-		}
-		UHierarchicalInstancedStaticMeshComponent* H = NewObject<UHierarchicalInstancedStaticMeshComponent>(Actor);
-		H->SetupAttachment(Actor->GetRootComponent());
-		H->SetMobility(EComponentMobility::Static);
-		H->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		H->SetCanEverAffectNavigation(false);
-		H->ComponentTags.Add(Tag);
-		H->RegisterComponent();
-		Actor->AddInstanceComponent(H);
-		return H;
+		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
+		if (!Tile) { return nullptr; }
+		return Tile->GetOrCreateHISM(bA ? FName(TEXT("CurbA")) : FName(TEXT("CurbB")),
+			Mesh, bA ? CurbMaterial0.Get() : CurbMaterial1.Get());
 	};
-	UHierarchicalInstancedStaticMeshComponent* HA = GetOrMakeHISM(TEXT("CurbA"));
-	UHierarchicalInstancedStaticMeshComponent* HB = GetOrMakeHISM(TEXT("CurbB"));
-	if (!HA || !HB) { return; }
-
-	for (UHierarchicalInstancedStaticMeshComponent* H : { HA, HB })
-	{
-		H->ClearInstances();
-		H->SetStaticMesh(Mesh);
-	}
-	if (CurbMaterial0) { HA->SetMaterial(0, CurbMaterial0); }
-	if (CurbMaterial1) { HB->SetMaterial(0, CurbMaterial1); }
 
 	// ---- fit SM_Curb2 onto the kerb line ----------------------------------
 	// SM_Curb2 needs a 180° yaw so its raised face turns toward the road; we
@@ -1858,6 +2464,9 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 	const double MeshTall = FMath::Max(1.0, Size.Z);
 
 	int32 iCurb = 0, nA = 0, nB = 0;
+	// Batch instances per HISM: HISM rebuilds its cluster tree on every single
+	// AddInstance (O(n^2) for a big city). AddInstances() builds the tree ONCE.
+	TMap<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>> CurbBatches;
 	for (const RoadNetCurbs::FCurbInstance& CI : Insts)
 	{
 		const double sLong = (double)CI.LengthCm / MeshLong;
@@ -1885,8 +2494,18 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 		const FVector Target = CI.Location + LeftN * kCurbLateralNudgeCm;
 		Inst.SetTranslation(Target - AnchorWorld);
 
-		if ((iCurb++ & 1) == 0) { HA->AddInstance(Inst, /*bWorldSpace*/true); ++nA; }
-		else                    { HB->AddInstance(Inst, /*bWorldSpace*/true); ++nB; }
+		const FIntPoint Coord = TileOf(CI.Location);
+		if (!IsTileInCommitScope(Coord, Ctx)) { ++iCurb; continue; }
+		const bool bA = ((iCurb++ & 1) == 0);
+		if (UHierarchicalInstancedStaticMeshComponent* H = TileHISM(Coord, bA))
+		{
+			CurbBatches.FindOrAdd(H).Add(Inst);
+			if (bA) { ++nA; } else { ++nB; }
+		}
+	}
+	for (TPair<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>>& KV : CurbBatches)
+	{
+		KV.Key->AddInstances(KV.Value, /*bShouldReturnIndices*/false, /*bWorldSpace*/true);
 	}
 
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitCurbs: %d kerb instances (zebra %d/%d)%s."),
@@ -2001,6 +2620,45 @@ bool URoadNetwork::ToggleJunctionIslandsNear(const FVector2D& Loc)
 	C.Location = Loc; // re-anchor to the live junction position
 	C.bCornerIslands = !C.bCornerIslands;
 	return C.bCornerIslands;
+}
+
+double URoadNetwork::ResolveJunctionSmoothingNear(const FVector2D& Loc) const
+{
+	double BestD2 = FMath::Square(kJunctionMatchCm);
+	double Best = JunctionSmoothingCm;   // network default
+	for (const FRoadNetJunctionConfig& Cfg : JunctionConfigs)
+	{
+		if (Cfg.SmoothingCm < 0.f) { continue; }   // no override here
+		const double D2 = FVector2D::DistSquared(Cfg.Location, Loc);
+		if (D2 < BestD2) { BestD2 = D2; Best = Cfg.SmoothingCm; }
+	}
+	return Best;
+}
+
+double URoadNetwork::AdjustJunctionSmoothingNear(const FVector2D& Loc, double DeltaCm, FVector2D& OutJunctionLoc)
+{
+	Modify();
+	int32 BestIdx = INDEX_NONE;
+	double BestD2 = FMath::Square(kJunctionMatchCm);
+	for (int32 i = 0; i < JunctionConfigs.Num(); ++i)
+	{
+		const double D2 = FVector2D::DistSquared(JunctionConfigs[i].Location, Loc);
+		if (D2 < BestD2) { BestD2 = D2; BestIdx = i; }
+	}
+	if (BestIdx == INDEX_NONE)
+	{
+		FRoadNetJunctionConfig Cfg;
+		Cfg.Location = Loc;
+		BestIdx = JunctionConfigs.Add(Cfg);
+	}
+	FRoadNetJunctionConfig& C = JunctionConfigs[BestIdx];
+	C.Location = Loc; // re-anchor to the live junction position
+	// Seed the override from the current effective value on first touch so the
+	// first nudge steps relative to what the junction already shows.
+	const double Cur = (C.SmoothingCm >= 0.f) ? (double)C.SmoothingCm : JunctionSmoothingCm;
+	C.SmoothingCm = (float)FMath::Clamp(Cur + DeltaCm, 0.0, 300.0);
+	OutJunctionLoc = C.Location;
+	return C.SmoothingCm;
 }
 
 void URoadNetwork::BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const
@@ -2251,56 +2909,13 @@ void URoadNetwork::BuildJunctionMarkings(FRoadNetRebuildContext& Ctx)
 
 void URoadNetwork::CommitJunctionSignals(FRoadNetRebuildContext& Ctx)
 {
-	UWorld* World = WorldPtr.Get();
-	if (!World) { return; }
+	if (!WorldPtr.IsValid()) { return; }
 
-	auto Retire = [this]()
-	{
-		if (AActor* A = GeoSignalActor.Get()) { A->Destroy(); }
-		GeoSignalActor = nullptr;
-	};
-
-	if (!bBuildJunctionMarkings || Ctx.Signals.Num() == 0) { Retire(); return; }
+	if (!bBuildJunctionMarkings || Ctx.Signals.Num() == 0) { return; }
 
 	UStaticMesh* Mesh = SignalMesh ? SignalMesh.Get() : nullptr;
 	if (!Mesh) { Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder")); }
-	if (!Mesh) { Retire(); return; }
-
-	AActor* Actor = GeoSignalActor.Get();
-	if (!Actor)
-	{
-		FActorSpawnParameters Params;
-		Params.ObjectFlags |= RF_Transient;
-		Actor = World->SpawnActor<AActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
-		if (!Actor) { return; }
-		USceneComponent* Root = NewObject<USceneComponent>(Actor, TEXT("Root"));
-		Actor->SetRootComponent(Root);
-		Root->RegisterComponent();
-#if WITH_EDITOR
-		Actor->SetActorLabel(TEXT("RoadNet_Signals"));
-#endif
-		GeoSignalActor = Actor;
-	}
-
-	UHierarchicalInstancedStaticMeshComponent* H = nullptr;
-	{
-		TArray<UHierarchicalInstancedStaticMeshComponent*> Existing;
-		Actor->GetComponents<UHierarchicalInstancedStaticMeshComponent>(Existing);
-		H = Existing.Num() ? Existing[0] : nullptr;
-		if (!H)
-		{
-			H = NewObject<UHierarchicalInstancedStaticMeshComponent>(Actor);
-			H->SetupAttachment(Actor->GetRootComponent());
-			H->SetMobility(EComponentMobility::Static);
-			H->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			H->SetCanEverAffectNavigation(false);
-			H->RegisterComponent();
-			Actor->AddInstanceComponent(H);
-		}
-	}
-	if (!H) { return; }
-	H->ClearInstances();
-	H->SetStaticMesh(Mesh);
+	if (!Mesh) { return; }
 
 	// Fit the mesh into a thin, ~3.5 m tall "pole" placeholder seated on the
 	// ground point, unless the user supplied a real signal mesh (then place it
@@ -2314,111 +2929,74 @@ void URoadNetwork::CommitJunctionSignals(FRoadNetRebuildContext& Ctx)
 	const double sTall = bUserMesh ? 1.0 : kPoleTallCm / FMath::Max(1.0, Size.Z);
 	const double sWide = bUserMesh ? 1.0 : kPoleWideCm / FMath::Max(1.0, FMath::Max(Size.X, Size.Y));
 
+	int32 Placed = 0;
+	TMap<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>> SignalBatches;
 	for (const TPair<FVector, float>& SP : Ctx.Signals)
 	{
+		const FIntPoint Coord = TileOf(SP.Key);
+		if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
+		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
+		if (!Tile) { continue; }
+		UHierarchicalInstancedStaticMeshComponent* H = Tile->GetOrCreateHISM(FName(TEXT("Signals")), Mesh);
+		if (!H) { continue; }
+
 		const FVector Scale(sWide, sWide, sTall);
 		FTransform Inst(FRotator(0.f, SP.Value, 0.f), FVector::ZeroVector, Scale);
 		const FVector AnchorWorld = Inst.TransformVector(FVector(Ctr.X, Ctr.Y, Box.Min.Z)); // bottom-centre
 		Inst.SetTranslation(SP.Key - AnchorWorld);
-		H->AddInstance(Inst, /*bWorldSpace*/true);
+		SignalBatches.FindOrAdd(H).Add(Inst);
+		++Placed;
+	}
+	for (TPair<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>>& KV : SignalBatches)
+	{
+		KV.Key->AddInstances(KV.Value, /*bShouldReturnIndices*/false, /*bWorldSpace*/true);
 	}
 
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitJunctionSignals: %d signal placeholders%s."),
-		Ctx.Signals.Num(), bUserMesh ? TEXT("") : TEXT(" [cylinder default]"));
+		Placed, bUserMesh ? TEXT("") : TEXT(" [cylinder default]"));
 }
 
 void URoadNetwork::CommitMedian(FRoadNetRebuildContext& Ctx)
 {
-	UWorld* World = WorldPtr.Get();
-	if (!World) { return; }
+	if (!WorldPtr.IsValid()) { return; }
 
-	// Mesh the raised median strips. Reuse CommitLayer so the strip drapes on
-	// terrain with a curb-height lift. Two layers: soil (green, plantable) and
-	// walkable (concrete, SidewalkAndCurb → uses the sidewalk material).
-	auto AnyPolys = [](const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& Z)
-	{
-		for (const TArray<UE::Geometry::FGeneralPolygon2d>& P : Z) { if (P.Num() > 0) { return true; } }
-		return false;
-	};
-
-	const bool bAnySoil = AnyPolys(Ctx.ZoneMedianPolys);
-	if (bAnySoil)
-	{
-		CommitLayer(GeoMedianActor, TEXT("RoadNet_Median"), Ctx.ZoneMedianPolys,
-			/*ExtraLift*/15.0, FColor(70, 110, 60), MedianMaterial, Ctx,
-			/*bBakeLaneColors*/false, /*bWorldUVs*/true);
-	}
-	else if (AActor* A = GeoMedianActor.Get()) { A->Destroy(); GeoMedianActor = nullptr; }
-
-	const bool bAnyWalk = AnyPolys(Ctx.ZoneMedianWalkPolys);
-	if (bAnyWalk)
-	{
-		CommitLayer(GeoMedianWalkActor, TEXT("RoadNet_MedianWalk"), Ctx.ZoneMedianWalkPolys,
-			/*ExtraLift*/15.0, FColor(165, 162, 155), SidewalkMaterial, Ctx,
-			/*bBakeLaneColors*/false, /*bWorldUVs*/true);
-	}
-	else if (AActor* A = GeoMedianWalkActor.Get()) { A->Destroy(); GeoMedianWalkActor = nullptr; }
-
-	const bool bAnyMedian = bAnySoil || bAnyWalk;
+	// Mesh the raised median strips into the tile actors. Reuse CommitLayer so
+	// the strip drapes on terrain with a curb-height lift. Two layers: soil
+	// (green, plantable) and walkable (concrete → sidewalk material). Empty
+	// input just commits nothing (tiles were cleared in PrepareTilesForCommit).
+	const int32 SoilTris = CommitLayer(TEXT("Median"), Ctx.ZoneMedianPolys,
+		/*ExtraLift*/15.0, FColor(70, 110, 60), MedianMaterial, Ctx,
+		/*bBakeLaneColors*/false, /*bWorldUVs*/true);
+	const int32 WalkTris = CommitLayer(TEXT("MedianWalk"), Ctx.ZoneMedianWalkPolys,
+		/*ExtraLift*/15.0, FColor(165, 162, 155), SidewalkMaterial, Ctx,
+		/*bBakeLaneColors*/false, /*bWorldUVs*/true);
+	const bool bAnyMedian = (SoilTris + WalkTris) > 0;
 
 	// Centre planting splines (one open spline per median road) for PCG tree
-	// scatter. Tagged for discovery; lifted to the median top.
+	// scatter. Tagged for discovery; lifted to the median top. Routed to the
+	// tile containing each road's midpoint (a spline loads with that cell).
 	int32 SplineCount = 0;
+	for (int32 r = 0; r < Roads.Num(); ++r)
 	{
-		AActor* Actor = GeoMedianSplineActor.Get();
-		bool bNeed = false;
-		for (const FRoadDef& R : Roads) { if (R.Lanes.bMedian) { bNeed = true; break; } }
+		if (!Roads[r].Lanes.bMedian) { continue; }
+		const FRoadCurves* C = Ctx.Curves.Find(r);
+		if (!C || C->Sampled.Num() < 2) { continue; }
 
-		if (!bNeed)
-		{
-			if (AActor* A = GeoMedianSplineActor.Get()) { A->Destroy(); GeoMedianSplineActor = nullptr; }
-			return;
-		}
+		TArray<FVector> Pts = C->Sampled;
+		for (FVector& P : Pts) { P.Z += kRoadZLiftCm + 15.0; } // sit on the median top
 
-		if (!Actor)
-		{
-			FActorSpawnParameters Params;
-			Params.ObjectFlags |= RF_Transient;
-			Actor = World->SpawnActor<AActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
-			if (!Actor) { return; }
-			USceneComponent* Root = NewObject<USceneComponent>(Actor, TEXT("Root"));
-			Actor->SetRootComponent(Root);
-			Root->RegisterComponent();
-#if WITH_EDITOR
-			Actor->SetActorLabel(TEXT("RoadNet_MedianSplines"));
-#endif
-			GeoMedianSplineActor = Actor;
-		}
-
-		// Clear the previous rebuild's splines.
-		{
-			TArray<USplineComponent*> Existing;
-			Actor->GetComponents<USplineComponent>(Existing);
-			for (USplineComponent* Sp : Existing) { if (Sp) { Sp->DestroyComponent(); } }
-		}
-
-		USceneComponent* Root = Actor->GetRootComponent();
-		for (int32 r = 0; r < Roads.Num(); ++r)
-		{
-			if (!Roads[r].Lanes.bMedian) { continue; }
-			const FRoadCurves* C = Ctx.Curves.Find(r);
-			if (!C || C->Sampled.Num() < 2) { continue; }
-
-			TArray<FVector> Pts = C->Sampled;
-			for (FVector& P : Pts) { P.Z += kRoadZLiftCm + 15.0; } // sit on the median top
-
-			USplineComponent* Sp = NewObject<USplineComponent>(Actor);
-			if (!Sp) { continue; }
-			Sp->SetMobility(EComponentMobility::Movable);
-			Sp->AttachToComponent(Root, FAttachmentTransformRules::KeepRelativeTransform);
-			Sp->RegisterComponent();
-			Sp->ClearSplinePoints(false);
-			Sp->SetSplinePoints(Pts, ESplineCoordinateSpace::World, false);
-			Sp->SetClosedLoop(false, false);
-			Sp->UpdateSpline();
-			Sp->ComponentTags.Add(FName(TEXT("RoadNetMedianCenter")));
-			++SplineCount;
-		}
+		const FIntPoint Coord = TileOf(Pts[Pts.Num() / 2]);
+		if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
+		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
+		if (!Tile) { continue; }
+		USplineComponent* Sp = Tile->AddSpline();
+		if (!Sp) { continue; }
+		Sp->ClearSplinePoints(false);
+		Sp->SetSplinePoints(Pts, ESplineCoordinateSpace::World, false);
+		Sp->SetClosedLoop(false, false);
+		Sp->UpdateSpline();
+		Sp->ComponentTags.Add(FName(TEXT("RoadNetMedianCenter")));
+		++SplineCount;
 	}
 
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitMedian: median strips=%s, %d centre spline(s)."),
@@ -2427,45 +3005,27 @@ void URoadNetwork::CommitMedian(FRoadNetRebuildContext& Ctx)
 
 void URoadNetwork::CommitPerimeters(FRoadNetRebuildContext& Ctx)
 {
-	UWorld* World = WorldPtr.Get();
-	if (!World) { return; }
+	if (!WorldPtr.IsValid()) { return; }
 
-	// Spawn/reuse a dedicated actor that hosts the perimeter loops as closed
-	// spline components — the seam a PCG graph samples for road edges / blocks.
-	AActor* Actor = GeoPerimeterActor.Get();
-	if (!Actor)
-	{
-		FActorSpawnParameters Params;
-		Params.ObjectFlags |= RF_Transient;
-		Actor = World->SpawnActor<AActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
-		if (!Actor) { return; }
-		USceneComponent* Root = NewObject<USceneComponent>(Actor, TEXT("Root"));
-		Actor->SetRootComponent(Root);
-		Root->RegisterComponent();
-#if WITH_EDITOR
-		Actor->SetActorLabel(TEXT("RoadNet_Perimeters"));
-#endif
-		GeoPerimeterActor = Actor;
-	}
-
-	// Clear the previous rebuild's spline components.
-	{
-		TArray<USplineComponent*> Existing;
-		Actor->GetComponents<USplineComponent>(Existing);
-		for (USplineComponent* Sp : Existing) { if (Sp) { Sp->DestroyComponent(); } }
-	}
-
-	USceneComponent* Root = Actor->GetRootComponent();
+	// Perimeter loops become closed spline components — the seam a PCG graph
+	// samples for road edges / blocks — routed into the tile containing each
+	// loop's centroid so they stream with that cell. Tags preserved verbatim so
+	// tag-based PCG discovery keeps working across the split.
 	int32 LoopCount = 0;
 	for (const FRoadNetLoop& Loop : Ctx.PerimeterLoops)
 	{
 		if (Loop.Points.Num() < 3) { continue; }
 
-		USplineComponent* Sp = NewObject<USplineComponent>(Actor);
+		FVector Centroid(0, 0, 0);
+		for (const FVector& P : Loop.Points) { Centroid += P; }
+		Centroid /= (double)Loop.Points.Num();
+
+		const FIntPoint Coord = TileOf(Centroid);
+		if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
+		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
+		if (!Tile) { continue; }
+		USplineComponent* Sp = Tile->AddSpline();
 		if (!Sp) { continue; }
-		Sp->SetMobility(EComponentMobility::Movable);
-		Sp->AttachToComponent(Root, FAttachmentTransformRules::KeepRelativeTransform);
-		Sp->RegisterComponent();
 		Sp->ClearSplinePoints(false);
 		Sp->SetSplinePoints(Loop.Points, ESplineCoordinateSpace::World, false);
 		for (int32 i = 0; i < Sp->GetNumberOfSplinePoints(); ++i)
@@ -2485,44 +3045,21 @@ void URoadNetwork::CommitPerimeters(FRoadNetRebuildContext& Ctx)
 
 void URoadNetwork::CommitLaneGraph(FRoadNetRebuildContext& Ctx)
 {
-	UWorld* World = WorldPtr.Get();
-	if (!World) { return; }
+	if (!WorldPtr.IsValid()) { return; }
 
-	// Host the lane-connectivity movements as open spline components (one per
+	// Lane-connectivity movements become open spline components (one per
 	// connection), curving Entry → joint centre → Exit so a PCG graph / traffic
-	// system can sample turn paths. Tagged for discovery.
-	AActor* Actor = GeoLaneGraphActor.Get();
-	if (!Actor)
-	{
-		FActorSpawnParameters Params;
-		Params.ObjectFlags |= RF_Transient;
-		Actor = World->SpawnActor<AActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
-		if (!Actor) { return; }
-		USceneComponent* Root = NewObject<USceneComponent>(Actor, TEXT("Root"));
-		Actor->SetRootComponent(Root);
-		Root->RegisterComponent();
-#if WITH_EDITOR
-		Actor->SetActorLabel(TEXT("RoadNet_LaneGraph"));
-#endif
-		GeoLaneGraphActor = Actor;
-	}
-
-	// Clear the previous rebuild's spline components.
-	{
-		TArray<USplineComponent*> Existing;
-		Actor->GetComponents<USplineComponent>(Existing);
-		for (USplineComponent* Sp : Existing) { if (Sp) { Sp->DestroyComponent(); } }
-	}
-
-	USceneComponent* Root = Actor->GetRootComponent();
+	// system can sample turn paths. Routed to the tile containing the movement's
+	// entry point; tags preserved for discovery.
 	int32 Made = 0;
 	for (const FRoadNetLaneConnection& Cn : Ctx.LaneConnections)
 	{
-		USplineComponent* Sp = NewObject<USplineComponent>(Actor);
+		const FIntPoint Coord = TileOf(Cn.Entry);
+		if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
+		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
+		if (!Tile) { continue; }
+		USplineComponent* Sp = Tile->AddSpline();
 		if (!Sp) { continue; }
-		Sp->SetMobility(EComponentMobility::Movable);
-		Sp->AttachToComponent(Root, FAttachmentTransformRules::KeepRelativeTransform);
-		Sp->RegisterComponent();
 		Sp->ClearSplinePoints(false);
 
 		TArray<FVector> Pts;

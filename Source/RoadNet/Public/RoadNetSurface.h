@@ -15,6 +15,18 @@ struct FRoadCurves;
 
 namespace RoadNetSurface
 {
+	// Per-junction morphological-close override for BuildMergedSurface. When any
+	// of these are supplied, the merge welds the whole surface with only a
+	// hairline epsilon and then rounds EACH listed junction locally with its own
+	// CloseCm — so junctions can carry independent smoothing. FillRadiusCm sizes
+	// the local work region (typically the junction fill-disc radius).
+	struct FJunctionClose
+	{
+		FVector2D Center = FVector2D::ZeroVector;
+		double    FillRadiusCm = 0.0;
+		double    CloseCm = 0.0;
+	};
+
 	// Build a single road's closed outline polygon from its left/right outer
 	// edges. Returns false if degenerate. Output outer ring is CCW.
 	ROADNET_API bool BuildRoadOutline(const FRoadCurves& Curves, UE::Geometry::FGeneralPolygon2d& Out);
@@ -26,11 +38,16 @@ namespace RoadNetSurface
 	// Union all road outlines (+ any ExtraPolys, e.g. junction fillet discs) into
 	// merged surface polygons. InflateEpsilonCm bridges micro-gaps between abutting
 	// arms (a "close" morphological op). Returns false only on a hard failure.
+	// PerJunction (optional): when non-empty, InflateEpsilonCm is applied only as
+	// a hairline weld and each junction is closed locally with its own radius
+	// (per-junction smoothing). When null/empty, InflateEpsilonCm is applied as a
+	// single global close over the whole zone (original behaviour, byte-for-byte).
 	ROADNET_API bool BuildMergedSurface(
 		const TArray<const FRoadCurves*>& Curves,
 		TArray<UE::Geometry::FGeneralPolygon2d>& OutMerged,
 		double InflateEpsilonCm = 5.0,
-		const TArray<UE::Geometry::FGeneralPolygon2d>* ExtraPolys = nullptr);
+		const TArray<UE::Geometry::FGeneralPolygon2d>* ExtraPolys = nullptr,
+		const TArray<FJunctionClose>* PerJunction = nullptr);
 
 	// Build a closed ribbon polygon between two lateral offsets of a centerline
 	// (§8.12 per-road sidewalk side). InnerOff/OuterOff are signed lateral offsets

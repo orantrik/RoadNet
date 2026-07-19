@@ -94,6 +94,7 @@ void ARoadNetActor::RebuildFromDrafts()
 		L.LaneWidthDefault = FMath::Max(150.f, DraftLaneWidthCm);
 		L.bSidewalkLeft    = bDraftSidewalks;
 		L.bSidewalkRight   = bDraftSidewalks;
+		L.SidewalkWidth    = FMath::Max(50.f, DraftSidewalkWidthCm);
 
 		Net->AddRoad(R);
 		++Built;

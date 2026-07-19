@@ -23,6 +23,26 @@ static TAutoConsoleVariable<float> CVarRoadNetHeightTauCm(
 	TEXT("RoadNet junction height soft-max temperature (cm): highest road wins. Small = crisp crown (through road stays, connecting road ramps to it); large = smooth average of both. Default 50."),
 	ECVF_Default);
 
+// Active RoadNet Draw sub-tool (see ERoadNetDrawTool): 0=Draw 1=Points 2=Lanes
+// 3=Junctions 4=Edge. Registered here in the always-loaded runtime module so the
+// OSM Roads panel (which writes it) and the RoadNetEditor mode (which reads it)
+// can both reach it by name without a module dependency between them.
+static TAutoConsoleVariable<int32> CVarRoadNetDrawTool(
+	TEXT("roadnet.DrawTool"),
+	0,
+	TEXT("Active RoadNet Draw sub-tool: 0=Draw, 1=Points, 2=Lanes, 3=Junctions, 4=Edge. Exactly one tool is live at a time so clicks/hotkeys are unambiguous."),
+	ECVF_Default);
+
+// Standard parking-bay layout used by the Lanes-tool 'P' authoring hotkey (see
+// ERoadNetParkingLayout): 0=Parallel 1=Perpendicular 2=Angled. Written by the
+// OSM Roads panel, read by the RoadNetEditor mode — registered here in the
+// always-loaded runtime module so both reach it by name with no module link.
+static TAutoConsoleVariable<int32> CVarRoadNetParkingLayout(
+	TEXT("roadnet.ParkingLayout"),
+	0,
+	TEXT("Standard parking-bay layout for the Lanes-tool 'P' hotkey: 0=Parallel, 1=Perpendicular, 2=Angled."),
+	ECVF_Default);
+
 namespace RoadNetMesh
 {
 	void FCenterlineHeightField::Build(const TArray<const TArray<FVector>*>& CenterLines, double InCellCm)
