@@ -113,6 +113,21 @@ enum class ERoadNetDrawTool : uint8
 	Edge      = 4   // drag the outer-edge vertices (sidewalk/curb/markings follow)
 };
 
+// Shape drawn by the Draw sub-tool. Freehand is the classic click-per-point
+// polyline; Roundabout and Curve are two-click geometric primitives (see the
+// roadnet.DrawShape CVar). Roundabout: click centre, click/hover for radius ->
+// closed circular road. Curve: click start, click end -> a circular arc that
+// bends by roadnet.DrawAngleDeg (90/45/25...). Shared header so the RoadNet
+// runtime (CVar) and the OSMRoadCore panel (labels) agree on the values.
+UENUM(BlueprintType)
+enum class ERoadNetDrawShape : uint8
+{
+	Freehand   = 0,  // click-per-point polyline (original behaviour)
+	Roundabout = 1,  // centre + radius -> closed perfect circle
+	Curve      = 2,  // start + end -> circular arc bending by DrawAngleDeg
+	FreeCurve  = 3   // origin + destination + apex click -> quadratic Bezier
+};
+
 // Lane semantic type — mirrors RoadBLD ELaneType (minus deprecated None; our
 // sidewalks are their own layer, not a lane type). See ROADBLD_FEATURES.md §4.
 UENUM(BlueprintType)

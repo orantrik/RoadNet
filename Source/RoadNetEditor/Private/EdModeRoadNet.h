@@ -116,6 +116,14 @@ private:
 	// unambiguous. SetActiveTool writes the CVar (used by the number-key shortcuts).
 	ERoadNetDrawTool ActiveTool() const;
 	void SetActiveTool(ERoadNetDrawTool Tool);
+	// Draw-tool shape (roadnet.DrawShape) and, for the Curve shape, its bend angle
+	// (roadnet.DrawAngleDeg) as radians. Both driven by the OSM Roads panel.
+	ERoadNetDrawShape ActiveShape() const;
+	double DrawAngleRad() const;
+	// Draw a road-width "ghost" of the given centreline (offset edges + rungs)
+	// using the draft actor's lane/sidewalk settings, so the draft previews the
+	// footprint of the finished road rather than a bare line.
+	void DrawRoadGhost(FPrimitiveDrawInterface* PDI, const TArray<FVector>& Center) const;
 	bool LineTraceCursor(FEditorViewportClient* ViewportClient, FVector& OutHit) const;
 	// Snap Query to the nearest existing road vertex / draft point within radius.
 	// Returns true and writes OutSnap when a candidate is found.

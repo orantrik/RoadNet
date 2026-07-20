@@ -463,6 +463,89 @@ namespace RoadNetMath
 		return true;
 	}
 
+	void SampleCircle(const FVector2D& Center, double Radius, double Z,
+		int32 Segments, TArray<FVector>& Out)
+	{
+		Out.Reset();
+		Segments = FMath::Clamp(Segments, 8, 256);
+		Radius = FMath::Max(Radius, 1.0);
+		Out.Reserve(Segments + 1);
+		for (int32 i = 0; i < Segments; ++i)
+		{
+			const double A = (2.0 * PI * i) / Segments;   // CCW
+			Out.Emplace(Center.X + Radius * FMath::Cos(A),
+			            Center.Y + Radius * FMath::Sin(A), Z);
+		}
+		const FVector First = Out[0];   // copy out first (can't Add an aliased element)
+		Out.Add(First);                 // duplicate => endpoint weld closes the loop
+	}
+
+	void SampleArc(const FVector& A, const FVector& B, double TurnRad,
+		bool bBulgeLeft, TArray<FVector>& Out)
+	{
+		Out.Reset();
+		const FVector2D A2(A.X, A.Y), B2(B.X, B.Y);
+		const FVector2D Chord = B2 - A2;
+		const double L = Chord.Size();
+		TurnRad = FMath::Abs(TurnRad);
+		// Degenerate chord or (near) straight / reflex angle: emit a straight span.
+		// Capped below PI so the minor-arc sweep below stays unambiguous.
+		if (L < 1.0 || TurnRad < FMath::DegreesToRadians(2.0)
+		            || TurnRad > FMath::DegreesToRadians(175.0))
+		{
+			Out.Add(A); Out.Add(B);
+			return;
+		}
+
+		const double SinHalf = FMath::Sin(TurnRad * 0.5);
+		const double Radius  = L / (2.0 * SinHalf);              // chord = 2 R sin(theta/2)
+		const FVector2D Mid  = (A2 + B2) * 0.5;
+		const FVector2D Dir  = Chord / L;
+		FVector2D Perp(-Dir.Y, Dir.X);                           // +90 deg = left of A->B
+		if (!bBulgeLeft) { Perp = -Perp; }
+		// Centre sits H = R cos(theta/2) OPPOSITE the bulge so the arc bows toward +Perp.
+		const double H = Radius * FMath::Cos(TurnRad * 0.5);
+		const FVector2D C = Mid - Perp * H;
+
+		const double A0 = FMath::Atan2(A2.Y - C.Y, A2.X - C.X);
+		const double A1 = FMath::Atan2(B2.Y - C.Y, B2.X - C.X);
+		double Delta = A1 - A0;                                  // minor-arc sweep (~+/-TurnRad)
+		while (Delta <= -PI) { Delta += 2.0 * PI; }
+		while (Delta >   PI) { Delta -= 2.0 * PI; }
+
+		const int32 Segs = FMath::Clamp(
+			FMath::CeilToInt(TurnRad / FMath::DegreesToRadians(5.0)), 2, 128);
+		Out.Reserve(Segs + 1);
+		for (int32 i = 0; i <= Segs; ++i)
+		{
+			const double t   = (double)i / Segs;
+			const double Ang = A0 + Delta * t;
+			const double Zc  = FMath::Lerp(A.Z, B.Z, t);
+			Out.Emplace(C.X + Radius * FMath::Cos(Ang),
+			            C.Y + Radius * FMath::Sin(Ang), Zc);
+		}
+		Out[0] = A; Out.Last() = B;   // snap exact endpoints against float drift
+		// Self-check: the arc must still start at A and end at B (chord preserved).
+		ensureMsgf(FVector2D::Distance(FVector2D(Out.Last().X, Out.Last().Y), A2) > L - 1.0,
+			TEXT("SampleArc: endpoints drifted (L=%.1f)"), L);
+	}
+
+	void SampleQuadBezier(const FVector& A, const FVector& Ctrl, const FVector& B,
+		TArray<FVector>& Out)
+	{
+		Out.Reset();
+		const double Approx = FVector::Dist(A, Ctrl) + FVector::Dist(Ctrl, B);
+		const int32 Segs = FMath::Clamp(FMath::CeilToInt(Approx / 200.0), 4, 128);
+		Out.Reserve(Segs + 1);
+		for (int32 i = 0; i <= Segs; ++i)
+		{
+			const double t = (double)i / Segs;
+			const double u = 1.0 - t;
+			Out.Add(u * u * A + 2.0 * u * t * Ctrl + t * t * B);
+		}
+		Out[0] = A; Out.Last() = B;   // snap exact endpoints against float drift
+	}
+
 	double SignedArea(const TArray<FVector2D>& Loop)
 	{
 		const int32 N = Loop.Num();

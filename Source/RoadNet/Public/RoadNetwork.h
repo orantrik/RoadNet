@@ -127,6 +127,14 @@ struct FRoadNetRebuildContext
 	// setback. Markings and lane ribbons are subtracted against this so paint ends
 	// at the junction edge (not on a lazy circular disc).
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneJunctionClip;
+	// Per-zone junction CARVE region: the clip above grown outward by the sidewalk
+	// width (+margin). The raw clip only covers the carriageway overlap, so a
+	// road's SIDEWALK runs past the junction uncut and the tile spans it. The
+	// carve reaches across the sidewalk band so EVERY layer (surface + sidewalk)
+	// breaks at the junction — this is the region tiles are cut/assigned by
+	// (the junction tile), while the raw clip stays the paint-clip boundary.
+	// Built by BuildTopoAccel.
+	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneJunctionCarve;
 	// § junction traffic-signal placeholder placements (location, yawDeg) for
 	// this rebuild — committed as a HISM.
 	TArray<TPair<FVector, float>> Signals;
@@ -154,6 +162,44 @@ struct FRoadNetRebuildContext
 	// instead of the full length of its (possibly long) arm roads. Invalid box
 	// (the default) = derive dirty tiles from the modified roads' corridors.
 	FBox2D ExplicitDirtyBox = FBox2D(ForceInit);
+
+	// ---- topological tile accel (§ topo tiles) — transient, built per commit -
+	// Flat list of this pass's junction clip regions (one per clip poly) with a
+	// cached XY bbox, its owning zone/index (to re-test containment) and its
+	// stable junction tile key, so a world point can be mapped to its junction
+	// tile with a cheap bbox pre-filter. Built by CommitGeometry (BuildTopoAccel).
+	struct FTopoJunctionRegion
+	{
+		FBox2D Box = FBox2D(ForceInit);
+		FIntPoint Key = FIntPoint(0, 0);
+		int32 Zone = INDEX_NONE;
+		int32 Index = INDEX_NONE;
+	};
+	TArray<FTopoJunctionRegion> TopoJunctions;
+	// Coarse XY grid (cell ~20 m): grid cell -> road indices whose sampled
+	// centreline passes through it, to accelerate point->segment assignment in
+	// the point-based commits (curbs / furniture / median / perimeters / lanes).
+	TMap<FIntPoint, TArray<int32>> RoadSampleGrid;
+	// Per-road arm index of each sampled centreline point: which inter-junction
+	// stretch the point is on (-1 = the point sits inside a junction clip). A
+	// road that passes through N junctions has arms 0..N, so it becomes a
+	// SEPARATE segment tile on each side of every junction. Filled by
+	// BuildTopoAccel; read by TopoKeyOf. Keyed by road index (== Curves key).
+	TMap<int32, TArray<int32>> RoadSampleArm;
+	// Per-road contiguous arm RUNS derived from RoadSampleArm: the array index is
+	// the arm value (0,1,2,... between successive junctions) and the value is the
+	// inclusive [loSample, hiSample] range of that stretch on the sampled
+	// centreline. Junction samples (arm -1) are the gaps between runs. Built by
+	// BuildTopoAccel; used to slice a segment's own cross-section + splines and to
+	// pair divided carriageways. Keyed by road index (== Curves key).
+	TMap<int32, TArray<TPair<int32, int32>>> RoadArmRuns;
+	// § tiling v2 (ownership by construction): per-layer, per-zone, per-tile
+	// polygon buckets built by BuildTilePartition. Each polygon is generated from
+	// its own road's arm-run cross-section and tagged with its tile key AT
+	// CREATION — CommitLayer consumes these directly and never re-assigns
+	// geometry spatially (the v1 routing-heuristic bug class: sidewalk theft).
+	// Keyed by CommitLayer's LayerName ("Surface", "Sidewalks").
+	TMap<FName, TArray<TMap<FIntPoint, TArray<UE::Geometry::FGeneralPolygon2d>>>> ZoneTileLayers;
 	// Later phases populate: overlap masks, details.
 };
 
@@ -177,6 +223,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Tiling",
 		meta = (ClampMin = "2000.0", UIMin = "6400.0", UIMax = "102400.0"))
 	double TileSizeCm = 25600.0;
+
+	// § divided-road tiling: pair the two one-way carriageways of a divided road
+	// (opposite direction, parallel, within the gap below) into ONE segment tile
+	// so a carriageway + median + partner ride together. Off = each carriageway is
+	// its own tile. Every pair it forms is logged so a mis-pair is visible.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Tiling")
+	bool bPairDividedRoads = true;
+
+	// Max centre-to-centre lateral gap (cm) between two carriageways still treated
+	// as one divided road. Larger pairs wider medians but risks false positives.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Tiling",
+		meta = (ClampMin = "200.0", UIMin = "400.0", UIMax = "6000.0"))
+	double DividedRoadMaxGapCm = 2500.0;
 
 	// Stable identity for this network, stamped onto every tile actor it spawns
 	// so the tile registry can be rebuilt from the level (and multiple networks
@@ -451,6 +510,19 @@ public:
 	// is present. Also updates DefaultSidewalkWidthCm. Caller triggers Rebuild().
 	void SetAllSidewalkWidth(float WidthCm);
 
+	// ---- smooth roads (street features) ------------------------------------
+	// Simplify EVERY road's reference polyline (Ramer–Douglas–Peucker, max
+	// deviation SimplifyTolCm) and round any remaining sharp corner (turn >
+	// CornerAngleDeg) by corner-cutting, so the G2 rebuild spline yields clean
+	// bezier-quality curves — roundabouts read round, import kinks disappear.
+	// Junction topology is PRESERVED: endpoints and any point whose OSM node is
+	// shared with another road are never moved or removed. Elev/NodeIds stay
+	// parallel (new cut points get node id -1). Pressing again smooths further
+	// (each pass is one corner-cut iteration). Returns the number of roads
+	// changed. Caller triggers Rebuild().
+	int32 SmoothAllRoads(float SimplifyTolCm = 150.f, float CornerAngleDeg = 18.f,
+		float CornerMaxCutCm = 600.f);
+
 	// Nudge one road's sidewalk width by DeltaCm (clamped ≥ 0). Enables both
 	// sides on first widening. Returns the new width. Caller triggers Rebuild().
 	float AdjustSidewalkWidth(int32 RoadIdx, float DeltaCm);
@@ -514,6 +586,15 @@ public:
 	// entirely. Returns true when the whole road was removed (so callers can drop
 	// any cached selection/indices, which shift on removal).
 	bool DeleteRoadPoint(int32 RoadIdx, int32 PointIdx, bool& bOutRoadRemoved);
+
+	// Delete a set of reference points from ONE road, SPLITTING it into a new
+	// road wherever the removed points leave a gap (deleting a contiguous run of
+	// interior points breaks the polyline in two — a real hole — instead of
+	// bridging across it). Surviving runs of <2 points are dropped. The first
+	// surviving run reuses this road's slot (and Id); extra runs are appended via
+	// AddRoad (indices only grow, never shift). Returns the number of resulting
+	// roads (0 = whole road removed, 1 = trimmed, 2+ = split). Caller rebuilds.
+	int32 DeleteRoadPointsSplitting(int32 RoadIdx, const TArray<int32>& PointIdxToRemove);
 
 	// Insert a point after AfterIdx at Pos (mid-span split). Returns false on bad
 	// index. Caller triggers Rebuild().
@@ -620,12 +701,68 @@ private:
 	// the whole bounding rectangle. Refreshed every rebuild.
 	mutable TMap<FGuid, TArray<FIntPoint>> LastRoadCells;
 
+	// ---- topological tile keying (§ topo tiles) ---------------------------
+	// Tiles are cut at the junction boundary, so a tile is a SEGMENT (a road
+	// between junctions) or a JUNCTION, not a grid cell. We reuse FIntPoint as an
+	// identity key: .X = stable id, .Y = kind (0 = segment, 1 = junction). These
+	// maps assign stable ids so windowed rebuilds hit the same tile actor; they
+	// are reset on every full rebuild (all tiles are recreated) and reused across
+	// windowed edits within a session.
+	TMap<TPair<FGuid, int32>, int32> SegKeyOf;  // (road GUID, arm)          -> segment id
+	// Divided-road pairing: a member carriageway's (GUID, arm) key redirected to
+	// the pair's CANONICAL (GUID, arm), so both one-way carriageways of a divided
+	// road (and the median between them) resolve to ONE segment tile. Built by
+	// BuildDividedPairs; reset with SegKeyOf on every full rebuild. Resolved at
+	// the top of SegTileKey so ALL routing (surface / sidewalk / median / splines)
+	// honours it uniformly.
+	TMap<TPair<FGuid, int32>, TPair<FGuid, int32>> SegAlias;
+	TMap<FIntPoint, int32> JunKeyOf;   // quantised junction centre cell -> junction id
+	int32 NextSegId = 0;
+	int32 NextJunId = 0;
+	// Junction tiles each road contributed to in the LAST rebuild, so a windowed
+	// edit can dirty (and, if a junction dissolved, retire) them. Parallels
+	// LastRoadCells; refreshed for pending roads every rebuild.
+	mutable TMap<FGuid, TArray<FIntPoint>> LastRoadJunctions;
+	static constexpr int32 kSegKind = 0;
+	static constexpr int32 kJunKind = 1;
+
 	// Rebuild TileActors from the level if not already loaded this session.
 	void EnsureTileRegistry();
-	// Get (spawning on first use) the tile actor for grid cell Coord.
+	// Get (spawning on first use) the tile actor for topological key Coord
+	// (.X = id, .Y = kind).
 	ARoadNetTileActor* GetOrCreateTile(const FIntPoint& Coord);
-	// Grid cell containing a world point, using this network's TileSizeCm.
-	FIntPoint TileOf(const FVector& WorldPos) const;
+	// Stable segment tile key for a road GUID + arm index (assigns an id on
+	// first use). Arm = which inter-junction stretch of the road; a road that
+	// crosses a junction gets a distinct tile per arm.
+	FIntPoint SegTileKey(const FGuid& RoadId, int32 Arm = 0);
+	// Stable junction tile key for a junction centre (quantised, neighbour-tolerant).
+	FIntPoint JunTileKey(const FVector2D& CentreCm);
+	// Resolve a world point to its topological tile key for the point-based
+	// commits: inside a junction clip region -> that junction; else the nearest
+	// road's segment. Returns (INDEX_NONE, kSegKind) when no road is in range.
+	FIntPoint TopoKeyOf(const FVector& WorldPos, const FRoadNetRebuildContext& Ctx);
+	// Split a world-space polyline at its topological tile boundaries (where
+	// TopoKeyOf changes — i.e. at junctions/merges) and add each arc as its own
+	// spline to the tile it runs through. Neighbouring arcs share the boundary
+	// point so they meet with no gap; the union of arcs equals the input, so no
+	// seam coverage is lost — the spline is just re-homed per segment/junction
+	// tile so a tile's bounds collapse to its own road. Returns arcs emitted.
+	int32 AddSplineSplitByTile(const TArray<FVector>& Points, bool bClosed,
+		bool bCurved, const TArray<FName>& Tags, FRoadNetRebuildContext& Ctx);
+	// Build the per-commit topological accelerators (Ctx.TopoJunctions with keys
+	// + Ctx.RoadSampleGrid) and assign all junction ids for this pass.
+	void BuildTopoAccel(FRoadNetRebuildContext& Ctx);
+	// Detect divided-road carriageway pairs (opposite one-way, parallel, within
+	// DividedRoadMaxGapCm) and fill SegAlias so both arms + their median share ONE
+	// segment tile. Logs every pair. No-op when bPairDividedRoads is false.
+	void BuildDividedPairs(FRoadNetRebuildContext& Ctx);
+	// § tiling v2 — build Ctx.ZoneTileLayers ("Surface" + "Sidewalks") by
+	// GENERATING each segment tile's cross-section from its own arm run:
+	// carriageway outline slice and per-side sidewalk ribbons (∩ zone band),
+	// both minus the junction carve; junction tiles get merged-surface ∩ carve
+	// and band ∩ carve. Ownership is fixed at creation — no spatial re-assignment
+	// can steal a sidewalk. Also runs the both-sides self-check ([TILECHK]).
+	void BuildTilePartition(FRoadNetRebuildContext& Ctx);
 
 	// (Former network-wide Geo* actors removed — all committed geometry now lives
 	// in per-cell ARoadNetTileActor components; see the tile registry above.)
@@ -670,6 +807,9 @@ private:
 	void CommitMedian(FRoadNetRebuildContext& Ctx);              // § raised median strip + centre splines
 	void CommitPerimeters(FRoadNetRebuildContext& Ctx);          // §8.4 spline loops for PCG
 	void CommitLaneGraph(FRoadNetRebuildContext& Ctx);           // §12.2 lane-graph splines for PCG
+	// § per-segment editable centre + edge splines (one set per segment tile) so
+	// each road stretch exposes an editable centreline and its two outer edges.
+	void CommitSegmentSplines(FRoadNetRebuildContext& Ctx);
 
 	// Mesh a set of per-zone polygons and route the result into the spatial tile
 	// actors (§ tiling): each zone's polygons are clipped to every grid cell they

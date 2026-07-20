@@ -110,6 +110,26 @@ namespace RoadNetMath
 		const FVector2D& Apex, const FVector2D& DirA, const FVector2D& DirB,
 		double Radius, double& OutSetback, FVector2D& OutArcCenter, double& OutTurnAngleRad);
 
+	// ---- Draw-tool primitives (roundabout / angled curve) ------------------
+	// Sample a full circle (CCW) into a CLOSED 3-D ring (last point == first) at
+	// height Z. Segments clamped to [8,256]. Drives the Draw tool's roundabout;
+	// the duplicated end point lets the endpoint weld close it into a loop.
+	ROADNET_API void SampleCircle(const FVector2D& Center, double Radius, double Z,
+		int32 Segments, TArray<FVector>& Out);
+
+	// Sample a circular ARC from A to B whose central angle is TurnRad (how far
+	// the road bends). bBulgeLeft picks which side of the A->B chord the arc bows
+	// to. Z is interpolated A->B; both endpoints are included exactly. Falls back
+	// to the straight segment [A,B] when the angle/chord is degenerate.
+	ROADNET_API void SampleArc(const FVector& A, const FVector& B, double TurnRad,
+		bool bBulgeLeft, TArray<FVector>& Out);
+
+	// Sample a quadratic Bezier A -> B with control point Ctrl. Drives the Draw
+	// tool's free curve (the tangents at A and B point along Ctrl). Segment count
+	// scales with the control-polygon length. Includes both endpoints exactly.
+	ROADNET_API void SampleQuadBezier(const FVector& A, const FVector& Ctrl,
+		const FVector& B, TArray<FVector>& Out);
+
 	// ---- helpers -----------------------------------------------------------
 	// Signed area of a closed 2-D loop (CCW > 0). Does not require last==first.
 	ROADNET_API double SignedArea(const TArray<FVector2D>& Loop);

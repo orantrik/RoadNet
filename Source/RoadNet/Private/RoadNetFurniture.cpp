@@ -212,8 +212,8 @@ void URoadNetwork::CommitFurniture(FRoadNetRebuildContext& Ctx)
 		{
 			for (const FTransform& X : Bucket.Instances)
 			{
-				const FIntPoint Coord = TileOf(X.GetLocation());
-				if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
+				const FIntPoint Coord = TopoKeyOf(X.GetLocation(), Ctx);
+				if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
 				ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
 				if (!Tile) { continue; }
 
@@ -251,8 +251,8 @@ void URoadNetwork::CommitFurniture(FRoadNetRebuildContext& Ctx)
 
 		for (const FTransform& X : Bucket.Instances)
 		{
-			const FIntPoint Coord = TileOf(X.GetLocation());
-			if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
+			const FIntPoint Coord = TopoKeyOf(X.GetLocation(), Ctx);
+			if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
 			ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
 			if (!Tile) { continue; }
 			UHierarchicalInstancedStaticMeshComponent* H = Tile->GetOrCreateHISM(HISMKey, Mesh);

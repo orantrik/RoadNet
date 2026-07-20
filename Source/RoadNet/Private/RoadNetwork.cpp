@@ -116,11 +116,6 @@ const FGuid& URoadNetwork::EnsureNetworkId()
 	return NetworkId;
 }
 
-FIntPoint URoadNetwork::TileOf(const FVector& WorldPos) const
-{
-	return RoadNetTiles::WorldToTile(WorldPos, TileSizeCm);
-}
-
 void URoadNetwork::EnsureTileRegistry()
 {
 	if (bTileRegistryLoaded) { return; }
@@ -163,10 +158,667 @@ ARoadNetTileActor* URoadNetwork::GetOrCreateTile(const FIntPoint& Coord)
 	if (!Tile) { return nullptr; }
 	Tile->Configure(Coord, TileSizeCm, EnsureNetworkId());
 #if WITH_EDITOR
-	Tile->SetActorLabel(FString::Printf(TEXT("RoadNet_Tile_%d_%d"), Coord.X, Coord.Y));
+	Tile->SetActorLabel(Coord.Y == kJunKind
+		? FString::Printf(TEXT("RoadNet_Jct_%d"), Coord.X)
+		: FString::Printf(TEXT("RoadNet_Seg_%d"), Coord.X));
 #endif
 	TileActors.Add(Coord, Tile);
 	return Tile;
+}
+
+FIntPoint URoadNetwork::SegTileKey(const FGuid& RoadId, int32 Arm)
+{
+	TPair<FGuid, int32> K(RoadId, FMath::Max(0, Arm));
+	// Divided-road pairing: redirect a member carriageway to its pair's canonical
+	// key so both carriageways (and their median) land on ONE tile.
+	if (const TPair<FGuid, int32>* Canon = SegAlias.Find(K)) { K = *Canon; }
+	if (const int32* Found = SegKeyOf.Find(K)) { return FIntPoint(*Found, kSegKind); }
+	const int32 Id = NextSegId++;
+	SegKeyOf.Add(K, Id);
+	return FIntPoint(Id, kSegKind);
+}
+
+FIntPoint URoadNetwork::JunTileKey(const FVector2D& CentreCm)
+{
+	// ponytail: quantise the junction centroid to an 8 m grid with a 1-cell
+	// neighbour search, so a centroid that drifts across a cell border between
+	// windowed rebuilds keeps its id. Ceiling: two junctions closer than ~8 m
+	// share a tile (they are usually one merged clip poly anyway). Upgrade path =
+	// match by nearest stored centre within a tolerance.
+	constexpr double Q = 800.0;
+	const FIntPoint Cell(FMath::RoundToInt(CentreCm.X / Q), FMath::RoundToInt(CentreCm.Y / Q));
+	for (int32 dy = -1; dy <= 1; ++dy)
+	{
+		for (int32 dx = -1; dx <= 1; ++dx)
+		{
+			if (const int32* Found = JunKeyOf.Find(FIntPoint(Cell.X + dx, Cell.Y + dy)))
+			{
+				return FIntPoint(*Found, kJunKind);
+			}
+		}
+	}
+	const int32 Id = NextJunId++;
+	JunKeyOf.Add(Cell, Id);
+	return FIntPoint(Id, kJunKind);
+}
+
+FIntPoint URoadNetwork::TopoKeyOf(const FVector& WorldPos, const FRoadNetRebuildContext& Ctx)
+{
+	using namespace UE::Geometry;
+	const FVector2D P2(WorldPos.X, WorldPos.Y);
+
+	// Inside a junction CARVE region? -> that junction tile (bbox pre-filter).
+	for (const FRoadNetRebuildContext::FTopoJunctionRegion& JR : Ctx.TopoJunctions)
+	{
+		if (!JR.Box.bIsValid || !JR.Box.IsInside(P2)) { continue; }
+		if (!Ctx.ZoneJunctionCarve.IsValidIndex(JR.Zone) ||
+			!Ctx.ZoneJunctionCarve[JR.Zone].IsValidIndex(JR.Index)) { continue; }
+		if (Ctx.ZoneJunctionCarve[JR.Zone][JR.Index].Contains(FVector2d(P2.X, P2.Y)))
+		{
+			return JR.Key;
+		}
+	}
+
+	// else nearest road centreline -> its segment tile. Use the coarse sample
+	// grid (3x3 neighbourhood) as a broadphase; fall back to a full scan only if
+	// the neighbourhood is empty.
+	constexpr double CellCm = 2000.0;
+	const FIntPoint Home(FMath::FloorToInt(P2.X / CellCm), FMath::FloorToInt(P2.Y / CellCm));
+	int32 Best = INDEX_NONE;
+	int32 BestSeg = INDEX_NONE;
+	double BestD = TNumericLimits<double>::Max();
+	auto Consider = [&](int32 r)
+	{
+		const FRoadCurves* C = Ctx.Curves.Find(r);
+		if (!C || C->Sampled.Num() < 2) { return; }
+		const RoadNetMath::FProjectResult PR = RoadNetMath::ProjectToPolyline(C->Sampled, P2);
+		if (PR.Distance < BestD) { BestD = PR.Distance; Best = r; BestSeg = PR.Segment; }
+	};
+	TSet<int32> Seen;
+	for (int32 dy = -1; dy <= 1; ++dy)
+	{
+		for (int32 dx = -1; dx <= 1; ++dx)
+		{
+			if (const TArray<int32>* Cands = Ctx.RoadSampleGrid.Find(FIntPoint(Home.X + dx, Home.Y + dy)))
+			{
+				for (int32 r : *Cands) { if (!Seen.Contains(r)) { Seen.Add(r); Consider(r); } }
+			}
+		}
+	}
+	if (Best == INDEX_NONE)
+	{
+		for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves) { Consider(KV.Key); }
+	}
+	if (Best != INDEX_NONE && Roads.IsValidIndex(Best) && Roads[Best].Id.IsValid())
+	{
+		// Which ARM of the road: the segment the point projects onto tells us its
+		// inter-junction stretch, so a road crossing a junction lands on a distinct
+		// tile on each side. If the projected segment is inside a junction (arm
+		// -1), borrow the nearest surrounding arm so the point still lands on a
+		// real segment tile.
+		int32 Arm = 0;
+		if (const TArray<int32>* Arms = Ctx.RoadSampleArm.Find(Best))
+		{
+			if (Arms->Num() > 0)
+			{
+				const int32 Si = FMath::Clamp(BestSeg, 0, Arms->Num() - 1);
+				Arm = (*Arms)[Si];
+				if (Arm < 0)
+				{
+					for (int32 d = 1; d < Arms->Num(); ++d)
+					{
+						if (Arms->IsValidIndex(Si - d) && (*Arms)[Si - d] >= 0) { Arm = (*Arms)[Si - d]; break; }
+						if (Arms->IsValidIndex(Si + d) && (*Arms)[Si + d] >= 0) { Arm = (*Arms)[Si + d]; break; }
+					}
+					if (Arm < 0) { Arm = 0; }
+				}
+			}
+		}
+		return SegTileKey(Roads[Best].Id, Arm);
+	}
+	return FIntPoint(INDEX_NONE, kSegKind);
+}
+
+void URoadNetwork::BuildTopoAccel(FRoadNetRebuildContext& Ctx)
+{
+	using namespace UE::Geometry;
+	Ctx.TopoJunctions.Reset();
+	Ctx.RoadSampleGrid.Reset();
+
+	// Grow each junction clip outward by the zone's sidewalk width (+margin) into
+	// the CARVE region. The raw clip only covers the carriageway overlap, so a
+	// road's sidewalk (which sits OUTSIDE the carriageway) never crosses it and
+	// rides through the junction uncut — that's why the tile spanned the junction.
+	// The carve reaches across the sidewalk band so surface AND sidewalk both
+	// break at the junction. Tiles are cut/keyed against the carve below.
+	Ctx.ZoneJunctionCarve.Reset();
+	Ctx.ZoneJunctionCarve.SetNum(Ctx.ZoneJunctionClip.Num());
+
+	// Junction DISC points per zone (centre + radius). The carriageway-overlap
+	// clip only bites the EDGE of a through road at a T, so the through road's
+	// centreline never enters it and rides across the junction uncut. A disc at
+	// the junction POINT (which lies on the through-road centreline) spans the
+	// road's width, so EVERY road through the junction gets carved → cut into two
+	// segments. Same junctions the surface fills: same-grade crossings + N-way
+	// (>=3 arm) joints. Grade-separated crossings (overpasses) are skipped so a
+	// bridge is not sliced. 2-arm joints (continuations/seams) are NOT cut.
+	const int32 NZ = Ctx.ZoneJunctionClip.Num();
+	auto HalfW = [this](int32 r) -> double
+	{
+		return Roads.IsValidIndex(r) ? FMath::Max(50.0, (double)Roads[r].Lanes.HalfWidthCm()) : 50.0;
+	};
+	TMap<int32, int32> RoadZone;
+	TArray<double> ZoneMaxSw; ZoneMaxSw.SetNumZeroed(NZ);
+	for (int32 z = 0; z < Ctx.Zones.Num(); ++z)
+	{
+		for (int32 r : Ctx.Zones[z])
+		{
+			RoadZone.FindOrAdd(r) = z;
+			if (z < NZ && Roads.IsValidIndex(r)) { ZoneMaxSw[z] = FMath::Max(ZoneMaxSw[z], (double)Roads[r].Lanes.SidewalkWidth); }
+		}
+	}
+	TArray<TArray<TPair<FVector2D, double>>> ZonePts; ZonePts.SetNum(NZ);
+	auto AddPt = [&ZonePts](int32 z, const FVector2D& P, double R)
+	{
+		if (!ZonePts.IsValidIndex(z)) { return; }
+		for (TPair<FVector2D, double>& E : ZonePts[z])
+		{
+			if (FVector2D::DistSquared(E.Key, P) < FMath::Square(0.5 * FMath::Max(E.Value, R)))
+			{
+				E.Value = FMath::Max(E.Value, R); return;
+			}
+		}
+		ZonePts[z].Emplace(P, R);
+	};
+	for (const FRoadNetCrossing& X : Ctx.Crossings)
+	{
+		const int32* za = RoadZone.Find(X.RoadA);
+		if (!za) { continue; }
+		if (RoadZone.FindRef(X.RoadB, -1) != *za) { continue; }
+		if (FMath::Abs(X.Za - X.Zb) > 300.0) { continue; }   // overpass: not a junction
+		const double SwA = ZoneMaxSw.IsValidIndex(*za) ? ZoneMaxSw[*za] : 0.0;
+		AddPt(*za, X.Point, FMath::Max(HalfW(X.RoadA), HalfW(X.RoadB)) + SwA + 150.0);
+	}
+	for (const FRoadNetJoint& J : Ctx.Joints)
+	{
+		if (J.Arms.Num() < 3) { continue; }              // N-way only; 2-arm = continuation
+		int32 z = INDEX_NONE; double MaxHalf = 0.0;
+		for (const TPair<int32, bool>& A : J.Arms)
+		{
+			const int32* zz = RoadZone.Find(A.Key);
+			if (!zz) { continue; }
+			if (z == INDEX_NONE) { z = *zz; }
+			if (*zz == z) { MaxHalf = FMath::Max(MaxHalf, HalfW(A.Key)); }
+		}
+		if (z == INDEX_NONE) { continue; }
+		AddPt(z, J.Location, MaxHalf + (ZoneMaxSw.IsValidIndex(z) ? ZoneMaxSw[z] : 0.0) + 150.0);
+	}
+
+	for (int32 z = 0; z < NZ; ++z)
+	{
+		// (1) dilate the carriageway-overlap clip out across the sidewalk band.
+		TArray<FGeneralPolygon2d> Carve;
+		if (Ctx.ZoneJunctionClip[z].Num() > 0)
+		{
+			const double Grow = ZoneMaxSw[z] + 150.0;
+			TArray<FGeneralPolygon2d> Dil;
+			if (Grow > 1.0 && PolygonsOffset(Grow, Ctx.ZoneJunctionClip[z], Dil, /*bCopyInputOnFailure*/true,
+					/*MiterLimit*/2.0, EPolygonOffsetJoinType::Round, EPolygonOffsetEndType::Polygon,
+					/*MaxStepsPerRadian*/16.0, /*DefaultStepsPerRadianScale*/1.0e-3) && Dil.Num() > 0)
+			{
+				Carve = MoveTemp(Dil);
+			}
+			else { Carve = Ctx.ZoneJunctionClip[z]; }
+		}
+
+		// (2) add the junction discs so through-roads break too, unioned into the
+		// clip so each junction stays ONE region (one junction tile).
+		if (ZonePts.IsValidIndex(z) && ZonePts[z].Num() > 0)
+		{
+			TArray<FGeneralPolygon2d> Discs;
+			for (const TPair<FVector2D, double>& E : ZonePts[z])
+			{
+				FGeneralPolygon2d D;
+				RoadNetSurface::MakeDisc(E.Key, E.Value, /*Segments*/32, D);
+				if (D.GetOuter().VertexCount() >= 3) { Discs.Add(MoveTemp(D)); }
+			}
+			if (Discs.Num() > 0)
+			{
+				TArray<FGeneralPolygon2d> Both = Carve; Both.Append(Discs);
+				TArray<FGeneralPolygon2d> U;
+				if (PolygonsUnion(Both, U, /*bCopyInputOnFailure*/true) && U.Num() > 0) { Carve = MoveTemp(U); }
+				else { Carve.Append(Discs); }
+			}
+		}
+
+		Ctx.ZoneJunctionCarve[z] = MoveTemp(Carve);
+	}
+
+	// Flat junction-region list (one entry per CARVE poly) with bbox + stable key.
+	for (int32 z = 0; z < Ctx.ZoneJunctionCarve.Num(); ++z)
+	{
+		for (int32 i = 0; i < Ctx.ZoneJunctionCarve[z].Num(); ++i)
+		{
+			const TArray<FVector2d>& OV = Ctx.ZoneJunctionCarve[z][i].GetOuter().GetVertices();
+			if (OV.Num() < 3) { continue; }
+			FVector2D C(0, 0);
+			FBox2D Box(ForceInit);
+			for (const FVector2d& V : OV) { C += FVector2D(V.X, V.Y); Box += FVector2D(V.X, V.Y); }
+			C /= (double)OV.Num();
+			FRoadNetRebuildContext::FTopoJunctionRegion JR;
+			JR.Box = Box;
+			JR.Key = JunTileKey(C);
+			JR.Zone = z;
+			JR.Index = i;
+			Ctx.TopoJunctions.Add(JR);
+		}
+	}
+
+	// Coarse sample grid: mark every cell a road's sampled centreline passes
+	// through, so point->segment lookups only test nearby roads.
+	constexpr double CellCm = 2000.0;
+	for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+	{
+		const TArray<FVector>& S = KV.Value.Sampled;
+		for (const FVector& P : S)
+		{
+			const FIntPoint Cell(FMath::FloorToInt(P.X / CellCm), FMath::FloorToInt(P.Y / CellCm));
+			Ctx.RoadSampleGrid.FindOrAdd(Cell).AddUnique(KV.Key);
+		}
+	}
+
+	// Per-road arm index of each centreline sample: walk the sampled polyline and
+	// bump the arm counter every time it LEAVES a junction clip, so each stretch
+	// between two junctions is a distinct arm (samples inside a junction get -1).
+	// This is the "cut at the junction" — a road passing through a junction is
+	// two arms → two segment tiles.
+	Ctx.RoadSampleArm.Reset();
+	auto InAnyJct = [&Ctx](const FVector& P) -> bool
+	{
+		const FVector2D P2(P.X, P.Y);
+		for (const FRoadNetRebuildContext::FTopoJunctionRegion& JR : Ctx.TopoJunctions)
+		{
+			if (!JR.Box.bIsValid || !JR.Box.IsInside(P2)) { continue; }
+			if (!Ctx.ZoneJunctionCarve.IsValidIndex(JR.Zone) ||
+				!Ctx.ZoneJunctionCarve[JR.Zone].IsValidIndex(JR.Index)) { continue; }
+			if (Ctx.ZoneJunctionCarve[JR.Zone][JR.Index].Contains(FVector2d(P2.X, P2.Y))) { return true; }
+		}
+		return false;
+	};
+	for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+	{
+		const TArray<FVector>& S = KV.Value.Sampled;
+		TArray<int32> Arm;
+		Arm.SetNumUninitialized(S.Num());
+		int32 Cur = -1;
+		bool bPrevInside = true;   // so the first outside sample opens arm 0
+		for (int32 i = 0; i < S.Num(); ++i)
+		{
+			if (InAnyJct(S[i])) { Arm[i] = -1; bPrevInside = true; }
+			else { if (bPrevInside) { ++Cur; } Arm[i] = Cur; bPrevInside = false; }
+		}
+		Ctx.RoadSampleArm.Add(KV.Key, MoveTemp(Arm));
+	}
+
+	// Contiguous arm RUNS per road (index == arm value): a maximal span of samples
+	// sharing one arm>=0. These are the inter-junction stretches each segment tile
+	// is built from (cross-section + splines) and the units divided pairing works
+	// on. Arm values are 0,1,2,... in order, so the run list is naturally indexed
+	// by arm value.
+	Ctx.RoadArmRuns.Reset();
+	for (const TPair<int32, TArray<int32>>& KV : Ctx.RoadSampleArm)
+	{
+		const TArray<int32>& Arm = KV.Value;
+		TArray<TPair<int32, int32>> Runs;
+		int32 i = 0;
+		while (i < Arm.Num())
+		{
+			if (Arm[i] < 0) { ++i; continue; }
+			const int32 Av = Arm[i];
+			int32 j = i;
+			while (j + 1 < Arm.Num() && Arm[j + 1] == Av) { ++j; }
+			// index in Runs must equal the arm value; arms are contiguous so this
+			// holds, but guard against any gap by padding.
+			while (Runs.Num() < Av) { Runs.Add(TPair<int32, int32>(-1, -1)); }
+			Runs.Add(TPair<int32, int32>(i, j));
+			i = j + 1;
+		}
+		Ctx.RoadArmRuns.Add(KV.Key, MoveTemp(Runs));
+	}
+}
+
+void URoadNetwork::BuildDividedPairs(FRoadNetRebuildContext& Ctx)
+{
+	SegAlias.Reset();
+	if (!bPairDividedRoads) { return; }
+
+	// One record per one-way arm: mid-point, unit travel direction and the road's
+	// half carriageway width, so we can test "opposite, parallel, side-by-side".
+	struct FArmRec
+	{
+		int32 Road = INDEX_NONE;
+		int32 Arm = 0;
+		FGuid Id;
+		FVector2D Mid = FVector2D::ZeroVector;
+		FVector2D Dir = FVector2D(1, 0);   // unit start->end of the run
+		double Half = 0.0;
+		bool bTaken = false;
+	};
+
+	TArray<FArmRec> Arms;
+	for (const TPair<int32, TArray<TPair<int32, int32>>>& KV : Ctx.RoadArmRuns)
+	{
+		const int32 r = KV.Key;
+		if (!Roads.IsValidIndex(r) || !Roads[r].Id.IsValid()) { continue; }
+		if (!Roads[r].Lanes.bOneway) { continue; }   // divided carriageways are one-way
+		const FRoadCurves* C = Ctx.Curves.Find(r);
+		if (!C) { continue; }
+		const double Half = FMath::Max(50.0, (double)Roads[r].Lanes.HalfWidthCm());
+		for (int32 av = 0; av < KV.Value.Num(); ++av)
+		{
+			const TPair<int32, int32>& Run = KV.Value[av];
+			if (Run.Key < 0 || Run.Value <= Run.Key || !C->Sampled.IsValidIndex(Run.Value)) { continue; }
+			const FVector A = C->Sampled[Run.Key];
+			const FVector B = C->Sampled[Run.Value];
+			FVector2D Dir(B.X - A.X, B.Y - A.Y);
+			if (!Dir.Normalize()) { continue; }
+			FArmRec Rec;
+			Rec.Road = r; Rec.Arm = av; Rec.Id = Roads[r].Id;
+			Rec.Mid = FVector2D(0.5 * (A.X + B.X), 0.5 * (A.Y + B.Y));
+			Rec.Dir = Dir; Rec.Half = Half;
+			Arms.Add(Rec);
+		}
+	}
+
+	int32 Pairs = 0;
+	const double MaxGap = FMath::Max(200.0, DividedRoadMaxGapCm);
+	for (int32 a = 0; a < Arms.Num(); ++a)
+	{
+		if (Arms[a].bTaken) { continue; }
+		int32 Best = INDEX_NONE;
+		double BestScore = TNumericLimits<double>::Max();
+		for (int32 b = a + 1; b < Arms.Num(); ++b)
+		{
+			if (Arms[b].bTaken || Arms[b].Road == Arms[a].Road) { continue; }
+			// Opposite travel direction (divided carriageways run against each other).
+			if (FVector2D::DotProduct(Arms[a].Dir, Arms[b].Dir) > -0.6) { continue; }
+			// Side-by-side: lateral gap in (touching, MaxGap]; the midpoints must sit
+			// roughly abeam (small longitudinal offset) so we don't pair end-to-end.
+			const FVector2D D = Arms[b].Mid - Arms[a].Mid;
+			const FVector2D Perp(-Arms[a].Dir.Y, Arms[a].Dir.X);
+			const double Lat = FMath::Abs(FVector2D::DotProduct(D, Perp));
+			const double Lon = FMath::Abs(FVector2D::DotProduct(D, Arms[a].Dir));
+			const double MinLat = 0.5 * (Arms[a].Half + Arms[b].Half);
+			if (Lat < MinLat || Lat > MaxGap) { continue; }
+			if (Lon > MaxGap) { continue; }     // must be abeam, not sequential
+			const double Score = Lat + 0.25 * Lon;
+			if (Score < BestScore) { BestScore = Score; Best = b; }
+		}
+		if (Best == INDEX_NONE) { continue; }
+
+		// Canonicalise to the smaller road index (deterministic within a rebuild;
+		// the two are never the same road) so both members resolve identically
+		// regardless of iteration order.
+		FArmRec& A = Arms[a];
+		FArmRec& Bx = Arms[Best];
+		const TPair<FGuid, int32> KA(A.Id, A.Arm);
+		const TPair<FGuid, int32> KB(Bx.Id, Bx.Arm);
+		const TPair<FGuid, int32> Canon = (A.Road < Bx.Road) ? KA : KB;
+		SegAlias.Add(KA, Canon);
+		SegAlias.Add(KB, Canon);
+		A.bTaken = Bx.bTaken = true;
+		++Pairs;
+		UE_LOG(LogRoadNet, Log,
+			TEXT("[RoadNet][Divided] paired road %d arm %d <-> road %d arm %d (score=%.0f cm)."),
+			A.Road, A.Arm, Bx.Road, Bx.Arm, BestScore);
+	}
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet][Divided] %d carriageway pair(s) merged into shared tiles (of %d one-way arms)."),
+		Pairs, Arms.Num());
+}
+
+void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
+{
+	using namespace UE::Geometry;
+
+	// § tiling v2 — OWNERSHIP BY CONSTRUCTION. Two days of routing heuristics
+	// (centroid, nearest-vertex, majority vote, medial cuts) all failed the same
+	// way: once roads are boolean-merged the geometry is anonymous, and ANY
+	// post-hoc spatial guess has a counterexample (a parallel neighbour steals a
+	// sidewalk). Here each segment tile's polygons are GENERATED from that arm
+	// run's own centreline slice and bucketed under their tile key at creation —
+	// there is no assignment step left to get wrong.
+	TArray<TMap<FIntPoint, TArray<FGeneralPolygon2d>>>& Surf =
+		Ctx.ZoneTileLayers.FindOrAdd(FName(TEXT("Surface")));
+	TArray<TMap<FIntPoint, TArray<FGeneralPolygon2d>>>& Walk =
+		Ctx.ZoneTileLayers.FindOrAdd(FName(TEXT("Sidewalks")));
+	const int32 NZ = Ctx.Zones.Num();
+	Surf.Reset(); Surf.SetNum(NZ);
+	Walk.Reset(); Walk.SetNum(NZ);
+
+	auto BoxOf = [](const FGeneralPolygon2d& GP) -> FBox2D
+	{
+		FBox2D B(ForceInit);
+		for (const FVector2d& V : GP.GetOuter().GetVertices()) { B += FVector2D(V.X, V.Y); }
+		return B;
+	};
+
+	// Both-sides self-check bookkeeping: bit 1 = left walk emitted, bit 2 = right.
+	TMap<TPair<int32, int32>, uint8> SideSeen;
+	int32 ArmsChecked = 0, OneSided = 0;
+
+	for (int32 z = 0; z < NZ; ++z)
+	{
+		const TArray<FGeneralPolygon2d> Empty;
+		const TArray<FGeneralPolygon2d>& Merged = Ctx.ZoneSurfacePolys.IsValidIndex(z) ? Ctx.ZoneSurfacePolys[z] : Empty;
+		const TArray<FGeneralPolygon2d>& Band   = Ctx.ZoneSidewalkPolys.IsValidIndex(z) ? Ctx.ZoneSidewalkPolys[z] : Empty;
+		const TArray<FGeneralPolygon2d>& Carve  = Ctx.ZoneJunctionCarve.IsValidIndex(z) ? Ctx.ZoneJunctionCarve[z] : Empty;
+		if (Merged.Num() == 0 && Band.Num() == 0) { continue; }
+
+		// ---- junction tiles: everything inside the carve, cut from the SAME
+		// merged surface / band the segments are cut from → seams line up exactly.
+		for (const FGeneralPolygon2d& CP : Carve)
+		{
+			const TArray<FVector2d>& OV = CP.GetOuter().GetVertices();
+			if (OV.Num() < 3) { continue; }
+			FVector2D C(0, 0);
+			for (const FVector2d& V : OV) { C += FVector2D(V.X, V.Y); }
+			C /= (double)OV.Num();
+			const FIntPoint JKey = JunTileKey(C);
+			const TArray<FGeneralPolygon2d> CPArr = { CP };
+			TArray<FGeneralPolygon2d> Piece;
+			if (Merged.Num() > 0 && PolygonsIntersection(Merged, CPArr, Piece) && Piece.Num() > 0)
+			{
+				Surf[z].FindOrAdd(JKey).Append(MoveTemp(Piece));
+			}
+			TArray<FGeneralPolygon2d> WPiece;
+			if (Band.Num() > 0 && PolygonsIntersection(Band, CPArr, WPiece) && WPiece.Num() > 0)
+			{
+				Walk[z].FindOrAdd(JKey).Append(MoveTemp(WPiece));
+			}
+		}
+
+		// ---- segment tiles: one bucket per (road, arm run), alias-resolved so a
+		// divided pair shares a tile. Deterministic emission order (road index,
+		// arm index) + subtract-what-was-already-emitted resolves any physical
+		// overlap (continuation seams, fused parallel walk strips) without theft:
+		// a road always keeps the part bordering its own carriageway.
+		TArray<FGeneralPolygon2d> SurfEmitted; TArray<FBox2D> SurfBoxes;
+		TArray<FGeneralPolygon2d> WalkEmitted; TArray<FBox2D> WalkBoxes;
+
+		// Subtract earlier emissions that bbox-overlap, then append + bucket.
+		auto EmitPieces = [&](TArray<FGeneralPolygon2d>&& Pieces,
+			TArray<FGeneralPolygon2d>& Emitted, TArray<FBox2D>& Boxes,
+			TMap<FIntPoint, TArray<FGeneralPolygon2d>>& Buckets, const FIntPoint& Key) -> bool
+		{
+			if (Pieces.Num() == 0) { return false; }
+			FBox2D PB(ForceInit);
+			for (const FGeneralPolygon2d& GP : Pieces) { PB += BoxOf(GP); }
+			TArray<FGeneralPolygon2d> Prior;
+			for (int32 i = 0; i < Emitted.Num(); ++i)
+			{
+				if (Boxes[i].bIsValid && PB.bIsValid && Boxes[i].Intersect(PB)) { Prior.Add(Emitted[i]); }
+			}
+			if (Prior.Num() > 0)
+			{
+				TArray<FGeneralPolygon2d> Cut;
+				if (RoadNetSurface::Difference(Pieces, Prior, Cut)) { Pieces = MoveTemp(Cut); }
+			}
+			if (Pieces.Num() == 0) { return false; }
+			for (const FGeneralPolygon2d& GP : Pieces)
+			{
+				Emitted.Add(GP);
+				Boxes.Add(BoxOf(GP));
+			}
+			Buckets.FindOrAdd(Key).Append(MoveTemp(Pieces));
+			return true;
+		};
+
+		for (int32 r : Ctx.Zones[z])
+		{
+			if (!Roads.IsValidIndex(r) || !Roads[r].Id.IsValid()) { continue; }
+			const FRoadCurves* C = Ctx.Curves.Find(r);
+			const TArray<TPair<int32, int32>>* Runs = Ctx.RoadArmRuns.Find(r);
+			if (!C || !Runs || C->Sampled.Num() < 2) { continue; }
+			const int32 N = C->Sampled.Num();
+			const bool bEdges = (C->LeftEdge.Num() == N && C->RightEdge.Num() == N);
+			const FRoadNetLaneSpec& L = Roads[r].Lanes;
+			const double Half = FMath::Max(50.0, (double)L.HalfWidthCm());
+			const double SwW = (double)L.SidewalkWidth;
+			const double SwIn  = FMath::Max(1.0, Half - 30.0);
+			const double SwOut = Half + SwW + 60.0;
+
+			for (int32 av = 0; av < Runs->Num(); ++av)
+			{
+				const TPair<int32, int32>& Run = (*Runs)[av];
+				if (Run.Key < 0 || Run.Value <= Run.Key || Run.Value >= N) { continue; }
+				// Pad one sample past each end so the slice's caps land INSIDE the
+				// junction carve; subtracting the carve then trims to the exact
+				// boundary (no hairline gap at the cut).
+				const int32 Lo = FMath::Max(0, Run.Key - 1);
+				const int32 Hi = FMath::Min(N - 1, Run.Value + 1);
+				TArray<FVector> Sub(&C->Sampled[Lo], Hi - Lo + 1);
+
+				const FIntPoint Key = SegTileKey(Roads[r].Id, av);
+				if (Key.X == INDEX_NONE) { continue; }
+
+				// Carriageway: this arm's own outline minus the junction carve.
+				FGeneralPolygon2d Outline;
+				bool bOutline = false;
+				if (bEdges)
+				{
+					FRoadCurves Slice;
+					Slice.Sampled  = Sub;
+					Slice.LeftEdge  = TArray<FVector>(&C->LeftEdge[Lo],  Hi - Lo + 1);
+					Slice.RightEdge = TArray<FVector>(&C->RightEdge[Lo], Hi - Lo + 1);
+					bOutline = RoadNetSurface::BuildRoadOutline(Slice, Outline);
+				}
+				if (!bOutline)
+				{
+					bOutline = RoadNetSurface::BuildSideRibbon(Sub, -Half, +Half, Outline);
+				}
+				if (bOutline)
+				{
+					TArray<FGeneralPolygon2d> Piece = { Outline };
+					if (Carve.Num() > 0)
+					{
+						TArray<FGeneralPolygon2d> Cut;
+						if (RoadNetSurface::Difference(Piece, Carve, Cut)) { Piece = MoveTemp(Cut); }
+					}
+					EmitPieces(MoveTemp(Piece), SurfEmitted, SurfBoxes, Surf[z], Key);
+				}
+
+				// Sidewalks: BOTH enabled sides from THIS arm's slice, clipped to
+				// the zone band (band already excludes every carriageway → no
+				// flaps) and cut at the carve. Emitted under the SAME key as the
+				// carriageway — theft is structurally impossible.
+				if (SwW > 0.0 && Band.Num() > 0)
+				{
+					auto EmitSide = [&](double InOff, double OutOff, uint8 SideBit)
+					{
+						FGeneralPolygon2d Ribbon;
+						if (!RoadNetSurface::BuildSideRibbon(Sub, InOff, OutOff, Ribbon)) { return; }
+						const TArray<FGeneralPolygon2d> RArr = { Ribbon };
+						TArray<FGeneralPolygon2d> Piece;
+						if (!PolygonsIntersection(Band, RArr, Piece) || Piece.Num() == 0) { return; }
+						if (Carve.Num() > 0)
+						{
+							TArray<FGeneralPolygon2d> Cut;
+							if (RoadNetSurface::Difference(Piece, Carve, Cut)) { Piece = MoveTemp(Cut); }
+						}
+						if (EmitPieces(MoveTemp(Piece), WalkEmitted, WalkBoxes, Walk[z], Key))
+						{
+							SideSeen.FindOrAdd(TPair<int32, int32>(r, av)) |= SideBit;
+						}
+					};
+					if (L.bSidewalkLeft)  { EmitSide(+SwIn, +SwOut, 1); }
+					if (L.bSidewalkRight) { EmitSide(-SwIn, -SwOut, 2); }
+				}
+			}
+		}
+
+		// ---- residual sweep: what generation didn't cover — junction blend fill
+		// outside the carve (2-arm continuation welds) and band end-caps at dead
+		// ends. These are slivers ON a road/seam, so the point resolver is exact
+		// for them (the failure mode was OFFSET geometry, which no longer gets
+		// here). Without this sweep the welds would be visible holes.
+		auto SweepResidual = [&](const TArray<FGeneralPolygon2d>& Source,
+			const TArray<FGeneralPolygon2d>& Emitted,
+			TMap<FIntPoint, TArray<FGeneralPolygon2d>>& Buckets)
+		{
+			if (Source.Num() == 0) { return; }
+			TArray<FGeneralPolygon2d> Residual = Source;
+			if (Carve.Num() > 0)
+			{
+				TArray<FGeneralPolygon2d> Cut;
+				if (RoadNetSurface::Difference(Residual, Carve, Cut)) { Residual = MoveTemp(Cut); }
+			}
+			if (Emitted.Num() > 0 && Residual.Num() > 0)
+			{
+				TArray<FGeneralPolygon2d> Cut;
+				if (RoadNetSurface::Difference(Residual, Emitted, Cut)) { Residual = MoveTemp(Cut); }
+			}
+			for (FGeneralPolygon2d& GP : Residual)
+			{
+				const TArray<FVector2d>& OV = GP.GetOuter().GetVertices();
+				if (OV.Num() < 3) { continue; }
+				// Boolean noise along coincident edges (raw outline vs merged
+				// boundary) makes hairline slivers — drop them; keep real blend
+				// fills (weld discs, band end-caps), which are far larger.
+				if (FMath::Abs(GP.GetOuter().SignedArea()) < 500.0) { continue; }
+				FVector2D PC(0, 0);
+				for (const FVector2d& V : OV) { PC += FVector2D(V.X, V.Y); }
+				PC /= (double)OV.Num();
+				const FIntPoint Key = TopoKeyOf(FVector(PC.X, PC.Y, 0.0), Ctx);
+				if (Key.X == INDEX_NONE) { continue; }
+				Buckets.FindOrAdd(Key).Add(MoveTemp(GP));
+			}
+		};
+		SweepResidual(Merged, SurfEmitted, Surf[z]);
+		SweepResidual(Band, WalkEmitted, Walk[z]);
+	}
+
+	// ---- both-sides self-check: the exact invariant every v1 attempt violated.
+	// A (road, arm) with BOTH sides enabled that emitted one walk but not the
+	// other is named loudly. (Zero-sided short stubs are legitimate — a run can
+	// sit entirely between two carves' band edges.)
+	for (const TPair<TPair<int32, int32>, uint8>& KV : SideSeen)
+	{
+		const int32 r = KV.Key.Key;
+		if (!Roads.IsValidIndex(r)) { continue; }
+		const FRoadNetLaneSpec& L = Roads[r].Lanes;
+		if (!L.bSidewalkLeft || !L.bSidewalkRight || L.SidewalkWidth <= 0.f) { continue; }
+		++ArmsChecked;
+		if (KV.Value != 3)
+		{
+			++OneSided;
+			UE_LOG(LogRoadNet, Warning,
+				TEXT("[RoadNet][TILECHK] road %d arm %d emitted only its %s sidewalk — other side missing from its tile."),
+				r, KV.Key.Value, (KV.Value & 1) ? TEXT("LEFT") : TEXT("RIGHT"));
+		}
+	}
+	UE_LOG(LogRoadNet, Log,
+		TEXT("[RoadNet][TILECHK] tile partition: %d arm(s) with both walks checked, %d one-sided (expected 0)."),
+		ArmsChecked, OneSided);
 }
 
 void URoadNetwork::RetireAllTiles()
@@ -197,9 +849,12 @@ bool URoadNetwork::DeleteRoadPoint(int32 RoadIdx, int32 PointIdx, bool& bOutRoad
 	FRoadDef& R = Roads[RoadIdx];
 	if (!R.Ref.IsValidIndex(PointIdx)) { return false; }
 
+	const int32 RefBefore = R.Ref.Num();
 	R.Ref.RemoveAt(PointIdx);
 	if (R.Elev.IsValidIndex(PointIdx)) { R.Elev.RemoveAt(PointIdx); }
 	if (R.NodeIds.IsValidIndex(PointIdx)) { R.NodeIds.RemoveAt(PointIdx); }
+	UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] DeleteRoadPoint road=%d idx=%d: Ref %d -> %d"),
+		RoadIdx, PointIdx, RefBefore, R.Ref.Num());
 
 	if (R.Ref.Num() < 2)
 	{
@@ -207,6 +862,68 @@ bool URoadNetwork::DeleteRoadPoint(int32 RoadIdx, int32 PointIdx, bool& bOutRoad
 		bOutRoadRemoved = true;
 	}
 	return true;
+}
+
+int32 URoadNetwork::DeleteRoadPointsSplitting(int32 RoadIdx, const TArray<int32>& PointIdxToRemove)
+{
+	if (!Roads.IsValidIndex(RoadIdx)) { return 1; }
+	const FRoadDef Base = Roads[RoadIdx];   // template for the surviving pieces
+	const int32 N = Base.Ref.Num();
+
+	TSet<int32> Rem;
+	for (int32 p : PointIdxToRemove) { if (p >= 0 && p < N) { Rem.Add(p); } }
+	if (Rem.Num() == 0) { return 1; }
+
+	// Surviving indices split into runs of consecutive originals: a removed point
+	// between two survivors ends the current run, which is exactly the gap.
+	TArray<TArray<int32>> Runs;
+	TArray<int32> Cur;
+	for (int32 i = 0; i < N; ++i)
+	{
+		if (Rem.Contains(i)) { if (Cur.Num() > 0) { Runs.Add(MoveTemp(Cur)); Cur.Reset(); } continue; }
+		Cur.Add(i);
+	}
+	if (Cur.Num() > 0) { Runs.Add(MoveTemp(Cur)); }
+
+	auto SliceInto = [&Base](const TArray<int32>& Run) -> FRoadDef
+	{
+		FRoadDef Out = Base;                 // keep lanes / source / sidewalk / etc.
+		Out.Ref.Reset(); Out.Elev.Reset(); Out.NodeIds.Reset();
+		for (int32 idx : Run)
+		{
+			Out.Ref.Add(Base.Ref[idx]);
+			if (Base.Elev.IsValidIndex(idx))    { Out.Elev.Add(Base.Elev[idx]); }
+			if (Base.NodeIds.IsValidIndex(idx)) { Out.NodeIds.Add(Base.NodeIds[idx]); }
+		}
+		return Out;
+	};
+
+	TArray<FRoadDef> Pieces;
+	for (const TArray<int32>& Run : Runs)
+	{
+		if (Run.Num() >= 2) { Pieces.Add(SliceInto(Run)); }
+	}
+
+	if (Pieces.Num() == 0)
+	{
+		Roads.RemoveAt(RoadIdx);
+		UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] SplitDelete road=%d: no surviving run >=2 pts, road removed"), RoadIdx);
+		return 0;
+	}
+
+	// First piece keeps the original slot + Id (stable); extra runs become new
+	// roads with fresh Ids (indices only grow, so no cached index shifts down).
+	Pieces[0].Id = Base.Id;
+	Roads[RoadIdx] = Pieces[0];
+	for (int32 i = 1; i < Pieces.Num(); ++i)
+	{
+		FRoadDef P = Pieces[i];
+		P.Id = FGuid::NewGuid();
+		AddRoad(P);
+	}
+	UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] SplitDelete road=%d: %d pts removed -> %d piece(s) (%s)"),
+		RoadIdx, Rem.Num(), Pieces.Num(), Pieces.Num() > 1 ? TEXT("SPLIT with gap") : TEXT("trimmed"));
+	return Pieces.Num();
 }
 
 bool URoadNetwork::RemoveRoad(int32 RoadIdx)
@@ -681,6 +1398,140 @@ void URoadNetwork::SetAllSidewalkWidth(float WidthCm)
 	}
 }
 
+int32 URoadNetwork::SmoothAllRoads(float SimplifyTolCm, float CornerAngleDeg, float CornerMaxCutCm)
+{
+	const double Tol = FMath::Max(1.0, (double)SimplifyTolCm);
+	const double CosLimit = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(CornerAngleDeg, 1.f, 90.f)));
+	const double MaxCut = FMath::Max(50.0, (double)CornerMaxCutCm);
+
+	// Points that carry topology are untouchable: a node id shared with another
+	// road (or reused within one road, e.g. a loop) is a junction weld.
+	TMap<int64, int32> NodeUse;
+	for (const FRoadDef& R : Roads)
+	{
+		for (int64 Id : R.NodeIds) { if (Id >= 0) { NodeUse.FindOrAdd(Id)++; } }
+	}
+
+	// Iterative Ramer–Douglas–Peucker over Ref[A..B] (XY deviation), collecting
+	// KEPT indices so the parallel NodeIds/Elev arrays can follow.
+	auto RdpKeep = [Tol](const TArray<FVector>& P, int32 A, int32 B, TSet<int32>& Keep)
+	{
+		TArray<TPair<int32, int32>> Stack;
+		Stack.Emplace(A, B);
+		while (Stack.Num() > 0)
+		{
+			const TPair<int32, int32> Range = Stack.Pop();
+			const int32 Lo = Range.Key, Hi = Range.Value;
+			if (Hi - Lo < 2) { continue; }
+			const FVector2D S(P[Lo].X, P[Lo].Y), E(P[Hi].X, P[Hi].Y);
+			int32 Worst = INDEX_NONE;
+			double WorstD = Tol;
+			for (int32 i = Lo + 1; i < Hi; ++i)
+			{
+				double T;
+				const FVector2D Q(P[i].X, P[i].Y);
+				const FVector2D C = RoadNetMath::ClosestOnSegment(S, E, Q, T);
+				const double D = FVector2D::Distance(Q, C);
+				if (D > WorstD) { WorstD = D; Worst = i; }
+			}
+			if (Worst != INDEX_NONE)
+			{
+				Keep.Add(Worst);
+				Stack.Emplace(Lo, Worst);
+				Stack.Emplace(Worst, Hi);
+			}
+		}
+	};
+
+	int32 Changed = 0, PtsBefore = 0, PtsAfter = 0, Corners = 0;
+	for (FRoadDef& R : Roads)
+	{
+		const int32 N = R.Ref.Num();
+		if (N < 3) { continue; }
+		const bool bIds = (R.NodeIds.Num() == N);
+
+		auto IsProtected = [&](int32 i) -> bool
+		{
+			if (i == 0 || i == N - 1) { return true; }
+			if (!bIds) { return false; }
+			const int64 Id = R.NodeIds[i];
+			return Id >= 0 && NodeUse.FindRef(Id) >= 2;
+		};
+
+		// 1) simplify each span between protected anchors.
+		TSet<int32> Keep;
+		int32 Anchor = 0;
+		Keep.Add(0);
+		for (int32 i = 1; i < N; ++i)
+		{
+			if (!IsProtected(i)) { continue; }
+			Keep.Add(i);
+			RdpKeep(R.Ref, Anchor, i, Keep);
+			Anchor = i;
+		}
+		TArray<int32> Kept = Keep.Array();
+		Kept.Sort();
+
+		// 2) corner-cut kept UNPROTECTED points whose turn exceeds the limit:
+		// replace the corner with two points pulled toward its neighbours (the
+		// rebuild's G2 spline then rounds through the gap instead of kinking).
+		TArray<FVector> NewRef;
+		TArray<int64> NewIds;
+		NewRef.Reserve(Kept.Num() + 8);
+		NewIds.Reserve(Kept.Num() + 8);
+		for (int32 k = 0; k < Kept.Num(); ++k)
+		{
+			const int32 i = Kept[k];
+			const FVector P = R.Ref[i];
+			const int64 Id = bIds ? R.NodeIds[i] : (int64)-1;
+			bool bCut = false;
+			if (k > 0 && k < Kept.Num() - 1 && !IsProtected(i))
+			{
+				const FVector& Pv = R.Ref[Kept[k - 1]];
+				const FVector& Nx = R.Ref[Kept[k + 1]];
+				FVector2D A(P.X - Pv.X, P.Y - Pv.Y);
+				FVector2D B(Nx.X - P.X, Nx.Y - P.Y);
+				const double LA = A.Size(), LB = B.Size();
+				if (LA > 1.0 && LB > 1.0)
+				{
+					A /= LA; B /= LB;
+					if (FVector2D::DotProduct(A, B) < CosLimit)   // sharper than limit
+					{
+						const double CutA = FMath::Min(MaxCut, 0.35 * LA);
+						const double CutB = FMath::Min(MaxCut, 0.35 * LB);
+						NewRef.Add(P + (Pv - P).GetSafeNormal() * CutA);
+						NewIds.Add(-1);
+						NewRef.Add(P + (Nx - P).GetSafeNormal() * CutB);
+						NewIds.Add(-1);
+						++Corners;
+						bCut = true;
+					}
+				}
+			}
+			if (!bCut) { NewRef.Add(P); NewIds.Add(Id); }
+		}
+
+		if (NewRef.Num() < 2 || (NewRef.Num() == N && Corners == 0)) { continue; }
+		PtsBefore += N;
+		PtsAfter += NewRef.Num();
+		R.Ref = MoveTemp(NewRef);
+		if (bIds) { R.NodeIds = MoveTemp(NewIds); } else { R.NodeIds.Reset(); }
+		// Elev rides parallel to Ref (kept in sync by point edits) — rebuild it
+		// from the new points' Z so the arrays stay aligned.
+		if (R.Elev.Num() > 0)
+		{
+			R.Elev.SetNum(R.Ref.Num());
+			for (int32 i = 0; i < R.Ref.Num(); ++i) { R.Elev[i] = R.Ref[i].Z; }
+		}
+		++Changed;
+	}
+
+	UE_LOG(LogRoadNet, Log,
+		TEXT("[RoadNet] SmoothAllRoads: %d/%d road(s) simplified (%d -> %d pts, %d corner(s) rounded; tol %.0f cm, corner > %.0f deg)."),
+		Changed, Roads.Num(), PtsBefore, PtsAfter, Corners, Tol, CornerAngleDeg);
+	return Changed;
+}
+
 float URoadNetwork::AdjustSidewalkWidth(int32 RoadIdx, float DeltaCm)
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return 0.f; }
@@ -945,7 +1796,11 @@ void URoadNetwork::DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const
 	// An explicit dirty region (junction edit) is always a windowed commit — the
 	// caller has told us exactly which area changed, so never fall back to full
 	// just because every road was passed as "modified".
-	const bool bFull = !bWindowingEnabled ||
+	// Force a full rebuild when the topological id maps are empty (a fresh
+	// session / post-reload): a windowed edit would otherwise assign fresh
+	// segment/junction ids from 0 and collide with tile actors already loaded
+	// from the level. One full rebuild reassigns every id and recreates tiles.
+	const bool bFull = !bWindowingEnabled || SegKeyOf.Num() == 0 ||
 		(Ctx.Modified.Num() >= N && !Ctx.ExplicitDirtyBox.bIsValid);
 	if (bFull)
 	{
@@ -1957,23 +2812,6 @@ void URoadNetwork::RetireEmptyTiles(FRoadNetRebuildContext& Ctx)
 	for (const FIntPoint& C : ToRemove) { TileActors.Remove(C); }
 }
 
-// CCW world-space square polygon for grid cell Coord.
-static UE::Geometry::FGeneralPolygon2d MakeTileSquarePoly(const FIntPoint& Coord, double TileSizeCm)
-{
-	const FBox2D B = RoadNetTiles::TileBounds2D(Coord, TileSizeCm);
-	TArray<FVector2d> Loop;
-	Loop.Reserve(4);
-	Loop.Emplace(B.Min.X, B.Min.Y);
-	Loop.Emplace(B.Max.X, B.Min.Y);
-	Loop.Emplace(B.Max.X, B.Max.Y);
-	Loop.Emplace(B.Min.X, B.Max.Y);
-	UE::Geometry::FPolygon2d P(Loop);
-	if (P.IsClockwise()) { P.Reverse(); }
-	UE::Geometry::FGeneralPolygon2d G;
-	G.SetOuter(P);
-	return G;
-}
-
 int32 URoadNetwork::CommitLayer(
 	FName LayerName,
 	const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
@@ -2023,9 +2861,16 @@ int32 URoadNetwork::CommitLayer(
 	// leave those pointers dangling and crash the next append (SetTriangle).
 	TMap<FIntPoint, TUniquePtr<UE::Geometry::FDynamicMesh3>> TileMeshes;
 	int32 Tris = 0;
+	// § tiling v2: layers bucketed at generation (BuildTilePartition) consume
+	// their buckets directly — ownership was fixed at creation, nothing is
+	// re-assigned here. Remaining (on-road overlay) layers use the simple
+	// carve-cut + point-resolver fallback below.
+	TArray<TMap<FIntPoint, TArray<UE::Geometry::FGeneralPolygon2d>>>* PreBuckets =
+		Ctx.ZoneTileLayers.Find(LayerName);
 	for (int32 z = 0; z < ZonePolys.Num(); ++z)
 	{
-		if (ZonePolys[z].Num() == 0) { continue; }
+		const bool bBucketed = (PreBuckets && PreBuckets->IsValidIndex(z));
+		if (bBucketed ? ((*PreBuckets)[z].Num() == 0) : (ZonePolys[z].Num() == 0)) { continue; }
 
 		TArray<const TArray<FVector>*> CenterLines;
 		for (int32 RoadIdx : Ctx.Zones[z])
@@ -2064,43 +2909,81 @@ int32 URoadNetwork::CommitLayer(
 
 		const bool bZoneGround = bConformSurface && ZoneIsGround(z);
 
-		// Route each polygon to the cell(s) it covers. The common case — a small
-		// polygon (a marking dash, a stall stripe) whose bounding box fits inside
-		// ONE cell — is assigned directly with NO boolean clip. Only a polygon
-		// that genuinely straddles cell borders (the few large merged surface /
-		// sidewalk zone polys) pays for a Clipper intersection, and only against
-		// the cells it actually overlaps. This removes the O(polys x tiles)
-		// boolean storm that made markings dominate the commit stage.
+		// Fallback routing (on-road overlays only — markings/bike/parking/median):
+		// carve junction parts to the junction tile, then resolve each remaining
+		// piece by its centroid. Those pieces sit INSIDE one arm's carriageway, so
+		// the point lookup is containment, not a guess. Offset geometry (sidewalks)
+		// and the surface are bucketed at generation and never take this path.
+		auto Centroid2D = [](const UE::Geometry::FGeneralPolygon2d& GP, FVector2D& Out) -> bool
+		{
+			const TArray<FVector2d>& OV = GP.GetOuter().GetVertices();
+			if (OV.Num() < 3) { return false; }
+			FVector2D C(0, 0);
+			for (const FVector2d& V : OV) { C += FVector2D(V.X, V.Y); }
+			Out = C / (double)OV.Num();
+			return true;
+		};
+
+		// This zone's junction regions (bbox + stable key), for the cut. Uses the
+		// CARVE (sidewalk-spanning) region so the sidewalk breaks at the junction
+		// too, not just the carriageway.
+		struct FZoneJun { FBox2D Box = FBox2D(ForceInit); TArray<UE::Geometry::FGeneralPolygon2d> Poly; FIntPoint Key = FIntPoint(0, 0); };
+		TArray<FZoneJun> ZoneJuns;
+		if (Ctx.ZoneJunctionCarve.IsValidIndex(z))
+		{
+			for (const UE::Geometry::FGeneralPolygon2d& GP : Ctx.ZoneJunctionCarve[z])
+			{
+				FVector2D C;
+				if (!Centroid2D(GP, C)) { continue; }
+				FZoneJun J;
+				for (const FVector2d& V : GP.GetOuter().GetVertices()) { J.Box += FVector2D(V.X, V.Y); }
+				J.Poly = { GP };
+				J.Key = JunTileKey(C);
+				ZoneJuns.Add(MoveTemp(J));
+			}
+		}
+
 		TMap<FIntPoint, TArray<UE::Geometry::FGeneralPolygon2d>> ZoneTilePolys;
-		for (const UE::Geometry::FGeneralPolygon2d& GP : ZonePolys[z])
+		if (bBucketed)
+		{
+			// § tiling v2: consume the pre-bucketed tile map (built at generation
+			// with ownership fixed at creation), filtered to the commit window.
+			for (TPair<FIntPoint, TArray<UE::Geometry::FGeneralPolygon2d>>& KV : (*PreBuckets)[z])
+			{
+				if (KV.Value.Num() == 0 || !IsTileInCommitScope(KV.Key, Ctx)) { continue; }
+				ZoneTilePolys.Add(KV.Key, MoveTemp(KV.Value));
+			}
+		}
+		else for (const UE::Geometry::FGeneralPolygon2d& GP : ZonePolys[z])
 		{
 			FBox2D PB(ForceInit);
 			for (const FVector2d& V : GP.GetOuter().GetVertices()) { PB += FVector2D(V.X, V.Y); }
 			if (!PB.bIsValid) { continue; }
 
-			const FIntPoint Lo = RoadNetTiles::WorldToTile(PB.Min.X, PB.Min.Y, TileSizeCm);
-			const FIntPoint Hi = RoadNetTiles::WorldToTile(PB.Max.X, PB.Max.Y, TileSizeCm);
-			if (Lo == Hi)
+			// Carve the junction part(s) out (only junctions whose bbox overlaps).
+			TArray<UE::Geometry::FGeneralPolygon2d> Remainder = { GP };
+			for (const FZoneJun& J : ZoneJuns)
 			{
-				// Whole polygon lives in one cell — assign as-is (no clip).
-				if (IsTileInCommitScope(Lo, Ctx)) { ZoneTilePolys.FindOrAdd(Lo).Add(GP); }
-				continue;
-			}
-			// Straddles cell borders — clip to each overlapping in-scope cell.
-			for (int32 ty = Lo.Y; ty <= Hi.Y; ++ty)
-			{
-				for (int32 tx = Lo.X; tx <= Hi.X; ++tx)
+				if (Remainder.Num() == 0) { break; }
+				if (!J.Box.bIsValid || !J.Box.Intersect(PB)) { continue; }
+				TArray<UE::Geometry::FGeneralPolygon2d> Inter;
+				if (PolygonsIntersection(Remainder, J.Poly, Inter) && Inter.Num() > 0)
 				{
-					const FIntPoint Coord(tx, ty);
-					if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
-					const TArray<UE::Geometry::FGeneralPolygon2d> One = { GP };
-					const TArray<UE::Geometry::FGeneralPolygon2d> SquareArr = { MakeTileSquarePoly(Coord, TileSizeCm) };
-					TArray<UE::Geometry::FGeneralPolygon2d> Clipped;
-					if (PolygonsIntersection(One, SquareArr, Clipped) && Clipped.Num() > 0)
-					{
-						ZoneTilePolys.FindOrAdd(Coord).Append(MoveTemp(Clipped));
-					}
+					if (IsTileInCommitScope(J.Key, Ctx)) { ZoneTilePolys.FindOrAdd(J.Key).Append(Inter); }
+					TArray<UE::Geometry::FGeneralPolygon2d> Diff;
+					if (RoadNetSurface::Difference(Remainder, J.Poly, Diff)) { Remainder = MoveTemp(Diff); }
 				}
+			}
+
+			// Remaining pieces are on-road overlay ribbons INSIDE one arm's
+			// carriageway — the centroid resolver is exact containment for them.
+			for (UE::Geometry::FGeneralPolygon2d& Piece : Remainder)
+			{
+				FVector2D PC;
+				if (!Centroid2D(Piece, PC)) { continue; }
+				const FIntPoint Key = TopoKeyOf(FVector(PC.X, PC.Y, 0.0), Ctx);
+				if (Key.X == INDEX_NONE || !IsTileInCommitScope(Key, Ctx)) { continue; }
+				ZoneTilePolys.FindOrAdd(Key).Add(MoveTemp(Piece));
 			}
 		}
 
@@ -2262,8 +3145,58 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 		return;
 	}
 
-	// Clear the cells we're allowed to rewrite before repopulating (full rebuild
-	// = all tiles; windowed = only the dirty cells).
+	// ---- topological tiling scope (§ topo tiles) --------------------------
+	// On a full rebuild every tile is recreated, so reset the id maps. Build this
+	// pass's junction/segment accelerators (assigns junction ids). For a windowed
+	// edit, re-express the commit SCOPE from grid cells to the segment + junction
+	// tile keys actually touched — the grid corridor logic in DeterminePendingRoads
+	// still chose WHICH roads are pending; here we only translate that to tiles.
+	if (Ctx.bFullCommit)
+	{
+		SegKeyOf.Reset(); JunKeyOf.Reset(); SegAlias.Reset();
+		NextSegId = 0; NextJunId = 0;
+		LastRoadJunctions.Reset();
+	}
+	BuildTopoAccel(Ctx);
+	// Divided-road pairing must run BEFORE any SegTileKey call this pass (the
+	// windowed dirty-tile block below, plus every commit) so paired carriageways
+	// resolve to the same tile everywhere.
+	BuildDividedPairs(Ctx);
+	// § tiling v2: generate each segment tile's surface + sidewalks from its own
+	// arm run (ownership by construction) — CommitLayer consumes these buckets.
+	BuildTilePartition(Ctx);
+	if (!Ctx.bFullCommit)
+	{
+		TSet<FIntPoint> Topo;
+		for (int32 r : Ctx.Pending)
+		{
+			if (!Roads.IsValidIndex(r) || !Roads[r].Id.IsValid()) { continue; }
+			// A road can own several arm tiles (one per inter-junction stretch);
+			// dirty every arm it currently has so the whole road is rewritten.
+			TSet<int32> Arms;
+			if (const TArray<int32>* A = Ctx.RoadSampleArm.Find(r))
+			{
+				for (int32 a : *A) { if (a >= 0) { Arms.Add(a); } }
+			}
+			if (Arms.Num() == 0) { Arms.Add(0); }
+			for (int32 a : Arms) { Topo.Add(SegTileKey(Roads[r].Id, a)); }
+		}
+		for (const FRoadNetRebuildContext::FTopoJunctionRegion& JR : Ctx.TopoJunctions) { Topo.Add(JR.Key); }
+		// Also dirty (clear + maybe retire) any junction a modified road touched
+		// LAST rebuild but may have moved away from this time.
+		for (int32 r : Ctx.Modified)
+		{
+			if (!Roads.IsValidIndex(r)) { continue; }
+			if (const TArray<FIntPoint>* Old = LastRoadJunctions.Find(Roads[r].Id))
+			{
+				for (const FIntPoint& K : *Old) { Topo.Add(K); }
+			}
+		}
+		Ctx.DirtyTiles = MoveTemp(Topo);
+	}
+
+	// Clear the tiles we're allowed to rewrite before repopulating (full rebuild
+	// = all tiles; windowed = only the dirty segment/junction tiles).
 	PrepareTilesForCommit(Ctx);
 
 	// Drop the terrain-conform cache for the cells we're about to rebuild (ground
@@ -2312,10 +3245,31 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 	CommitMedian(Ctx);            // § raised median strip + centre planting splines
 	CommitPerimeters(Ctx);
 	CommitLaneGraph(Ctx);
+	CommitSegmentSplines(Ctx);    // § per-segment editable centre + edge splines
 
 	// Retire any cell this pass emptied out (all its layers/instances/splines
 	// gone). Clean tiles outside the commit scope are left untouched.
 	RetireEmptyTiles(Ctx);
+
+	// Record which junctions each PENDING road contributed to this pass, so the
+	// next windowed edit of that road can dirty (and retire) those junction tiles
+	// if it moves away. Only pending roads are refreshed; untouched roads keep
+	// their record.
+	for (int32 r : Ctx.Pending)
+	{
+		if (Roads.IsValidIndex(r) && Roads[r].Id.IsValid()) { LastRoadJunctions.Remove(Roads[r].Id); }
+	}
+	for (const FRoadNetRebuildContext::FTopoJunctionRegion& JR : Ctx.TopoJunctions)
+	{
+		if (!Ctx.Zones.IsValidIndex(JR.Zone)) { continue; }
+		for (int32 r : Ctx.Zones[JR.Zone])
+		{
+			if (Roads.IsValidIndex(r) && Roads[r].Id.IsValid())
+			{
+				LastRoadJunctions.FindOrAdd(Roads[r].Id).AddUnique(JR.Key);
+			}
+		}
+	}
 
 	// Reassemble the whole-network terrain-conform soup from the per-cell cache
 	// (clean cells + this pass's dirty cells), dropping any retired cell, so the
@@ -2494,8 +3448,8 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 		const FVector Target = CI.Location + LeftN * kCurbLateralNudgeCm;
 		Inst.SetTranslation(Target - AnchorWorld);
 
-		const FIntPoint Coord = TileOf(CI.Location);
-		if (!IsTileInCommitScope(Coord, Ctx)) { ++iCurb; continue; }
+		const FIntPoint Coord = TopoKeyOf(CI.Location, Ctx);
+		if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { ++iCurb; continue; }
 		const bool bA = ((iCurb++ & 1) == 0);
 		if (UHierarchicalInstancedStaticMeshComponent* H = TileHISM(Coord, bA))
 		{
@@ -2933,8 +3887,8 @@ void URoadNetwork::CommitJunctionSignals(FRoadNetRebuildContext& Ctx)
 	TMap<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>> SignalBatches;
 	for (const TPair<FVector, float>& SP : Ctx.Signals)
 	{
-		const FIntPoint Coord = TileOf(SP.Key);
-		if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
+		const FIntPoint Coord = TopoKeyOf(SP.Key, Ctx);
+		if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
 		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
 		if (!Tile) { continue; }
 		UHierarchicalInstancedStaticMeshComponent* H = Tile->GetOrCreateHISM(FName(TEXT("Signals")), Mesh);
@@ -2954,6 +3908,102 @@ void URoadNetwork::CommitJunctionSignals(FRoadNetRebuildContext& Ctx)
 
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitJunctionSignals: %d signal placeholders%s."),
 		Placed, bUserMesh ? TEXT("") : TEXT(" [cylinder default]"));
+}
+
+int32 URoadNetwork::AddSplineSplitByTile(const TArray<FVector>& Points, bool bClosed,
+	bool bCurved, const TArray<FName>& Tags, FRoadNetRebuildContext& Ctx)
+{
+	const int32 N = Points.Num();
+	if (N < 2) { return 0; }
+
+	const ESplinePointType::Type PtType = bCurved ? ESplinePointType::Curve
+	                                              : ESplinePointType::Linear;
+
+	// Per-point tile key. This is the cut: the key flips at a junction/merge, and
+	// that flip is exactly where the user wants the spline (and the road) severed.
+	TArray<FIntPoint> Keys;
+	Keys.SetNumUninitialized(N);
+	for (int32 i = 0; i < N; ++i) { Keys[i] = TopoKeyOf(Points[i], Ctx); }
+
+	auto EmitRun = [&](const FIntPoint& Key, int32 A, int32 B, bool bLoop) -> bool
+	{
+		if (Key.X == INDEX_NONE || !IsTileInCommitScope(Key, Ctx)) { return false; }
+		if (B - A + 1 < 2) { return false; }               // need >=2 pts for a spline
+		ARoadNetTileActor* Tile = GetOrCreateTile(Key);
+		if (!Tile) { return false; }
+		USplineComponent* Sp = Tile->AddSpline();
+		if (!Sp) { return false; }
+		Sp->ClearSplinePoints(false);
+		TArray<FVector> Run;
+		Run.Reserve(B - A + 1);
+		for (int32 i = A; i <= B; ++i) { Run.Add(Points[i]); }
+		Sp->SetSplinePoints(Run, ESplineCoordinateSpace::World, false);
+		for (int32 i = 0; i < Sp->GetNumberOfSplinePoints(); ++i) { Sp->SetSplinePointType(i, PtType, false); }
+		Sp->SetClosedLoop(bLoop, false);
+		Sp->UpdateSpline();
+		for (const FName& T : Tags) { Sp->ComponentTags.Add(T); }
+		return true;
+	};
+
+	// Whole polyline lives in one tile → keep it intact (a closed loop stays
+	// closed; nothing to cut).
+	bool bSingleKey = true;
+	for (int32 i = 1; i < N; ++i) { if (Keys[i] != Keys[0]) { bSingleKey = false; break; } }
+	if (bSingleKey)
+	{
+		return EmitRun(Keys[0], 0, N - 1, bClosed) ? 1 : 0;
+	}
+
+	// Rotate a closed loop so index 0 sits on a key boundary; then the wrap-around
+	// arc isn't split across the seam and every run is a clean open arc.
+	TArray<FVector> P = Points;
+	TArray<FIntPoint> K = Keys;
+	if (bClosed)
+	{
+		int32 Rot = INDEX_NONE;
+		for (int32 i = 0; i < N; ++i) { if (K[i] != K[(i + N - 1) % N]) { Rot = i; break; } }
+		if (Rot > 0)
+		{
+			TArray<FVector> P2; TArray<FIntPoint> K2;
+			P2.Reserve(N); K2.Reserve(N);
+			for (int32 i = 0; i < N; ++i) { P2.Add(P[(i + Rot) % N]); K2.Add(K[(i + Rot) % N]); }
+			P = MoveTemp(P2); K = MoveTemp(K2);
+		}
+	}
+
+	// Emit one open arc per maximal same-key run, overlapping each neighbour by a
+	// point so arcs meet at the cut. Uses P/K (rotated for loops).
+	auto EmitFromPK = [&](const FIntPoint& Key, int32 A, int32 B) -> bool
+	{
+		if (Key.X == INDEX_NONE || !IsTileInCommitScope(Key, Ctx) || (B - A + 1) < 2) { return false; }
+		ARoadNetTileActor* Tile = GetOrCreateTile(Key);
+		if (!Tile) { return false; }
+		USplineComponent* Sp = Tile->AddSpline();
+		if (!Sp) { return false; }
+		Sp->ClearSplinePoints(false);
+		TArray<FVector> Run;
+		Run.Reserve(B - A + 1);
+		for (int32 i = A; i <= B; ++i) { Run.Add(P[i]); }
+		Sp->SetSplinePoints(Run, ESplineCoordinateSpace::World, false);
+		for (int32 i = 0; i < Sp->GetNumberOfSplinePoints(); ++i) { Sp->SetSplinePointType(i, PtType, false); }
+		Sp->SetClosedLoop(false, false);
+		Sp->UpdateSpline();
+		for (const FName& T : Tags) { Sp->ComponentTags.Add(T); }
+		return true;
+	};
+
+	int32 Arcs = 0;
+	int32 a = 0;
+	while (a < N)
+	{
+		int32 b = a;
+		while (b + 1 < N && K[b + 1] == K[a]) { ++b; }
+		const int32 Lo = FMath::Max(0, a - 1);       // share boundary with prev arc
+		const int32 Hi = FMath::Min(N - 1, b + 1);   // share boundary with next arc
+		if (EmitFromPK(K[a], Lo, Hi)) { ++Arcs; }
+		a = b + 1;
+	}
+	return Arcs;
 }
 
 void URoadNetwork::CommitMedian(FRoadNetRebuildContext& Ctx)
@@ -2985,18 +4035,10 @@ void URoadNetwork::CommitMedian(FRoadNetRebuildContext& Ctx)
 		TArray<FVector> Pts = C->Sampled;
 		for (FVector& P : Pts) { P.Z += kRoadZLiftCm + 15.0; } // sit on the median top
 
-		const FIntPoint Coord = TileOf(Pts[Pts.Num() / 2]);
-		if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
-		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
-		if (!Tile) { continue; }
-		USplineComponent* Sp = Tile->AddSpline();
-		if (!Sp) { continue; }
-		Sp->ClearSplinePoints(false);
-		Sp->SetSplinePoints(Pts, ESplineCoordinateSpace::World, false);
-		Sp->SetClosedLoop(false, false);
-		Sp->UpdateSpline();
-		Sp->ComponentTags.Add(FName(TEXT("RoadNetMedianCenter")));
-		++SplineCount;
+		// Cut the centre spline at junction boundaries and drop each arc on its
+		// own segment tile (nothing lost — arcs cover the whole centreline).
+		SplineCount += AddSplineSplitByTile(Pts, /*bClosed*/false, /*bCurved*/true,
+			{ FName(TEXT("RoadNetMedianCenter")) }, Ctx);
 	}
 
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitMedian: median strips=%s, %d centre spline(s)."),
@@ -3007,40 +4049,22 @@ void URoadNetwork::CommitPerimeters(FRoadNetRebuildContext& Ctx)
 {
 	if (!WorldPtr.IsValid()) { return; }
 
-	// Perimeter loops become closed spline components — the seam a PCG graph
-	// samples for road edges / blocks — routed into the tile containing each
-	// loop's centroid so they stream with that cell. Tags preserved verbatim so
-	// tag-based PCG discovery keeps working across the split.
+	// Perimeter loops become spline components — the seam a PCG graph samples for
+	// road edges / blocks. Each loop is CUT at junction/merge boundaries so its
+	// arcs land on the segment tiles they border (a loop wholly inside one tile
+	// stays a single closed spline). Tags preserved verbatim so tag-based PCG
+	// discovery keeps working across the split.
 	int32 LoopCount = 0;
 	for (const FRoadNetLoop& Loop : Ctx.PerimeterLoops)
 	{
 		if (Loop.Points.Num() < 3) { continue; }
-
-		FVector Centroid(0, 0, 0);
-		for (const FVector& P : Loop.Points) { Centroid += P; }
-		Centroid /= (double)Loop.Points.Num();
-
-		const FIntPoint Coord = TileOf(Centroid);
-		if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
-		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
-		if (!Tile) { continue; }
-		USplineComponent* Sp = Tile->AddSpline();
-		if (!Sp) { continue; }
-		Sp->ClearSplinePoints(false);
-		Sp->SetSplinePoints(Loop.Points, ESplineCoordinateSpace::World, false);
-		for (int32 i = 0; i < Sp->GetNumberOfSplinePoints(); ++i)
-		{
-			Sp->SetSplinePointType(i, ESplinePointType::Linear, false);
-		}
-		Sp->SetClosedLoop(true, false);
-		Sp->UpdateSpline();
-		Sp->ComponentTags.Add(FName(TEXT("RoadNetPerimeter")));
-		Sp->ComponentTags.Add(Loop.bOuter ? FName(TEXT("RoadNetPerimeterOuter"))
-		                                   : FName(TEXT("RoadNetPerimeterHole")));
-		++LoopCount;
+		LoopCount += AddSplineSplitByTile(Loop.Points, /*bClosed*/true, /*bCurved*/false,
+			{ FName(TEXT("RoadNetPerimeter")),
+			  Loop.bOuter ? FName(TEXT("RoadNetPerimeterOuter")) : FName(TEXT("RoadNetPerimeterHole")) },
+			Ctx);
 	}
 
-	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitPerimeters: %d spline loops for PCG."), LoopCount);
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitPerimeters: %d perimeter arc(s) for PCG (cut at junctions)."), LoopCount);
 }
 
 void URoadNetwork::CommitLaneGraph(FRoadNetRebuildContext& Ctx)
@@ -3049,13 +4073,17 @@ void URoadNetwork::CommitLaneGraph(FRoadNetRebuildContext& Ctx)
 
 	// Lane-connectivity movements become open spline components (one per
 	// connection), curving Entry → joint centre → Exit so a PCG graph / traffic
-	// system can sample turn paths. Routed to the tile containing the movement's
-	// entry point; tags preserved for discovery.
+	// system can sample turn paths. A movement lives AT the junction, so route it
+	// to the tile holding the joint centre (the junction tile) rather than its
+	// entry — splitting a turn path into slivers would be wrong. Tags preserved.
 	int32 Made = 0;
 	for (const FRoadNetLaneConnection& Cn : Ctx.LaneConnections)
 	{
-		const FIntPoint Coord = TileOf(Cn.Entry);
-		if (!IsTileInCommitScope(Coord, Ctx)) { continue; }
+		const FVector RoutePt = Ctx.Joints.IsValidIndex(Cn.Joint)
+			? FVector(Ctx.Joints[Cn.Joint].Location.X, Ctx.Joints[Cn.Joint].Location.Y, Ctx.Joints[Cn.Joint].Z)
+			: (Cn.Entry + Cn.Exit) * 0.5;
+		const FIntPoint Coord = TopoKeyOf(RoutePt, Ctx);
+		if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
 		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
 		if (!Tile) { continue; }
 		USplineComponent* Sp = Tile->AddSpline();
@@ -3088,4 +4116,64 @@ void URoadNetwork::CommitLaneGraph(FRoadNetRebuildContext& Ctx)
 	}
 
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitLaneGraph: %d lane-connection splines for PCG."), Made);
+}
+
+void URoadNetwork::CommitSegmentSplines(FRoadNetRebuildContext& Ctx)
+{
+	if (!WorldPtr.IsValid()) { return; }
+
+	// One editable set per segment tile: the arm's own centreline plus its two
+	// outer edges. Points are the dense sampled centreline/edges (already the
+	// control points a user drags); the whole arm is one spline on its ONE tile
+	// (SegTileKey is alias-resolved, so a divided pair's two carriageways drop
+	// their centre/edge splines on the shared tile).
+	int32 Centre = 0, Edge = 0;
+	auto AddSeg = [&](const FIntPoint& Key, const TArray<FVector>& Pts, const TArray<FName>& Tags) -> bool
+	{
+		if (Key.X == INDEX_NONE || !IsTileInCommitScope(Key, Ctx) || Pts.Num() < 2) { return false; }
+		ARoadNetTileActor* Tile = GetOrCreateTile(Key);
+		if (!Tile) { return false; }
+		USplineComponent* Sp = Tile->AddSpline();
+		if (!Sp) { return false; }
+		Sp->ClearSplinePoints(false);
+		Sp->SetSplinePoints(Pts, ESplineCoordinateSpace::World, false);
+		for (int32 i = 0; i < Sp->GetNumberOfSplinePoints(); ++i) { Sp->SetSplinePointType(i, ESplinePointType::Curve, false); }
+		Sp->SetClosedLoop(false, false);
+		Sp->UpdateSpline();
+		for (const FName& T : Tags) { Sp->ComponentTags.Add(T); }
+		return true;
+	};
+
+	for (const TPair<int32, TArray<TPair<int32, int32>>>& KV : Ctx.RoadArmRuns)
+	{
+		const int32 r = KV.Key;
+		if (!Roads.IsValidIndex(r) || !Roads[r].Id.IsValid()) { continue; }
+		const FRoadCurves* C = Ctx.Curves.Find(r);
+		if (!C || C->Sampled.Num() < 2) { continue; }
+		const bool bHaveEdges = (C->LeftEdge.Num() == C->Sampled.Num() && C->RightEdge.Num() == C->Sampled.Num());
+
+		auto Slice = [&](const TArray<FVector>& Src, int32 Lo, int32 Hi) -> TArray<FVector>
+		{
+			TArray<FVector> Out;
+			if (Src.Num() != C->Sampled.Num()) { return Out; }
+			Out.Reserve(Hi - Lo + 1);
+			for (int32 i = Lo; i <= Hi; ++i) { FVector P = Src[i]; P.Z += kRoadZLiftCm; Out.Add(P); }
+			return Out;
+		};
+
+		for (int32 av = 0; av < KV.Value.Num(); ++av)
+		{
+			const TPair<int32, int32>& Run = KV.Value[av];
+			if (Run.Key < 0 || Run.Value <= Run.Key || !C->Sampled.IsValidIndex(Run.Value)) { continue; }
+			const FIntPoint Key = SegTileKey(Roads[r].Id, av);
+			if (Key.X == INDEX_NONE || !IsTileInCommitScope(Key, Ctx)) { continue; }
+			if (AddSeg(Key, Slice(C->Sampled, Run.Key, Run.Value), { FName(TEXT("RoadNetSegmentCenter")) })) { ++Centre; }
+			if (bHaveEdges)
+			{
+				if (AddSeg(Key, Slice(C->LeftEdge,  Run.Key, Run.Value), { FName(TEXT("RoadNetSegmentEdge")), FName(TEXT("RoadNetSegmentEdgeLeft"))  })) { ++Edge; }
+				if (AddSeg(Key, Slice(C->RightEdge, Run.Key, Run.Value), { FName(TEXT("RoadNetSegmentEdge")), FName(TEXT("RoadNetSegmentEdgeRight")) })) { ++Edge; }
+			}
+		}
+	}
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitSegmentSplines: %d centre + %d edge spline(s)."), Centre, Edge);
 }

@@ -33,6 +33,25 @@ static TAutoConsoleVariable<int32> CVarRoadNetDrawTool(
 	TEXT("Active RoadNet Draw sub-tool: 0=Draw, 1=Points, 2=Lanes, 3=Junctions, 4=Edge. Exactly one tool is live at a time so clicks/hotkeys are unambiguous."),
 	ECVF_Default);
 
+// Shape the Draw sub-tool lays down (see ERoadNetDrawShape): 0=Freehand
+// (click-per-point polyline), 1=Roundabout (centre+radius closed circle),
+// 2=Curve (start+end circular arc). Written by the OSM Roads panel, read by the
+// RoadNetEditor mode — registered in the always-loaded runtime module so both
+// reach it by name with no module link.
+static TAutoConsoleVariable<int32> CVarRoadNetDrawShape(
+	TEXT("roadnet.DrawShape"),
+	0,
+	TEXT("Draw sub-tool shape: 0=Freehand, 1=Roundabout (centre+radius), 2=Curve (start+end arc), 3=FreeCurve (origin+dest+apex bezier)."),
+	ECVF_Default);
+
+// Central angle (degrees) the Curve shape bends by, e.g. 90/45/25. A 90 arc
+// between the two clicked endpoints is a quarter circle; smaller = shallower.
+static TAutoConsoleVariable<int32> CVarRoadNetDrawAngleDeg(
+	TEXT("roadnet.DrawAngleDeg"),
+	90,
+	TEXT("Curve-shape arc angle in degrees (how far the road bends between the two clicks). Typical: 90, 45, 25."),
+	ECVF_Default);
+
 // Standard parking-bay layout used by the Lanes-tool 'P' authoring hotkey (see
 // ERoadNetParkingLayout): 0=Parallel 1=Perpendicular 2=Angled. Written by the
 // OSM Roads panel, read by the RoadNetEditor mode — registered here in the

@@ -114,6 +114,51 @@ void FEdModeRoadNet::SetActiveTool(ERoadNetDrawTool Tool)
 	}
 }
 
+ERoadNetDrawShape FEdModeRoadNet::ActiveShape() const
+{
+	static IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(TEXT("roadnet.DrawShape"));
+	const int32 V = CV ? CV->GetInt() : 0;
+	return (ERoadNetDrawShape)(uint8)FMath::Clamp(V, 0, 3);
+}
+
+double FEdModeRoadNet::DrawAngleRad() const
+{
+	static IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(TEXT("roadnet.DrawAngleDeg"));
+	const int32 Deg = CV ? CV->GetInt() : 90;
+	return FMath::DegreesToRadians((double)FMath::Clamp(Deg, 2, 175));
+}
+
+void FEdModeRoadNet::DrawRoadGhost(FPrimitiveDrawInterface* PDI, const TArray<FVector>& Center) const
+{
+	if (!PDI || Center.Num() < 2) { return; }
+
+	// Half footprint = half the carriageway + a sidewalk each side, from the draft
+	// settings the finished road will use (fallback ~2 lanes if no actor yet).
+	double Half = 350.0;
+	if (const ARoadNetActor* A = NetActorPtr.Get())
+	{
+		const double Carriage = FMath::Max(1, A->DraftLaneCount) * FMath::Max(150.f, A->DraftLaneWidthCm);
+		Half = Carriage * 0.5 + (A->bDraftSidewalks ? FMath::Max(50.f, A->DraftSidewalkWidthCm) : 0.0);
+	}
+
+	TArray<FVector> Right, Left;
+	RoadNetMath::OffsetPolyline(Center, +Half, Right);
+	RoadNetMath::OffsetPolyline(Center, -Half, Left);
+
+	const FColor Ghost = kColorLine;   // road-edge ghost (matches the draw palette)
+
+	// Centreline + both outer edges.
+	for (int32 i = 1; i < Center.Num(); ++i) { PDI->DrawLine(Center[i - 1], Center[i], kColorPreview, SDPG_Foreground, 1.5f); }
+	for (int32 i = 1; i < Right.Num();  ++i) { PDI->DrawLine(Right[i - 1],  Right[i],  Ghost, SDPG_Foreground, 2.5f); }
+	for (int32 i = 1; i < Left.Num();   ++i) { PDI->DrawLine(Left[i - 1],   Left[i],   Ghost, SDPG_Foreground, 2.5f); }
+
+	// Cross rungs convey the surface between the edges (capped so long freehand
+	// roads stay cheap). Right/Left carry one vertex per Center vertex.
+	const int32 N = FMath::Min3(Center.Num(), Right.Num(), Left.Num());
+	const int32 Step = FMath::Max(1, N / 32);
+	for (int32 i = 0; i < N; i += Step) { PDI->DrawLine(Left[i], Right[i], Ghost, SDPG_Foreground, 1.f); }
+}
+
 // Defined further down; forward-declared so the debounce flush (above it) can
 // scope the smoothing rebuild to the junction's arm roads.
 static void CollectRoadsNearPoint(const URoadNetwork* Net, const FVector2D& Loc, double RadiusCm, TArray<int32>& Out);
@@ -426,19 +471,13 @@ int32 FEdModeRoadNet::DeleteSelectedPoints()
 	int32 Removed = 0;
 	for (int32 r : RoadKeys)
 	{
-		TArray<int32>& Pts = ByRoad[r];
-		Pts.Sort([](const int32& A, const int32& B) { return A > B; });
-		for (int32 p : Pts)
-		{
-			bool bRoadRemoved = false;
-			if (Net->DeleteRoadPoint(r, p, bRoadRemoved))
-			{
-				++Removed;
-				// Road collapsed (< 2 points): its remaining selected points no
-				// longer exist — stop deleting on this road.
-				if (bRoadRemoved) { break; }
-			}
-		}
+		const TArray<int32>& Pts = ByRoad[r];
+		// Deleting a run of points BREAKS the road at that gap (two roads) rather
+		// than bridging across it — this is the "cut a hole here" gesture. New
+		// pieces are appended, so processing roads highest-index-first keeps the
+		// pending lower-index deletes valid.
+		Removed += Pts.Num();
+		Net->DeleteRoadPointsSplitting(r, Pts);
 	}
 	return Removed;
 }
@@ -689,7 +728,18 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 			if (LineTraceCursor(InViewportClient, Hit))
 			{
 				DraftPoints.Add(ResolveCursorPoint(Hit));
-				if (InViewportClient) { InViewportClient->Invalidate(); }
+				// Fixed-click primitives commit automatically on their last anchor:
+				// Roundabout/Curve = 2 clicks (centre/start + radius/end), FreeCurve
+				// = 3 clicks (origin + destination + apex that sets the bow).
+				const ERoadNetDrawShape Shape = ActiveShape();
+				const int32 Need =
+					(Shape == ERoadNetDrawShape::Roundabout || Shape == ERoadNetDrawShape::Curve) ? 2 :
+					(Shape == ERoadNetDrawShape::FreeCurve) ? 3 : MAX_int32;
+				if (DraftPoints.Num() >= Need)
+				{
+					FinalizeDraft();
+				}
+				else if (InViewportClient) { InViewportClient->Invalidate(); }
 			}
 			return true;
 		}
@@ -935,6 +985,8 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				return true;
 			}
 			// Point/road deletion belongs to the Points tool only.
+			UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] Delete pressed: Tool=%d ShowAllPoints=%d SelPoints=%d SelRoad=%d SelPoint=%d"),
+				(int32)Tool, bShowAllPoints ? 1 : 0, SelPoints.Num(), SelRoad, SelPoint);
 			if (Tool != ERoadNetDrawTool::Points) { return true; }
 			// Multi-point delete: if a set of control points is selected (marquee
 			// or Shift+click), delete them all in one undoable step.
@@ -942,14 +994,19 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 			{
 				if (URoadNetwork* Net = GetNetwork())
 				{
+					const int32 RoadsBefore = Net->GetRoads().Num();
 					const FScopedTransaction Transaction(LOCTEXT("RoadNetDeletePoints", "Delete RoadNet Points"));
 					ModifyForEdit();
 					const int32 N = DeleteSelectedPoints();
+					const int32 RoadsAfter = Net->GetRoads().Num();
+					UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] Multi-point delete: removed %d point(s); roads %d -> %d; FULL rebuild"),
+						N, RoadsBefore, RoadsAfter);
 					Net->Rebuild();
 					if (GEngine)
 					{
-						GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
-							FString::Printf(TEXT("RoadNet: deleted %d selected control point(s)"), N));
+						GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Cyan,
+							FString::Printf(TEXT("RoadNet: cut %d point(s) — roads %d -> %d (a run of interior points breaks the road here)"),
+								N, RoadsBefore, RoadsAfter));
 					}
 				}
 				ClearSelection();
@@ -998,7 +1055,13 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 						}
 						if (PtRoad != INDEX_NONE)      { DelRoad = PtRoad; DelPoint = PtIdx; }
 						else if (RdRoad != INDEX_NONE) { DelRoad = RdRoad; DelPoint = INDEX_NONE; }
+						UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] Idle-pick: trace hit; nearest point r=%d i=%d (d2=%.0f), nearest road r=%d (d2=%.0f) -> DelRoad=%d DelPoint=%d"),
+							PtRoad, PtIdx, BestPtD2, RdRoad, BestRdD2, DelRoad, DelPoint);
 					}
+				}
+				else
+				{
+					UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] Idle-pick: LineTraceCursor MISS (no ground/road under cursor)"));
 				}
 			}
 
@@ -1011,7 +1074,11 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 						const FScopedTransaction Transaction(LOCTEXT("RoadNetDeletePoint", "Delete RoadNet Point"));
 						ModifyForEdit();
 						bool bRoadRemoved = false;
-						if (Net->DeleteRoadPoint(DelRoad, DelPoint, bRoadRemoved))
+						const bool bDeleted = Net->DeleteRoadPoint(DelRoad, DelPoint, bRoadRemoved);
+						UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] Single-point delete r=%d p=%d -> %s (roadRemoved=%d); %s rebuild"),
+							DelRoad, DelPoint, bDeleted ? TEXT("OK") : TEXT("FAILED"), bRoadRemoved ? 1 : 0,
+							bRoadRemoved ? TEXT("FULL") : TEXT("WINDOWED"));
+						if (bDeleted)
 						{
 							// Removing a point only reshapes one road (windowed);
 							// but if the road itself was dropped the array indices
@@ -1031,6 +1098,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					{
 						const FScopedTransaction Transaction(LOCTEXT("RoadNetDeleteRoad", "Delete RoadNet Road"));
 						ModifyForEdit();
+						UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] Whole-road delete r=%d (no point resolved); FULL rebuild"), DelRoad);
 						if (Net->RemoveRoad(DelRoad))
 						{
 							Net->Rebuild();
@@ -1047,6 +1115,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				return true;
 			}
 
+			UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] NOTHING resolved to delete (SelPoints=0, no pick). ShowAllPoints=%d"), bShowAllPoints ? 1 : 0);
 			if (GEngine)
 			{
 				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
@@ -1813,18 +1882,43 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 		}
 	}
 
-	for (int32 i = 0; i < DraftPoints.Num(); ++i)
+	// Build the preview centreline for the active shape/stage, then draw it as a
+	// road-width ghost so the draft shows the footprint of the finished road.
+	const ERoadNetDrawShape Shape = ActiveShape();
+	TArray<FVector> Preview;
+	if (Shape == ERoadNetDrawShape::Roundabout && DraftPoints.Num() == 1 && bHasHover)
 	{
-		PDI->DrawPoint(DraftPoints[i], kColorPoint, kPointSize, SDPG_Foreground);
-		if (i > 0)
+		const FVector2D C(DraftPoints[0].X, DraftPoints[0].Y);
+		const double R = FVector2D::Distance(C, FVector2D(HoverPoint.X, HoverPoint.Y));
+		RoadNetMath::SampleCircle(C, R, DraftPoints[0].Z, 48, Preview);
+	}
+	else if (Shape == ERoadNetDrawShape::Curve && DraftPoints.Num() == 1 && bHasHover)
+	{
+		RoadNetMath::SampleArc(DraftPoints[0], HoverPoint, DrawAngleRad(), /*bBulgeLeft*/ true, Preview);
+	}
+	else if (Shape == ERoadNetDrawShape::FreeCurve && bHasHover)
+	{
+		if (DraftPoints.Num() == 1) { Preview = { DraftPoints[0], HoverPoint }; }
+		else if (DraftPoints.Num() >= 2)
 		{
-			PDI->DrawLine(DraftPoints[i - 1], DraftPoints[i], kColorLine, SDPG_Foreground, 3.f);
+			// Stage 3 "set curve": the cursor is the apex the Bezier passes through.
+			const FVector A = DraftPoints[0], B = DraftPoints[1];
+			const FVector Ctrl = 2.0 * HoverPoint - 0.5 * (A + B);
+			RoadNetMath::SampleQuadBezier(A, Ctrl, B, Preview);
 		}
 	}
-	if (DraftPoints.Num() > 0 && bHasHover)
+	else if (Shape == ERoadNetDrawShape::Freehand)
 	{
-		PDI->DrawLine(DraftPoints.Last(), HoverPoint, kColorPreview, SDPG_Foreground, 2.f);
+		Preview = DraftPoints;
+		if (DraftPoints.Num() > 0 && bHasHover) { Preview.Add(HoverPoint); }
 	}
+
+	// Anchor dots so placed clicks stay visible over the ghost.
+	for (const FVector& P : DraftPoints)
+	{
+		PDI->DrawPoint(P, kColorPoint, kPointSize, SDPG_Foreground);
+	}
+	if (Preview.Num() >= 2) { DrawRoadGhost(PDI, Preview); }
 	// Highlight the active snap target so the user sees where the point will weld.
 	if (bHasHover && bSnapActive)
 	{
@@ -2029,6 +2123,41 @@ void FEdModeRoadNet::FinalizeDraft()
 		return;
 	}
 
+	// Resolve the shape into a centreline. Freehand uses the clicked points as-is;
+	// Roundabout builds a closed circle (centre + radius clicks); Curve builds a
+	// circular arc bending by the panel angle between the two clicks.
+	const ERoadNetDrawShape Shape = ActiveShape();
+	TArray<FVector> Ref;
+	if (Shape == ERoadNetDrawShape::Roundabout)
+	{
+		const FVector2D C(DraftPoints[0].X, DraftPoints[0].Y);
+		const double Radius = FVector2D::Distance(C, FVector2D(DraftPoints[1].X, DraftPoints[1].Y));
+		if (Radius < 200.0) { DraftPoints.Reset(); return; }   // too small to be a road
+		const int32 Segs = FMath::Clamp(FMath::RoundToInt(Radius / 100.0), 16, 96);
+		RoadNetMath::SampleCircle(C, Radius, DraftPoints[0].Z, Segs, Ref);
+	}
+	else if (Shape == ERoadNetDrawShape::Curve)
+	{
+		RoadNetMath::SampleArc(DraftPoints[0], DraftPoints[1], DrawAngleRad(), /*bBulgeLeft*/ true, Ref);
+	}
+	else if (Shape == ERoadNetDrawShape::FreeCurve)
+	{
+		const FVector A = DraftPoints[0];
+		const FVector B = DraftPoints[1];
+		if (DraftPoints.Num() >= 3)
+		{
+			// Control point placed so the Bezier passes through the apex click at t=0.5.
+			const FVector Ctrl = 2.0 * DraftPoints[2] - 0.5 * (A + B);
+			RoadNetMath::SampleQuadBezier(A, Ctrl, B, Ref);
+		}
+		else { Ref = { A, B }; }   // apex not set (Enter early) -> straight span
+	}
+	else
+	{
+		Ref = DraftPoints;
+	}
+	if (Ref.Num() < 2) { DraftPoints.Reset(); return; }
+
 	ARoadNetActor* Actor = GetOrSpawnNetActor();
 	if (!Actor) { DraftPoints.Reset(); return; }
 
@@ -2042,7 +2171,7 @@ void FEdModeRoadNet::FinalizeDraft()
 	FRoadDef R;
 	R.Source = ERoadNetSource::HandDrawn;
 	R.Class  = Actor->DraftClass;
-	R.Ref    = DraftPoints;
+	R.Ref    = MoveTemp(Ref);
 
 	FRoadNetLaneSpec& L = R.Lanes;
 	L.bOneway          = Actor->bDraftOneway;
@@ -2059,7 +2188,8 @@ void FEdModeRoadNet::FinalizeDraft()
 	if (NewRoad != INDEX_NONE) { Net->Rebuild(MakeArrayView(&NewRoad, 1)); }
 	else                       { Net->Rebuild(); }
 
-	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw: committed a hand-drawn road with %d points."), DraftPoints.Num());
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw: committed a hand-drawn road (shape %d) with %d points."),
+		(int32)Shape, R.Ref.Num());
 	DraftPoints.Reset();
 }
 
