@@ -614,6 +614,49 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 		const TArray<FGeneralPolygon2d>& Carve  = Ctx.ZoneJunctionCarve.IsValidIndex(z) ? Ctx.ZoneJunctionCarve[z] : Empty;
 		if (Merged.Num() == 0 && Band.Num() == 0) { continue; }
 
+		// Bboxes for the zone-wide operands. Every per-arm boolean below used to
+		// take the WHOLE list — Carve is one polygon per junction (~800 in a city
+		// zone) and each arm only touches two or three of them, so the booleans
+		// were O(arms x junctions) and cost minutes. Narrowing by bbox first is
+		// exact: a polygon whose bbox misses the query can't affect the result.
+		auto BoxesOf = [&BoxOf](const TArray<FGeneralPolygon2d>& A)
+		{
+			TArray<FBox2D> B; B.Reserve(A.Num());
+			for (const FGeneralPolygon2d& GP : A) { B.Add(BoxOf(GP)); }
+			return B;
+		};
+		const TArray<FBox2D> CarveBoxes  = BoxesOf(Carve);
+		const TArray<FBox2D> BandBoxes   = BoxesOf(Band);
+		const TArray<FBox2D> MergedBoxes = BoxesOf(Merged);
+
+		auto BoxOfArr = [&BoxOf](const TArray<FGeneralPolygon2d>& A)
+		{
+			FBox2D B(ForceInit);
+			for (const FGeneralPolygon2d& GP : A) { B += BoxOf(GP); }
+			return B;
+		};
+		// Returns Src itself when nothing can be dropped, so a zone whose band is
+		// one big merged polygon is never deep-copied per arm.
+		auto Narrow = [](const TArray<FGeneralPolygon2d>& Src, const TArray<FBox2D>& Boxes,
+			const FBox2D& Q, TArray<FGeneralPolygon2d>& Scratch) -> const TArray<FGeneralPolygon2d>&
+		{
+			if (Src.Num() <= 1 || !Q.bIsValid) { return Src; }
+			int32 Hits = 0;
+			for (int32 i = 0; i < Src.Num(); ++i)
+			{
+				if (Boxes[i].bIsValid && Boxes[i].Intersect(Q)) { ++Hits; }
+			}
+			if (Hits == Src.Num()) { return Src; }
+			Scratch.Reset();
+			Scratch.Reserve(Hits);
+			for (int32 i = 0; i < Src.Num(); ++i)
+			{
+				if (Boxes[i].bIsValid && Boxes[i].Intersect(Q)) { Scratch.Add(Src[i]); }
+			}
+			return Scratch;
+		};
+		TArray<FGeneralPolygon2d> NearCarve, NearBand, NearMerged;
+
 		// ---- junction tiles: everything inside the carve, cut from the SAME
 		// merged surface / band the segments are cut from → seams line up exactly.
 		for (const FGeneralPolygon2d& CP : Carve)
@@ -625,13 +668,16 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 			C /= (double)OV.Num();
 			const FIntPoint JKey = JunTileKey(C);
 			const TArray<FGeneralPolygon2d> CPArr = { CP };
+			const FBox2D CPBox = BoxOf(CP);
 			TArray<FGeneralPolygon2d> Piece;
-			if (Merged.Num() > 0 && PolygonsIntersection(Merged, CPArr, Piece) && Piece.Num() > 0)
+			const TArray<FGeneralPolygon2d>& MSrc = Narrow(Merged, MergedBoxes, CPBox, NearMerged);
+			if (MSrc.Num() > 0 && PolygonsIntersection(MSrc, CPArr, Piece) && Piece.Num() > 0)
 			{
 				Surf[z].FindOrAdd(JKey).Append(MoveTemp(Piece));
 			}
 			TArray<FGeneralPolygon2d> WPiece;
-			if (Band.Num() > 0 && PolygonsIntersection(Band, CPArr, WPiece) && WPiece.Num() > 0)
+			const TArray<FGeneralPolygon2d>& BSrc = Narrow(Band, BandBoxes, CPBox, NearBand);
+			if (BSrc.Num() > 0 && PolygonsIntersection(BSrc, CPArr, WPiece) && WPiece.Num() > 0)
 			{
 				Walk[z].FindOrAdd(JKey).Append(MoveTemp(WPiece));
 			}
@@ -685,7 +731,9 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 			const double Half = FMath::Max(50.0, (double)L.HalfWidthCm());
 			const double SwW = (double)L.SidewalkWidth;
 			const double SwIn  = FMath::Max(1.0, Half - 30.0);
-			const double SwOut = Half + SwW + 60.0;
+			// + the deepest bay: at a pocket the carriageway edge sits that far
+			// out, so the walk behind it would fall outside a constant-Half mask.
+			const double SwOut = Half + SwW + 60.0 + Roads[r].MaxBayDepthCm();
 
 			for (int32 av = 0; av < Runs->Num(); ++av)
 			{
@@ -721,8 +769,10 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 					TArray<FGeneralPolygon2d> Piece = { Outline };
 					if (Carve.Num() > 0)
 					{
+						const TArray<FGeneralPolygon2d>& CSrc =
+							Narrow(Carve, CarveBoxes, BoxOfArr(Piece), NearCarve);
 						TArray<FGeneralPolygon2d> Cut;
-						if (RoadNetSurface::Difference(Piece, Carve, Cut)) { Piece = MoveTemp(Cut); }
+						if (CSrc.Num() > 0 && RoadNetSurface::Difference(Piece, CSrc, Cut)) { Piece = MoveTemp(Cut); }
 					}
 					EmitPieces(MoveTemp(Piece), SurfEmitted, SurfBoxes, Surf[z], Key);
 				}
@@ -739,11 +789,16 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 						if (!RoadNetSurface::BuildSideRibbon(Sub, InOff, OutOff, Ribbon)) { return; }
 						const TArray<FGeneralPolygon2d> RArr = { Ribbon };
 						TArray<FGeneralPolygon2d> Piece;
-						if (!PolygonsIntersection(Band, RArr, Piece) || Piece.Num() == 0) { return; }
+						const TArray<FGeneralPolygon2d>& WBSrc =
+							Narrow(Band, BandBoxes, BoxOf(Ribbon), NearBand);
+						if (WBSrc.Num() == 0) { return; }
+						if (!PolygonsIntersection(WBSrc, RArr, Piece) || Piece.Num() == 0) { return; }
 						if (Carve.Num() > 0)
 						{
+							const TArray<FGeneralPolygon2d>& CSrc =
+								Narrow(Carve, CarveBoxes, BoxOfArr(Piece), NearCarve);
 							TArray<FGeneralPolygon2d> Cut;
-							if (RoadNetSurface::Difference(Piece, Carve, Cut)) { Piece = MoveTemp(Cut); }
+							if (CSrc.Num() > 0 && RoadNetSurface::Difference(Piece, CSrc, Cut)) { Piece = MoveTemp(Cut); }
 						}
 						if (EmitPieces(MoveTemp(Piece), WalkEmitted, WalkBoxes, Walk[z], Key))
 						{
@@ -1547,9 +1602,13 @@ float URoadNetwork::AdjustSidewalkWidth(int32 RoadIdx, float DeltaCm)
 	return L.SidewalkWidth;
 }
 
-int32 URoadNetwork::AddStandardParkingBay(int32 RoadIdx, ERoadNetSide Side, ERoadNetParkingLayout Layout)
+int32 URoadNetwork::AddStandardParkingBay(int32 RoadIdx, ERoadNetSide Side, ERoadNetParkingLayout Layout,
+	double CenterArcCm)
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return INDEX_NONE; }
+#if WITH_EDITOR
+	MarkRoadForUndoRebuild(RoadIdx);
+#endif
 	FRoadNetParkingBay Bay;
 	Bay.Side    = (Side == ERoadNetSide::Left) ? ERoadNetSide::Left : ERoadNetSide::Right;
 	Bay.Layout  = Layout;
@@ -1564,33 +1623,81 @@ int32 URoadNetwork::AddStandardParkingBay(int32 RoadIdx, ERoadNetSide Side, ERoa
 		Bay.StallWidthCm = ParkingStallWidthCm;
 		Bay.StallDepthCm = ParkingStallDepthCm;
 	}
-	Bay.StartArcCm = 0.f;
-	Bay.LengthCm   = 0.f; // whole road
+
+	const double L       = RoadNetMath::TotalLength(Roads[RoadIdx].Ref);
+	const double Setback = FMath::Max(0.0, (double)ParkingBayJunctionSetbackCm);
+	const double Taper   = FMath::Max(0.0, (double)ParkingBayTaperCm);
+	// Keep the pocket (and tapers) clear of junctions at both ends.
+	const double Lo = Setback + Taper;
+	const double Hi = FMath::Max(Lo, L - (Setback + Taper));
+	const double Available = FMath::Max(0.0, Hi - Lo);
+	double Want = (ParkingBayLengthCm > 0.f)
+		? FMath::Min((double)ParkingBayLengthCm, Available) : Available;
+
+	Bay.TaperCm = ParkingBayTaperCm;
+	if (Want < 2.0 * (double)Bay.StallWidthCm)
+	{
+		// Too short to set back from both junctions — take what the road has and
+		// drop the taper rather than emitting a degenerate bay.
+		Want = FMath::Max(0.0, L);
+		Bay.TaperCm = 0.f;
+		Bay.StartArcCm = 0.f;
+		Bay.LengthCm   = (float)Want;
+		return Roads[RoadIdx].ParkingBays.Add(Bay);
+	}
+
+	// Centre on the authored edge point when given; otherwise mid-road.
+	const double Mid = (CenterArcCm >= 0.0) ? CenterArcCm : (0.5 * L);
+	double S0 = Mid - 0.5 * Want;
+	S0 = FMath::Clamp(S0, Lo, Hi - Want);
+	Bay.StartArcCm = (float)S0;
+	Bay.LengthCm   = (float)Want;
 	return Roads[RoadIdx].ParkingBays.Add(Bay);
 }
 
 int32 URoadNetwork::ClearParkingBays(int32 RoadIdx)
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return 0; }
+#if WITH_EDITOR
+	MarkRoadForUndoRebuild(RoadIdx);
+#endif
 	const int32 N = Roads[RoadIdx].ParkingBays.Num();
 	Roads[RoadIdx].ParkingBays.Reset();
 	return N;
 }
 
 #if WITH_EDITOR
-void URoadNetwork::PostEditUndo()
+void URoadNetwork::BeginAuthoringEdit()
 {
-	Super::PostEditUndo();
+	UndoRebuildRoads.Reset();
+}
 
-	// The transaction restored the reflected authoring state (Roads / junction
-	// overrides); rebind the world from our owning actor (the weak WorldPtr may
-	// have gone stale across the undo) and regenerate the disposable geometry so
-	// the viewport reflects the undone/redone edit.
+void URoadNetwork::MarkRoadForUndoRebuild(int32 RoadIdx)
+{
+	if (Roads.IsValidIndex(RoadIdx)) { UndoRebuildRoads.AddUnique(RoadIdx); }
+}
+
+void URoadNetwork::NotifyAuthoringUndoRedo()
+{
 	if (const AActor* Owner = GetTypedOuter<AActor>())
 	{
 		if (UWorld* World = Owner->GetWorld()) { WorldPtr = World; }
 	}
-	Rebuild();
+	// Keep UndoRebuildRoads so Redo can window the same roads; BeginAuthoringEdit
+	// clears it on the next real edit.
+	TArray<int32> Window = UndoRebuildRoads;
+	for (int32 i = Window.Num() - 1; i >= 0; --i)
+	{
+		if (!Roads.IsValidIndex(Window[i])) { Window.RemoveAtSwap(i); }
+	}
+	if (Window.Num() > 0) { Rebuild(Window); }
+	else { Rebuild(); }
+}
+
+void URoadNetwork::PostEditUndo()
+{
+	Super::PostEditUndo();
+	NotifyAuthoringUndoRedo();
 }
 #endif
 
@@ -1625,8 +1732,16 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 
 	const double tA = Now();
 	DeterminePendingRoads(Ctx);   // §10.17 scope
+	// Joints only read Roads[i].Ref / NodeIds, so the topology is available
+	// before any geometry — the vertical alignment stage needs it to know where
+	// the junctions (its vertical points of intersection) are.
+	BuildEndpointJoints(Ctx);     // §10.7 topology from shared node ids
 	BuildCurves(Ctx);             // §10.2–§10.4 reference line + outer edges
 	const double tCurves = Now();  Trace(TEXT("curves"), tCurves - tA);
+	BuildCrossings(Ctx);          // §10.12 grid broadphase (shared by zones+surface)
+	const double tCross = Now();   Trace(TEXT("crossings"), tCross - tCurves);
+	BuildVerticalAlignment(Ctx);  // § tangent grades between junctions + plates
+	const double tGrade = Now();   Trace(TEXT("grade"), tGrade - tCross);
 
 	// Snapshot the smoothed+densified centrelines for OSMRoadCore's terrain
 	// conform (see GetDeformCorridors). These are the SAME polylines the mesh is
@@ -1649,7 +1764,9 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 			const double Half = FMath::Max(50.0, (double)R.Lanes.HalfWidthCm());
 			const double Walk = (R.Lanes.bSidewalkLeft || R.Lanes.bSidewalkRight)
 				? (double)FMath::Max(0.f, R.Lanes.SidewalkWidth) : 0.0;
-			Cor.FlatHalfCm = Half + Walk;
+			// + the deepest parking pocket, so the terrain corridor covers the
+			// inclave instead of stopping at the nominal footprint edge.
+			Cor.FlatHalfCm = Half + Walk + R.MaxBayDepthCm();
 			Cor.bBridge = R.bBridge;
 			Cor.bTunnel = R.bTunnel;
 			Cor.Layer   = R.Layer;
@@ -1669,12 +1786,9 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 			DeformCorridors.Add(KV.Value);
 		}
 	}
-	BuildCrossings(Ctx);          // §10.12 grid broadphase (shared by zones+surface)
-	const double tCross = Now();   Trace(TEXT("crossings"), tCross - tCurves);
-	BuildEndpointJoints(Ctx);     // §10.7 topology from shared node ids
-	const double tJoints = Now();  Trace(TEXT("joints"), tJoints - tCross);
+	const double tSnap = Now();    Trace(TEXT("corridors"), tSnap - tGrade);
 	BuildZones(Ctx);              // §10.12 grade-separation layering
-	const double tZones = Now();   Trace(TEXT("zones"), tZones - tJoints);
+	const double tZones = Now();   Trace(TEXT("zones"), tZones - tSnap);
 	BuildSurfaceUnion(Ctx);       // §10.9 Clipper2 boolean-union per zone
 	const double tSurface = Now(); Trace(TEXT("surface"), tSurface - tZones);
 	BuildJunctionMarkings(Ctx);   // §2 junction paint (stop/crosswalk) + signals
@@ -1709,10 +1823,10 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 		Ctx.SurfacePolys.Num(), AreaM2, Ctx.SidewalkPolys.Num(), WalkM2, Ctx.PerimeterLoops.Num(),
 		Ctx.LaneConnections.Num(), Ms);
 	UE_LOG(LogRoadNet, Log,
-		TEXT("[RoadNet] Rebuild stages (ms): curves %.1f, crossings %.1f, joints %.1f, zones %.1f, surface %.1f, perimeters %.1f, lanegraph %.1f, commit %.1f."),
-		(tCurves - tA) * 1000.0, (tCross - tCurves) * 1000.0, (tJoints - tCross) * 1000.0,
-		(tZones - tJoints) * 1000.0, (tSurface - tZones) * 1000.0, (tPerim - tSurface) * 1000.0,
-		(tGraph - tPerim) * 1000.0, (tCommit - tRibbon) * 1000.0);
+		TEXT("[RoadNet] Rebuild stages (ms): curves+joints %.1f, crossings %.1f, grade %.1f, corridors %.1f, zones %.1f, surface %.1f, perimeters %.1f, lanegraph %.1f, commit %.1f."),
+		(tCurves - tA) * 1000.0, (tCross - tCurves) * 1000.0, (tGrade - tCross) * 1000.0,
+		(tSnap - tGrade) * 1000.0, (tZones - tSnap) * 1000.0, (tSurface - tZones) * 1000.0,
+		(tPerim - tSurface) * 1000.0, (tGraph - tPerim) * 1000.0, (tCommit - tRibbon) * 1000.0);
 }
 
 void URoadNetwork::DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const
@@ -1937,16 +2051,29 @@ void URoadNetwork::BuildCurves(FRoadNetRebuildContext& Ctx) const
 			}
 		};
 
-		if (R.OuterEdgeRight.Num() > 0 || R.OuterEdgeLeft.Num() > 0)
+		// Parking bays cut an INCLAVE: each bay pushes the carriageway outer edge
+		// out by its stall depth across the bay window, ramped over the entry and
+		// exit tapers. The sidewalk band is derived as dilate(carriageway) minus
+		// carriageway, so the walk retreats around the bulge on its own and the
+		// pocket appears — no separate sidewalk geometry needed.
+		if (R.OuterEdgeRight.Num() > 0 || R.OuterEdgeLeft.Num() > 0 || R.ParkingBays.Num() > 0)
 		{
 			TArray<double> S; ArcLengths(C.Sampled, S);
+			const double ArcLen = S.Last();
 			TArray<double> OffR, OffL;
 			OffR.SetNumUninitialized(C.Sampled.Num());
 			OffL.SetNumUninitialized(C.Sampled.Num());
 			for (int32 i = 0; i < C.Sampled.Num(); ++i)
 			{
-				OffR[i] = SampleProfile(R.OuterEdgeRight, S[i], +Half); // +side
-				OffL[i] = SampleProfile(R.OuterEdgeLeft,  S[i], -Half); // −side
+				double BulgeR = 0.0, BulgeL = 0.0;   // + side, − side
+				for (const FRoadNetParkingBay& Bay : R.ParkingBays)
+				{
+					const double B = Bay.BulgeAt(S[i], ArcLen);
+					double& Dst = (Bay.Side == ERoadNetSide::Left) ? BulgeL : BulgeR;
+					Dst = FMath::Max(Dst, B);
+				}
+				OffR[i] = SampleProfile(R.OuterEdgeRight, S[i], +Half) + BulgeR; // +side
+				OffL[i] = SampleProfile(R.OuterEdgeLeft,  S[i], -Half) - BulgeL; // −side
 			}
 			RoadNetMath::OffsetPolylineVariable(C.Sampled, OffR, C.LeftEdge);
 			RoadNetMath::OffsetPolylineVariable(C.Sampled, OffL, C.RightEdge);
@@ -2439,7 +2566,7 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 							if (W <= 0.0) { continue; }
 							const double Half = HalfWidth(RoadIdx);
 							const double In  = FMath::Max(1.0, Half - 30.0);
-							const double Out = Half + W + 60.0;
+							const double Out = Half + W + 60.0 + Roads[RoadIdx].MaxBayDepthCm();
 							FGeneralPolygon2d Mask;
 							if (L.bSidewalkLeft  && RoadNetSurface::BuildSideRibbon(C->Sampled, +In, +Out, Mask)) { Masks.Add(Mask); }
 							if (L.bSidewalkRight && RoadNetSurface::BuildSideRibbon(C->Sampled, -In, -Out, Mask)) { Masks.Add(Mask); }
@@ -2882,20 +3009,43 @@ int32 URoadNetwork::CommitLayer(
 		// this zone, then pick the lane band it lands in. Scoped to zone roads so
 		// the search stays small.
 		const TArray<int32>& ZoneRoads = Ctx.Zones[z];
+		// O(1) membership so the shared road grid's candidates can be filtered
+		// back down to this zone.
+		TSet<int32> ZoneRoadSet;
+		ZoneRoadSet.Reserve(ZoneRoads.Num());
+		ZoneRoadSet.Append(ZoneRoads);
 		TFunction<FVector3f(double, double)> ShadeFn =
-			[this, &Ctx, &ZoneRoads, BaseCol, EvenCol, OddCol](double X, double Y) -> FVector3f
+			[this, &Ctx, &ZoneRoads, &ZoneRoadSet, BaseCol, EvenCol, OddCol](double X, double Y) -> FVector3f
 		{
 			const FVector2D Q(X, Y);
 			int32 BestRoad = INDEX_NONE;
 			double BestDist = TNumericLimits<double>::Max();
 			double BestOffset = 0.0;
-			for (int32 r : ZoneRoads)
+			auto Consider = [&](int32 r)
 			{
 				const FRoadCurves* C = Ctx.Curves.Find(r);
-				if (!C || C->Sampled.Num() < 2) { continue; }
+				if (!C || C->Sampled.Num() < 2) { return; }
 				const RoadNetMath::FProjectResult PR = RoadNetMath::ProjectToPolyline(C->Sampled, Q);
 				if (PR.Distance < BestDist) { BestDist = PR.Distance; BestRoad = r; BestOffset = PR.Offset; }
+			};
+			// Narrow to nearby roads off the coarse sample grid (same 3x3 idiom as
+			// SegTileKeyForPoint). Projecting every road in the zone per vertex made
+			// this O(vertices x zone-roads x polyline-points) and stalled city commits.
+			constexpr double CellCm = 2000.0;
+			const FIntPoint Home(FMath::FloorToInt(X / CellCm), FMath::FloorToInt(Y / CellCm));
+			TArray<int32, TInlineAllocator<32>> Cands;
+			for (int32 dy = -1; dy <= 1; ++dy)
+			{
+				for (int32 dx = -1; dx <= 1; ++dx)
+				{
+					if (const TArray<int32>* Cell = Ctx.RoadSampleGrid.Find(FIntPoint(Home.X + dx, Home.Y + dy)))
+					{
+						for (int32 r : *Cell) { if (ZoneRoadSet.Contains(r)) { Cands.AddUnique(r); } }
+					}
+				}
 			}
+			for (int32 r : Cands) { Consider(r); }
+			if (BestRoad == INDEX_NONE) { for (int32 r : ZoneRoads) { Consider(r); } }
 			if (BestRoad == INDEX_NONE || !Roads.IsValidIndex(BestRoad)) { return BaseCol; }
 			const TArray<FRoadNetLane> Lanes = Roads[BestRoad].Lanes.ResolveLanes();
 			for (int32 i = 0; i < Lanes.Num(); ++i)
@@ -3151,6 +3301,20 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 	// edit, re-express the commit SCOPE from grid cells to the segment + junction
 	// tile keys actually touched — the grid corridor logic in DeterminePendingRoads
 	// still chose WHICH roads are pending; here we only translate that to tiles.
+	// A city-scale commit spends minutes inside these sub-stages with no output,
+	// which is indistinguishable from a freeze. Trace each one as it finishes.
+	const bool bTraceCommit = Roads.Num() > 50;
+	double tC = FPlatformTime::Seconds();
+	auto CTrace = [&](const TCHAR* Name)
+	{
+		const double Now = FPlatformTime::Seconds();
+		if (bTraceCommit)
+		{
+			UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   commit %-13s %8.1f ms"), Name, (Now - tC) * 1000.0);
+		}
+		tC = Now;
+	};
+
 	if (Ctx.bFullCommit)
 	{
 		SegKeyOf.Reset(); JunKeyOf.Reset(); SegAlias.Reset();
@@ -3158,13 +3322,16 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 		LastRoadJunctions.Reset();
 	}
 	BuildTopoAccel(Ctx);
+	CTrace(TEXT("topoaccel"));
 	// Divided-road pairing must run BEFORE any SegTileKey call this pass (the
 	// windowed dirty-tile block below, plus every commit) so paired carriageways
 	// resolve to the same tile everywhere.
 	BuildDividedPairs(Ctx);
+	CTrace(TEXT("dividedpairs"));
 	// § tiling v2: generate each segment tile's surface + sidewalks from its own
 	// arm run (ownership by construction) — CommitLayer consumes these buckets.
 	BuildTilePartition(Ctx);
+	CTrace(TEXT("tilepartition"));
 	if (!Ctx.bFullCommit)
 	{
 		TSet<FIntPoint> Topo;
@@ -3198,6 +3365,7 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 	// Clear the tiles we're allowed to rewrite before repopulating (full rebuild
 	// = all tiles; windowed = only the dirty segment/junction tiles).
 	PrepareTilesForCommit(Ctx);
+	CTrace(TEXT("preparetiles"));
 
 	// Drop the terrain-conform cache for the cells we're about to rebuild (ground
 	// surface layers repopulate them in CommitLayer); clean cells keep theirs.
@@ -3213,13 +3381,16 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 	const int32 RoadTris = CommitLayer(TEXT("Surface"),
 		Ctx.ZoneSurfacePolys, /*ExtraLift*/0.0, FColor(38, 38, 42), RoadMaterial, Ctx,
 		/*bBakeLaneColors*/true, /*bWorldUVs*/false, /*bConformSurface*/true);
+	CTrace(TEXT("layer:surface"));
 	const int32 WalkTris = CommitLayer(TEXT("Sidewalks"),
 		Ctx.ZoneSidewalkPolys, /*ExtraLift*/15.0, FColor(165, 162, 155), SidewalkMaterial, Ctx,
 		/*bBakeLaneColors*/false, /*bWorldUVs*/false, /*bConformSurface*/true);
+	CTrace(TEXT("layer:walks"));
 	const int32 WhiteTris = CommitLayer(TEXT("MarkingsWhite"),
 		Ctx.ZoneMarkingWhitePolys, /*ExtraLift*/4.0, FColor(232, 232, 226), MarkingWhiteMaterial, Ctx);
 	const int32 YellowTris = CommitLayer(TEXT("MarkingsYellow"),
 		Ctx.ZoneMarkingYellowPolys, /*ExtraLift*/4.0, FColor(240, 190, 30), MarkingYellowMaterial, Ctx);
+	CTrace(TEXT("layer:markings"));
 
 	// Typed-lane overlays: bike paths (green) + parking bays (amber) as thin
 	// surfaces lifted a hair above the carriageway and the paint, skinned with
@@ -3240,12 +3411,14 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 	// Kerb line rides on the same merged surface + sidewalk polys, so it must be
 	// committed AFTER the sidewalk band exists (it reads Ctx.ZoneSidewalkPolys).
 	CommitCurbs(Ctx);
+	CTrace(TEXT("curbs"));
 	CommitFurniture(Ctx);         // § street furniture (HISM instances / spawned Blueprint actors)
 	CommitJunctionSignals(Ctx);   // § traffic-signal placeholders at signalized junctions
 	CommitMedian(Ctx);            // § raised median strip + centre planting splines
 	CommitPerimeters(Ctx);
 	CommitLaneGraph(Ctx);
 	CommitSegmentSplines(Ctx);    // § per-segment editable centre + edge splines
+	CTrace(TEXT("furniture+etc"));
 
 	// Retire any cell this pass emptied out (all its layers/instances/splines
 	// gone). Clean tiles outside the commit scope are left untouched.

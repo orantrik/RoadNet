@@ -85,10 +85,13 @@ namespace RoadNetMesh
 		{
 			if (!CLPtr) { ++RoadId; continue; }
 			const TArray<FVector>& CL = *CLPtr;
+			double AccLen = 0.0;
 			for (int32 i = 0; i + 1 < CL.Num(); ++i)
 			{
-				Segs.Add({ FVector2D(CL[i].X, CL[i].Y), FVector2D(CL[i + 1].X, CL[i + 1].Y),
-					CL[i].Z, CL[i + 1].Z, RoadId });
+				const FVector2D A(CL[i].X, CL[i].Y), B(CL[i + 1].X, CL[i + 1].Y);
+				const double L = FVector2D::Distance(A, B);
+				Segs.Add({ A, B, CL[i].Z, CL[i + 1].Z, RoadId, AccLen, L, i });
+				AccLen += L;
 			}
 			++RoadId;
 		}
@@ -106,6 +109,64 @@ namespace RoadNetMesh
 				for (int32 cy = Y0; cy <= Y1; ++cy) { Grid.Add(FIntPoint(cx, cy), s); }
 			}
 		}
+	}
+
+	RoadNetMath::FProjectResult FCenterlineHeightField::ProjectNearest(double X, double Y) const
+	{
+		RoadNetMath::FProjectResult Best;
+		if (Segs.Num() == 0) { return Best; }
+		const FVector2D Q(X, Y);
+		const int32 CX = (int32)FMath::FloorToInt(X / CellCm);
+		const int32 CY = (int32)FMath::FloorToInt(Y / CellCm);
+
+		TArray<int32, TInlineAllocator<32>> Bucket;
+		auto TestSeg = [&](int32 s)
+		{
+			const FSeg& G = Segs[s];
+			double T;
+			const FVector2D C = RoadNetMath::ClosestOnSegment(G.A, G.B, Q, T);
+			const double D = FVector2D::Distance(Q, C);
+			const double Along = G.AlongA + T * G.Len;
+			// Same seam-safe tie-break as ProjectToPolyline so UVs don't flip
+			// between two segments sharing a vertex.
+			if (D < Best.Distance - 1e-4 ||
+				(FMath::Abs(D - Best.Distance) <= 1e-4 && Along < Best.AlongDist))
+			{
+				Best.Distance  = D;
+				Best.AlongDist = Along;
+				Best.Offset    = (G.Len > KINDA_SMALL_NUMBER)
+					? RoadNetMath::Cross2D((G.B - G.A) / G.Len, Q - G.A) : 0.0;
+				Best.Segment   = G.Local;
+				Best.Point     = C;
+			}
+		};
+
+		// Grow the search ring until the best hit is closer than the ring edge:
+		// anything still unvisited is at least Ring*CellCm away, so at that point
+		// no farther cell can beat it. The cap bounds the walk over empty space.
+		constexpr int32 MaxRing = 16;
+		for (int32 Ring = 0; Ring <= MaxRing; ++Ring)
+		{
+			for (int32 dy = -Ring; dy <= Ring; ++dy)
+			{
+				for (int32 dx = -Ring; dx <= Ring; ++dx)
+				{
+					// Ring shell only; interior cells were scanned on earlier passes.
+					if (Ring > 0 && FMath::Max(FMath::Abs(dx), FMath::Abs(dy)) != Ring) { continue; }
+					Bucket.Reset();
+					Grid.MultiFind(FIntPoint(CX + dx, CY + dy), Bucket);
+					for (int32 s : Bucket) { TestSeg(s); }
+				}
+			}
+			if (Best.Segment != INDEX_NONE && Best.Distance <= (double)Ring * CellCm) { break; }
+		}
+		// Nothing within the capped neighbourhood (isolated island far from any
+		// centreline): fall back to the exhaustive scan so the answer is exact.
+		if (Best.Segment == INDEX_NONE)
+		{
+			for (int32 s = 0; s < Segs.Num(); ++s) { TestSeg(s); }
+		}
+		return Best;
 	}
 
 	double FCenterlineHeightField::SampleHeight(double X, double Y, double Fallback) const
@@ -214,6 +275,50 @@ namespace RoadNetMesh
 		return 0.0;
 	}
 
+#if !UE_BUILD_SHIPPING
+	// One-shot self-check: the grid-accelerated ProjectNearest must agree with the
+	// exhaustive ProjectToPolyline scan it replaced, on distance, arc length and
+	// signed offset. Probes cover a near hit, a point beyond the ring cap (which
+	// must fall back to the full scan) and a point past a polyline's end.
+	static bool VerifyProjectNearest()
+	{
+		TArray<FVector> A, B;
+		for (int32 i = 0; i <= 40; ++i) { A.Add(FVector(i * 250.0, 0.0, 0.0)); }
+		for (int32 i = 0; i <= 40; ++i) { B.Add(FVector(5000.0, (i - 20) * 250.0, 0.0)); }
+		const TArray<const TArray<FVector>*> CLs = { &A, &B };
+		FCenterlineHeightField F;
+		F.Build(CLs);
+
+		const FVector2D Probes[] = {
+			FVector2D(1234.0, 300.0),   FVector2D(4800.0,   60.0),
+			FVector2D(2500.0, -75.0),   FVector2D(9800.0,  120.0),
+			FVector2D(-4000.0, -4000.0), FVector2D(60000.0, 60000.0),
+		};
+		bool bOk = true;
+		for (const FVector2D& Q : Probes)
+		{
+			RoadNetMath::FProjectResult Want;
+			for (const TArray<FVector>* CL : CLs)
+			{
+				const RoadNetMath::FProjectResult PR = RoadNetMath::ProjectToPolyline(*CL, Q);
+				if (PR.Distance < Want.Distance) { Want = PR; }
+			}
+			const RoadNetMath::FProjectResult Got = F.ProjectNearest(Q.X, Q.Y);
+			if (!FMath::IsNearlyEqual(Got.Distance,  Want.Distance,  0.1) ||
+				!FMath::IsNearlyEqual(Got.AlongDist, Want.AlongDist, 0.1) ||
+				!FMath::IsNearlyEqual(Got.Offset,    Want.Offset,    0.1))
+			{
+				UE_LOG(LogRoadNet, Warning,
+					TEXT("[RoadNet][PROJCHK] (%.0f,%.0f): grid d=%.1f along=%.1f off=%.1f, exhaustive d=%.1f along=%.1f off=%.1f"),
+					Q.X, Q.Y, Got.Distance, Got.AlongDist, Got.Offset,
+					Want.Distance, Want.AlongDist, Want.Offset);
+				bOk = false;
+			}
+		}
+		return bOk;
+	}
+#endif
+
 	int32 AppendSurfaceMesh(
 		const TArray<FGeneralPolygon2d>& Polys,
 		const TArray<const TArray<FVector>*>& CenterLines,
@@ -225,6 +330,10 @@ namespace RoadNetMesh
 		bool bGradientNormals,
 		bool bWorldUVs)
 	{
+#if !UE_BUILD_SHIPPING
+		static const bool bProjOk = VerifyProjectNearest();
+		(void)bProjOk;
+#endif
 		FCenterlineHeightField Field;
 		Field.Build(CenterLines);
 		const double FallbackZ = Field.FirstZ();
@@ -245,17 +354,12 @@ namespace RoadNetMesh
 		}
 		const double UVScale = (UVUnitCm > KINDA_SMALL_NUMBER) ? (1.0 / UVUnitCm) : 0.01;
 
-		// Nearest-centreline projection (offset + arc length) for UVs.
-		auto ProjectNearest = [&CenterLines](const FVector2D& Q) -> RoadNetMath::FProjectResult
+		// Nearest-centreline projection (offset + arc length) for UVs, answered
+		// off Field's grid. Scanning every centreline here instead made this
+		// O(vertices × roads × polyline-points) and stalled city-scale commits.
+		auto ProjectNearest = [&Field](const FVector2D& Q) -> RoadNetMath::FProjectResult
 		{
-			RoadNetMath::FProjectResult Best;
-			for (const TArray<FVector>* CLPtr : CenterLines)
-			{
-				if (!CLPtr || CLPtr->Num() < 2) { continue; }
-				const RoadNetMath::FProjectResult PR = RoadNetMath::ProjectToPolyline(*CLPtr, Q);
-				if (PR.Distance < Best.Distance) { Best = PR; }
-			}
-			return Best;
+			return Field.ProjectNearest(Q.X, Q.Y);
 		};
 
 		// Smooth normal from the blended height-field gradient (central diff).

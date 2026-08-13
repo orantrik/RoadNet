@@ -19,6 +19,15 @@
 
 #define LOCTEXT_NAMESPACE "RoadNetEditor"
 
+// On-screen width of the draw-time road ghost, in PIXELS. The ghost is drawn
+// with screen-space thickness so it holds this width at any camera distance —
+// the old world-space 1.5-2.5 cm lines were sub-pixel hairlines at city zoom.
+static TAutoConsoleVariable<float> CVarRoadNetGhostThickness(
+	TEXT("roadnet.GhostThickness"),
+	3.0f,
+	TEXT("Draw-time road ghost line width in screen pixels (the halo behind each line is 2 px wider). Default 3."),
+	ECVF_Default);
+
 IMPLEMENT_HIT_PROXY(HRoadNetPointProxy, HHitProxy);
 IMPLEMENT_HIT_PROXY(HRoadNetSegmentProxy, HHitProxy);
 IMPLEMENT_HIT_PROXY(HRoadNetLaneProxy, HHitProxy);
@@ -33,6 +42,13 @@ namespace
 	const FColor     kColorLine  = FColor(60, 170, 255);
 	const FColor     kColorPreview = FColor(255, 200, 60);
 	const FColor     kColorSnap  = FColor(255, 80, 80);
+	// Draw-time road ghost palette. Every ghost line is stroked twice — a wider
+	// near-black halo, then the bright line — so it reads against dark asphalt
+	// and against pale untextured terrain equally.
+	const FColor     kColorGhostHalo   = FColor(8, 8, 12);
+	const FColor     kColorGhostCurb   = FColor(255, 255, 255);
+	const FColor     kColorGhostLane   = FColor(215, 228, 245);
+	const FColor     kColorGhostCentre = FColor(255, 210, 40);
 	const FColor     kColorEditPt = FColor(120, 180, 255);
 	const FColor     kColorEditLine = FColor(90, 120, 160);
 	const FColor     kColorOsmLine = FColor(230, 150, 60);   // imported roads (selectable for lane edits)
@@ -77,7 +93,7 @@ void FEdModeRoadNet::Enter()
 			TEXT("RoadNet: pick a TOOL — OSM Roads panel or keys 1-5:  1 Draw  |  2 Points  |  3 Lanes  |  4 Junctions  |  5 Edge\n"
 			     "Draw: LMB adds points, Enter/RMB finish.   Points: LMB select, marquee, drag=move, Del delete, Ctrl+LMB split, U merge, P edit-all.\n"
 			     "Lanes: click a lane, =/- add/remove, Shift+= / Shift+- insert beside it, B cycle type (bike/parking).\n"
-			     "Junctions: J mark, K island, [ ] smoothing, M median (Shift+M edge, , . width).   Edge: drag outer-edge vertices.\n"
+			     "Junctions: J mark, K island, [ ] smoothing, M median (Shift+M edge, , . width).   Edge: drag outer-edge vertices; P = parking bay left+right of selected point.\n"
 			     "Ctrl+Z undo  |  Full cheat-sheet: 'OSM Roads' panel > Legend tab"));
 	}
 }
@@ -132,31 +148,88 @@ void FEdModeRoadNet::DrawRoadGhost(FPrimitiveDrawInterface* PDI, const TArray<FV
 {
 	if (!PDI || Center.Num() < 2) { return; }
 
-	// Half footprint = half the carriageway + a sidewalk each side, from the draft
-	// settings the finished road will use (fallback ~2 lanes if no actor yet).
-	double Half = 350.0;
+	// Layout from the draft settings the finished road will use (fallback ~2
+	// lanes if there is no actor yet).
+	int32  LaneCount = 2;
+	double LaneWidth = 350.0;
+	double WalkWidth = 200.0;
 	if (const ARoadNetActor* A = NetActorPtr.Get())
 	{
-		const double Carriage = FMath::Max(1, A->DraftLaneCount) * FMath::Max(150.f, A->DraftLaneWidthCm);
-		Half = Carriage * 0.5 + (A->bDraftSidewalks ? FMath::Max(50.f, A->DraftSidewalkWidthCm) : 0.0);
+		LaneCount = FMath::Max(1, A->DraftLaneCount);
+		LaneWidth = FMath::Max(150.f, A->DraftLaneWidthCm);
+		WalkWidth = A->bDraftSidewalks ? FMath::Max(50.f, A->DraftSidewalkWidthCm) : 0.0;
+	}
+	const double CarriageHalf = 0.5 * LaneCount * LaneWidth;
+	const double Half         = CarriageHalf + WalkWidth;
+
+	// Carriageway boundaries: the two curbs plus every lane divider.
+	TArray<double> Bounds;
+	Bounds.Reserve(LaneCount + 1);
+	for (int32 k = 0; k <= LaneCount; ++k) { Bounds.Add(-CarriageHalf + k * LaneWidth); }
+	// Self-check: the ladder must be symmetric about the centreline, strictly
+	// increasing, and have exactly one more boundary than there are lanes.
+	ensureMsgf(Bounds.Num() == LaneCount + 1, TEXT("[RoadNet] ghost lane ladder: %d boundaries for %d lanes"),
+		Bounds.Num(), LaneCount);
+	for (int32 k = 0; k <= LaneCount; ++k)
+	{
+		ensureMsgf(k == 0 || Bounds[k] > Bounds[k - 1], TEXT("[RoadNet] ghost lane ladder not increasing at %d"), k);
+		ensureMsgf(FMath::IsNearlyEqual(Bounds[k], -Bounds[LaneCount - k], 0.01),
+			TEXT("[RoadNet] ghost lane ladder not symmetric at %d"), k);
 	}
 
-	TArray<FVector> Right, Left;
+	// Lift clear of the ground: the ghost is traced ON the landscape, so at the
+	// sampled elevation it z-fights and reads as a broken hairline.
+	constexpr double kLiftCm = 25.0;
+	const float Thick = FMath::Max(0.5f, CVarRoadNetGhostThickness.GetValueOnAnyThread());
+
+	auto Stroke = [&](const TArray<FVector>& Poly, const FColor& Colour, float Scale)
+	{
+		const float Wide = Thick * Scale;
+		for (int32 i = 1; i < Poly.Num(); ++i)
+		{
+			const FVector A(Poly[i - 1].X, Poly[i - 1].Y, Poly[i - 1].Z + kLiftCm);
+			const FVector B(Poly[i].X,     Poly[i].Y,     Poly[i].Z     + kLiftCm);
+			PDI->DrawLine(A, B, kColorGhostHalo, SDPG_Foreground, Wide + 2.f, 0.f, /*bScreenSpace*/ true);
+			PDI->DrawLine(A, B, Colour,          SDPG_Foreground, Wide,       0.f, /*bScreenSpace*/ true);
+		}
+	};
+
+	TArray<FVector> Right, Left, Poly;
 	RoadNetMath::OffsetPolyline(Center, +Half, Right);
 	RoadNetMath::OffsetPolyline(Center, -Half, Left);
 
-	const FColor Ghost = kColorLine;   // road-edge ghost (matches the draw palette)
+	// Outer footprint (the sidewalk edge), only when it is not the curb itself.
+	if (WalkWidth > 1.0)
+	{
+		Stroke(Right, kColorLine, 1.0f);
+		Stroke(Left,  kColorLine, 1.0f);
+	}
 
-	// Centreline + both outer edges.
-	for (int32 i = 1; i < Center.Num(); ++i) { PDI->DrawLine(Center[i - 1], Center[i], kColorPreview, SDPG_Foreground, 1.5f); }
-	for (int32 i = 1; i < Right.Num();  ++i) { PDI->DrawLine(Right[i - 1],  Right[i],  Ghost, SDPG_Foreground, 2.5f); }
-	for (int32 i = 1; i < Left.Num();   ++i) { PDI->DrawLine(Left[i - 1],   Left[i],   Ghost, SDPG_Foreground, 2.5f); }
+	// Curbs, then the lane dividers — the centre divider styled yellow so the
+	// ghost matches the built road's palette.
+	for (int32 k = 0; k <= LaneCount; ++k)
+	{
+		const bool bCurb   = (k == 0 || k == LaneCount);
+		const bool bCentre = !bCurb && FMath::IsNearlyZero(Bounds[k], 1.0);
+		RoadNetMath::OffsetPolyline(Center, Bounds[k], Poly);
+		Stroke(Poly,
+			bCurb ? kColorGhostCurb : (bCentre ? kColorGhostCentre : kColorGhostLane),
+			bCurb ? 1.0f            : (bCentre ? 0.85f             : 0.6f));
+	}
 
-	// Cross rungs convey the surface between the edges (capped so long freehand
-	// roads stay cheap). Right/Left carry one vertex per Center vertex.
+	// The draft path itself, on top.
+	Stroke(Center, kColorPreview, 0.6f);
+
+	// Cross rungs, dimmer now that the lane lines convey the surface (capped so
+	// long freehand roads stay cheap). Right/Left carry one vertex per Center.
 	const int32 N = FMath::Min3(Center.Num(), Right.Num(), Left.Num());
 	const int32 Step = FMath::Max(1, N / 32);
-	for (int32 i = 0; i < N; i += Step) { PDI->DrawLine(Left[i], Right[i], Ghost, SDPG_Foreground, 1.f); }
+	for (int32 i = 0; i < N; i += Step)
+	{
+		const FVector A(Left[i].X,  Left[i].Y,  Left[i].Z  + kLiftCm);
+		const FVector B(Right[i].X, Right[i].Y, Right[i].Z + kLiftCm);
+		PDI->DrawLine(A, B, kColorGhostLane, SDPG_Foreground, Thick * 0.5f, 0.f, /*bScreenSpace*/ true);
+	}
 }
 
 // Defined further down; forward-declared so the debounce flush (above it) can
@@ -542,10 +615,15 @@ void FEdModeRoadNet::ModifyForEdit()
 {
 	// Modify the actor (owns the sub-object) AND the network (owns the Roads
 	// array) so the whole authoring state is snapshotted into the transaction.
-	if (ARoadNetActor* Actor = NetActorPtr.Get())
+	// Resolve the actor first — NetActorPtr can be stale until GetOrCreate runs.
+	if (ARoadNetActor* Actor = GetOrSpawnNetActor())
 	{
 		Actor->Modify();
-		if (URoadNetwork* Net = Actor->GetNetwork()) { Net->Modify(); }
+		if (URoadNetwork* Net = Actor->GetNetwork())
+		{
+			Net->BeginAuthoringEdit();
+			Net->Modify();
+		}
 	}
 }
 
@@ -1325,50 +1403,69 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				return true;
 			}
 
-			// Standard parking bay (Lanes tool, draft not in progress):
-			//   'P'       → add a standard parking bay to the selected road on the
-			//               selected lane's side, using the panel-selected layout
-			//               (roadnet.ParkingLayout: 0=Parallel 1=Perp 2=Angled).
+			// Standard parking bay (Edge tool, draft not in progress):
+			//   'P'       → centre a bay on the selected edge point, LEFT and RIGHT.
+			//               Layout from roadnet.ParkingLayout (0=Parallel 1=Perp 2=Angled).
 			//   'Shift+P' → clear all standard parking bays from the road.
-			// Falls back to the road under the cursor + right side when no lane is
-			// selected, so it also works as a quick "select side + action".
-			if (Tool == ERoadNetDrawTool::Lanes && Key == EKeys::P)
+			if (Tool == ERoadNetDrawTool::Edge && Key == EKeys::P)
 			{
 				URoadNetwork* Net = GetNetwork();
 				if (!Net) { return true; }
 
 				int32 Target = SelRoad;
-				if (Target == INDEX_NONE && ViewportClient)
-				{
-					FVector Hit;
-					if (LineTraceCursor(ViewportClient, Hit))
-					{
-						const TArray<FRoadDef>& Roads = Net->GetRoads();
-						double BestD2 = FMath::Square(2000.0);
-						for (int32 r = 0; r < Roads.Num(); ++r)
-						{
-							const FRoadDef& Rd = Roads[r];
-							for (int32 i = 0; i + 1 < Rd.Ref.Num(); ++i)
-							{
-								const FVector C = FMath::ClosestPointOnSegment(Hit, Rd.Ref[i], Rd.Ref[i + 1]);
-								const double D2 = FVector::DistSquaredXY(Hit, C);
-								if (D2 < BestD2) { BestD2 = D2; Target = r; }
-							}
-						}
-					}
-				}
 				if (Target == INDEX_NONE)
 				{
 					if (GEngine)
 					{
 						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
-							TEXT("RoadNet: select/hover a road (and a lane for its side), then P to add a parking bay"));
+							TEXT("RoadNet: Edge tool → select an edge point → P to add parking bays left+right"));
 					}
 					return true;
 				}
 
 				const bool bShiftP = Viewport &&
 					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
+
+				// Resolve everything BEFORE opening a transaction so Ctrl+Z only
+				// undoes a completed parking-bay edit.
+				double CenterArc = 0.0;
+				ERoadNetParkingLayout Layout = ERoadNetParkingLayout::Parallel;
+				const TCHAR* LayoutName = TEXT("Parallel");
+				if (!bShiftP)
+				{
+					if (SelEdgeKnot == INDEX_NONE)
+					{
+						if (GEngine)
+						{
+							GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+								TEXT("RoadNet: select an edge point, then P (or Add Parking Bay)"));
+						}
+						return true;
+					}
+					TArray<FRoadNetEdgeKnot> Profile;
+					Net->GetOuterEdgeForDisplay(SelRoad,
+						bSelEdgeRight ? ERoadNetSide::Right : ERoadNetSide::Left, Profile);
+					if (!Profile.IsValidIndex(SelEdgeKnot))
+					{
+						if (GEngine)
+						{
+							GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+								TEXT("RoadNet: select a valid edge point, then P"));
+						}
+						return true;
+					}
+					CenterArc = Profile[SelEdgeKnot].Distance;
+
+					int32 LayoutInt = 0;
+					if (IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(TEXT("roadnet.ParkingLayout")))
+					{
+						LayoutInt = FMath::Clamp(CV->GetInt(), 0, 2);
+					}
+					Layout = (ERoadNetParkingLayout)(uint8)LayoutInt;
+					LayoutName =
+						(Layout == ERoadNetParkingLayout::Parallel)      ? TEXT("Parallel") :
+						(Layout == ERoadNetParkingLayout::Perpendicular) ? TEXT("Perpendicular") : TEXT("Angled");
+				}
 
 				const FScopedTransaction Transaction(LOCTEXT("RoadNetParkingBay", "Edit RoadNet Parking Bay"));
 				ModifyForEdit();
@@ -1381,32 +1478,15 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				}
 				else
 				{
-					// Side from the selected lane (else default right).
-					ERoadNetSide Side = ERoadNetSide::Right;
-					const TArray<FRoadNetLane> Lanes = Net->GetLanesLeftToRight(Target);
-					if (Lanes.IsValidIndex(SelLane))
-					{
-						Side = (Lanes[SelLane].CenterOffset < 0.0) ? ERoadNetSide::Left : ERoadNetSide::Right;
-					}
-
-					int32 LayoutInt = 0;
-					if (IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(TEXT("roadnet.ParkingLayout")))
-					{
-						LayoutInt = FMath::Clamp(CV->GetInt(), 0, 2);
-					}
-					const ERoadNetParkingLayout Layout = (ERoadNetParkingLayout)(uint8)LayoutInt;
-					const TCHAR* LayoutName =
-						(Layout == ERoadNetParkingLayout::Parallel)      ? TEXT("Parallel") :
-						(Layout == ERoadNetParkingLayout::Perpendicular) ? TEXT("Perpendicular") : TEXT("Angled");
-
-					Net->AddStandardParkingBay(Target, Side, Layout);
-					Msg = FString::Printf(TEXT("RoadNet: added %s parking bay on road %d (%s side)"),
-						LayoutName, Target, (Side == ERoadNetSide::Left) ? TEXT("left") : TEXT("right"));
+					Net->AddStandardParkingBay(Target, ERoadNetSide::Left,  Layout, CenterArc);
+					Net->AddStandardParkingBay(Target, ERoadNetSide::Right, Layout, CenterArc);
+					Msg = FString::Printf(TEXT("RoadNet: added %s parking bays left+right on road %d at arc %.0f cm"),
+						LayoutName, Target, CenterArc);
 				}
 
 				SelRoad = Target;
 				SelPoint = INDEX_NONE;
-				{ const int32 M = Target; Net->Rebuild(MakeArrayView(&M, 1)); }   // windowed: one road's stalls
+				{ const int32 M = Target; Net->Rebuild(MakeArrayView(&M, 1)); }
 				if (GEngine) { GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Cyan, Msg); }
 				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
@@ -2191,6 +2271,10 @@ void FEdModeRoadNet::FinalizeDraft()
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw: committed a hand-drawn road (shape %d) with %d points."),
 		(int32)Shape, R.Ref.Num());
 	DraftPoints.Reset();
+
+	// Same effect as pressing "Conform Terrain" — OSMRoadCore registers the
+	// sculpt handler; no-op if that module isn't loaded.
+	RoadNetEditorBridge::NotifyRoadSegmentPlaced();
 }
 
 bool FEdModeRoadNet::AddParkingBayToActiveSelection(uint8 LayoutInt, FString& OutMsg)
@@ -2198,35 +2282,51 @@ bool FEdModeRoadNet::AddParkingBayToActiveSelection(uint8 LayoutInt, FString& Ou
 	URoadNetwork* Net = GetNetwork();
 	if (!Net)
 	{
+		// Mode may be active before the actor pointer is cached.
+		if (ARoadNetActor* Actor = GetOrSpawnNetActor()) { Net = Actor->GetNetwork(); }
+	}
+	if (!Net)
+	{
 		OutMsg = TEXT("No RoadNet network in the level — import or draw a road first.");
 		return false;
 	}
-	if (SelRoad == INDEX_NONE)
+	if (ActiveTool() != ERoadNetDrawTool::Edge)
 	{
-		OutMsg = TEXT("Select a road (and a lane for its side) in the RoadNet mode first.");
+		OutMsg = TEXT("Switch to the Edge tool (key 5), select an edge point, then Add Parking Bay.");
+		return false;
+	}
+	if (SelRoad == INDEX_NONE || SelEdgeKnot == INDEX_NONE)
+	{
+		OutMsg = TEXT("Select an Edge-tool point first — the bay is centred on that point, left and right.");
 		return false;
 	}
 
-	// Side from the selected lane (else default to the right side).
-	ERoadNetSide Side = ERoadNetSide::Right;
-	const TArray<FRoadNetLane> Lanes = Net->GetLanesLeftToRight(SelRoad);
-	if (Lanes.IsValidIndex(SelLane))
+	// Arc length of the selected edge handle — bay window is centred here.
+	TArray<FRoadNetEdgeKnot> Profile;
+	Net->GetOuterEdgeForDisplay(SelRoad,
+		bSelEdgeRight ? ERoadNetSide::Right : ERoadNetSide::Left, Profile);
+	if (!Profile.IsValidIndex(SelEdgeKnot))
 	{
-		Side = (Lanes[SelLane].CenterOffset < 0.0) ? ERoadNetSide::Left : ERoadNetSide::Right;
+		OutMsg = TEXT("Selected edge point is invalid — click an edge handle again.");
+		return false;
 	}
+	const double CenterArc = Profile[SelEdgeKnot].Distance;
 
 	const ERoadNetParkingLayout Layout = (ERoadNetParkingLayout)(uint8)FMath::Clamp((int32)LayoutInt, 0, 2);
 	const TCHAR* LayoutName =
 		(Layout == ERoadNetParkingLayout::Parallel)      ? TEXT("Parallel") :
 		(Layout == ERoadNetParkingLayout::Perpendicular) ? TEXT("Perpendicular") : TEXT("Angled");
 
+	// Validate first, THEN open the transaction so Ctrl+Z only undoes a real add.
 	const FScopedTransaction Transaction(LOCTEXT("RoadNetParkingBayPanel", "Add RoadNet Parking Bay"));
 	ModifyForEdit();
-	Net->AddStandardParkingBay(SelRoad, Side, Layout);
+	// One bay on each kerb, both centred on the selected edge point.
+	Net->AddStandardParkingBay(SelRoad, ERoadNetSide::Left,  Layout, CenterArc);
+	Net->AddStandardParkingBay(SelRoad, ERoadNetSide::Right, Layout, CenterArc);
 	{ const int32 M = SelRoad; Net->Rebuild(MakeArrayView(&M, 1)); }   // windowed
 
-	OutMsg = FString::Printf(TEXT("Added %s parking bay on road %d (%s side)."),
-		LayoutName, SelRoad, (Side == ERoadNetSide::Left) ? TEXT("left") : TEXT("right"));
+	OutMsg = FString::Printf(TEXT("Added %s parking bays left+right on road %d at arc %.0f cm."),
+		LayoutName, SelRoad, CenterArc);
 	return true;
 }
 
@@ -2239,6 +2339,26 @@ bool RoadNetEditorBridge::AddParkingBayToActiveSelection(uint8 LayoutInt, FStrin
 		return false;
 	}
 	return static_cast<FEdModeRoadNet*>(Mode)->AddParkingBayToActiveSelection(LayoutInt, OutMsg);
+}
+
+static TFunction<void()> GPostPlaceConformHandler;
+
+void RoadNetEditorBridge::SetPostPlaceConformHandler(TFunction<void()>&& Handler)
+{
+	GPostPlaceConformHandler = MoveTemp(Handler);
+}
+
+void RoadNetEditorBridge::ClearPostPlaceConformHandler()
+{
+	GPostPlaceConformHandler = nullptr;
+}
+
+void RoadNetEditorBridge::NotifyRoadSegmentPlaced()
+{
+	if (GPostPlaceConformHandler)
+	{
+		GPostPlaceConformHandler();
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

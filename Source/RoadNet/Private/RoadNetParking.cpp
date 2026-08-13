@@ -108,26 +108,77 @@ void URoadNetwork::BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const
 		{
 			const double Depth  = FMath::Max(50.f, Bay.StallDepthCm);
 			const double Stall  = FMath::Max(50.f, Bay.StallWidthCm);
-			const double S0     = FMath::Clamp((double)Bay.StartArcCm, 0.0, Len);
-			const double S1     = (Bay.LengthCm > 0.f) ? FMath::Min(Len, S0 + (double)Bay.LengthCm) : Len;
-			if (S1 - S0 < 1.0) { continue; }
+			const double Taper  = FMath::Max(0.0, (double)Bay.TaperCm);
+			double S0 = 0.0, S1 = 0.0;
+			if (!Bay.ResolveWindow(Len, S0, S1)) { continue; }
 
 			const double Sign = (Bay.Side == ERoadNetSide::Left) ? -1.0 : +1.0;
-			const double InnerOff = Sign * Half;
-			const double OuterOff = Sign * (Half + Depth);
 
-			// Windowed centreline for this bay.
+			// Flat window centreline — the part with full stall depth.
 			TArray<FVector> Win;
 			ExtractArcWindow(P, CL, S0, S1, Win);
 			if (Win.Num() < 2) { continue; }
 
-			// (a) Bay surface: the ribbon between the carriageway edge and the
-			// outer stall depth → parking overlay bank (amber / ParkingMaterial).
-			FGeneralPolygon2d BayPoly;
-			if (RoadNetSurface::BuildSideRibbon(Win, InnerOff, OuterOff, BayPoly))
+			// (a) Bay surface → parking overlay bank (amber / ParkingMaterial).
+			// The ribbon spans the tapers too and its outer edge follows the SAME
+			// Bay.BulgeAt profile the carriageway edge was bulged by in
+			// BuildCurves, so the amber fills the inclave exactly.
 			{
-				Ctx.ZoneLaneParkPolys[z].Add(MoveTemp(BayPoly));
-				++BayCount;
+				const double R0 = FMath::Max(0.0, S0 - Taper);
+				const double R1 = FMath::Min(Len, S1 + Taper);
+				TArray<FVector> Rib;
+				ExtractArcWindow(P, CL, R0, R1, Rib);
+				TArray<double> RibCL;
+				if (Rib.Num() >= 2)
+				{
+					RoadNetMath::CumulativeLength(Rib, RibCL);
+					TArray<double> InnerOff, OuterOff;
+					InnerOff.SetNumUninitialized(Rib.Num());
+					OuterOff.SetNumUninitialized(Rib.Num());
+					for (int32 i = 0; i < Rib.Num(); ++i)
+					{
+						InnerOff[i] = Sign * Half;
+						OuterOff[i] = Sign * (Half + Bay.BulgeAt(R0 + RibCL[i], Len));
+					}
+					TArray<FVector> In3, Out3;
+					RoadNetMath::OffsetPolylineVariable(Rib, InnerOff, In3);
+					RoadNetMath::OffsetPolylineVariable(Rib, OuterOff, Out3);
+					if (In3.Num() >= 2 && Out3.Num() == In3.Num())
+					{
+						TArray<FVector2d> Loop;
+						Loop.Reserve(In3.Num() * 2);
+						for (int32 i = 0; i < In3.Num(); ++i)       { Loop.Emplace(In3[i].X, In3[i].Y); }
+						for (int32 i = Out3.Num() - 1; i >= 0; --i) { Loop.Emplace(Out3[i].X, Out3[i].Y); }
+						FPolygon2d Poly(Loop);
+						if (Poly.VertexCount() >= 3 && FMath::Abs(Poly.SignedArea()) >= 1.0)
+						{
+							if (Poly.IsClockwise()) { Poly.Reverse(); }
+							FGeneralPolygon2d BayPoly;
+							BayPoly.SetOuter(Poly);
+							Ctx.ZoneLaneParkPolys[z].Add(MoveTemp(BayPoly));
+							++BayCount;
+						}
+					}
+				}
+			}
+
+			// Self-check: the inclave only exists if BuildCurves actually bulged
+			// the carriageway edge here. Fails loudly if the two ever disagree.
+			{
+				const TArray<FVector>& Edge = (Sign > 0.0) ? C->LeftEdge : C->RightEdge;
+				if (Edge.Num() == P.Num())
+				{
+					const double Smid = 0.5 * (S0 + S1);
+					int32 im = 0;
+					while (im + 1 < CL.Num() && CL[im + 1] < Smid) { ++im; }
+					const double Reach = FVector::Dist2D(P[im], Edge[im]);
+					if (Reach < Half + 0.5 * Depth)
+					{
+						UE_LOG(LogRoadNet, Warning,
+							TEXT("[RoadNet] Parking bay on road %d cut no pocket: carriageway edge reaches %.0f cm at the bay centre, expected ~%.0f cm."),
+							RoadIdx, Reach, Half + Depth);
+					}
+				}
 			}
 
 			// (b) Stall divider lines. Angle to the kerb: 90° for parallel /
@@ -160,7 +211,8 @@ void URoadNetwork::BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const
 				OutTan = Tan;
 			};
 
-			// One divider at each stall boundary across the whole window.
+			// One divider at each stall boundary, across the FLAT window only —
+			// the tapers are the entry/exit throat, not a stall.
 			for (double S = 0.0; S <= WinLen + 1e-3; S += AlongSpacing)
 			{
 				FVector2D Base, Tan;

@@ -115,3 +115,14 @@ void ARoadNetActor::ClearHandDrawn()
 	Net->Rebuild();
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] ClearHandDrawn: removed %d hand-drawn road(s)."), Removed);
 }
+
+#if WITH_EDITOR
+void ARoadNetActor::PostEditUndo()
+{
+	Super::PostEditUndo();
+	if (URoadNetwork* Net = GetNetwork())
+	{
+		Net->NotifyAuthoringUndoRedo();
+	}
+}
+#endif

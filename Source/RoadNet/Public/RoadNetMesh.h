@@ -1,6 +1,7 @@
 #pragma once
 #include "CoreMinimal.h"
 #include "Curve/GeneralPolygon2.h"
+#include "RoadNetMath.h"
 
 // ===========================================================================
 // RoadNetMesh — triangulate the merged 2-D surface into a 3-D FDynamicMesh3
@@ -30,11 +31,20 @@ namespace RoadNetMesh
 		// Returns Fallback if the field is empty or nothing is found nearby.
 		double SampleHeight(double X, double Y, double Fallback) const;
 
+		// Nearest-centerline projection at (X,Y) off the SAME grid, matching
+		// RoadNetMath::ProjectToPolyline's conventions (AlongDist is arc length
+		// from that centerline's start, Offset is signed +right of travel).
+		// Segment is the hit's index within its own centerline. Distance stays
+		// TNumericLimits<double>::Max() if the field is empty.
+		RoadNetMath::FProjectResult ProjectNearest(double X, double Y) const;
+
 		double FirstZ() const { return FallbackZ; }
 		bool IsEmpty() const { return Segs.Num() == 0; }
 
 	private:
-		struct FSeg { FVector2D A, B; double Za, Zb; int32 Road; };
+		// AlongA/Len carry the arc length so a projection can be answered from a
+		// single segment without walking its whole polyline.
+		struct FSeg { FVector2D A, B; double Za, Zb; int32 Road; double AlongA; double Len; int32 Local; };
 		TArray<FSeg> Segs;
 		TMultiMap<FIntPoint, int32> Grid;
 		double CellCm = 1000.0;

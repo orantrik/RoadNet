@@ -73,4 +73,10 @@ public:
 
 	// Get (lazily create) the owned network, bound to this actor's world.
 	URoadNetwork* GetNetwork();
+
+#if WITH_EDITOR
+	// Undo restores Network->Roads (incl. ParkingBays) on the instanced sub-object;
+	// regenerate disposable tile geometry so Ctrl+Z is visible in the viewport.
+	virtual void PostEditUndo() override;
+#endif
 };

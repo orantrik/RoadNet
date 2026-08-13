@@ -417,6 +417,26 @@ public:
 		meta = (ClampMin = "30.0", UIMin = "30.0", UIMax = "90.0"))
 	float ParkingAngleDeg = 45.f;           // angled layout stall angle
 
+	// Default arc-length window (cm) of a new bay, centred on the road. 0 = as
+	// long as the road allows after the junction setback. The bay is an INCLAVE
+	// — it bulges the carriageway edge out and the sidewalk retreats around it —
+	// so it must stop short of the junctions.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parking",
+		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "10000.0"))
+	float ParkingBayLengthCm = 3000.f;
+
+	// Clearance (cm) kept between each end of a new bay's taper and the road end,
+	// so a pocket never eats into an intersection.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parking",
+		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "5000.0"))
+	float ParkingBayJunctionSetbackCm = 1200.f;
+
+	// Entry/exit taper (cm) of a new bay — the slanted throat the pocket opens
+	// through. ~800 is a 1:3 taper for a 2.5 m deep bay.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parking",
+		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "2000.0"))
+	float ParkingBayTaperCm = 0.f; // 0 = constant-depth rectangular pocket
+
 	// Nudge JunctionSmoothingCm by DeltaCm (clamped ≥ 0). Returns the new value.
 	// Caller triggers Rebuild(). Wired to the [ / ] hotkeys.
 	double AdjustJunctionSmoothing(double DeltaCm);
@@ -529,10 +549,12 @@ public:
 
 	// ---- standard parking bays (street features) --------------------------
 	// Append a standard parking bay to a road on the given side + layout, using
-	// the network's default stall dimensions. Returns the new bay index in the
-	// road's ParkingBays, or INDEX_NONE on a bad road index. Caller triggers
-	// Rebuild().
-	int32 AddStandardParkingBay(int32 RoadIdx, ERoadNetSide Side, ERoadNetParkingLayout Layout);
+	// the network's default stall dimensions. CenterArcCm is the arc-length (cm)
+	// along the road where the bay is centred; < 0 centres it on the road mid.
+	// Returns the new bay index in ParkingBays, or INDEX_NONE on a bad road.
+	// Caller triggers Rebuild().
+	int32 AddStandardParkingBay(int32 RoadIdx, ERoadNetSide Side, ERoadNetParkingLayout Layout,
+		double CenterArcCm = -1.0);
 
 	// Remove all standard parking bays from a road. Returns the count removed.
 	// Caller triggers Rebuild().
@@ -668,6 +690,18 @@ public:
 	// but the generated geometry (dynamic-mesh + HISM actors) is not part of the
 	// transaction — so regenerate it here to match the restored authoring state.
 	virtual void PostEditUndo() override;
+
+	// Called from ARoadNetActor::PostEditUndo (instanced sub-objects don't always
+	// receive PostEditUndo themselves). Rebuilds only roads marked by the last
+	// edit when possible, else the whole network.
+	void NotifyAuthoringUndoRedo();
+
+	// Remember which road(s) an edit touched so undo/redo can window the rebuild
+	// instead of re-meshing the whole city (Ctrl+Z must stay interactive).
+	void MarkRoadForUndoRebuild(int32 RoadIdx);
+
+	// Call at the start of a new editor transaction so the undo window is fresh.
+	void BeginAuthoringEdit();
 #endif
 
 private:
@@ -786,11 +820,23 @@ private:
 	TArray<FVector> ConformVerts;
 	TArray<int32>   ConformTris;
 
+#if WITH_EDITOR
+	// Not serialized / not in the transaction: which roads the last authoring
+	// edit touched, so PostEditUndo/NotifyAuthoringUndoRedo can window Rebuild.
+	TArray<int32> UndoRebuildRoads;
+#endif
+
 	// ---- pipeline stages (§10.18) --------------------------------------
 	void DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const;
 	void BuildCurves(FRoadNetRebuildContext& Ctx) const;
 	void BuildCrossings(FRoadNetRebuildContext& Ctx) const;      // §10.12 grid broadphase (shared)
 	void BuildEndpointJoints(FRoadNetRebuildContext& Ctx) const;
+	// Vertical alignment: junctions become the vertical points of intersection,
+	// the road runs a straight tangent grade between them (with a span-scaled
+	// deviation budget so long links may still follow the ground), and each
+	// junction gets a flat plate plus a smooth grade transition. Rewrites
+	// Ctx.Curves[..].Sampled/LeftEdge/RightEdge Z in place. See RoadNetGrade.cpp.
+	void BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const;
 	void BuildZones(FRoadNetRebuildContext& Ctx) const;          // §10.12 grade separation
 	void BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const;   // §10.9 per-zone union + §8.12 sidewalks
 	void BuildPerimeterLoops(FRoadNetRebuildContext& Ctx) const; // §10.11 loops for PCG export

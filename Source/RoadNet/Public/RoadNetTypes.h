@@ -509,6 +509,37 @@ struct ROADNET_API FRoadNetParkingBay
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking")
 	float LengthCm = 0.f;
+
+	// Entry/exit taper (cm) OUTSIDE the window at each end. 0 (default) =
+	// constant-depth rectangular pocket. Non-zero ramps the carriageway edge
+	// out to the bay depth over that length (trapezoidal inclave).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking",
+		meta=(ClampMin="0.0", UIMin="0.0", UIMax="2000.0"))
+	float TaperCm = 0.f;
+
+	// Resolved FLAT window [S0,S1] on a road of arc length Len (cm). The tapers
+	// sit outside it, on [S0-Taper, S0] and [S1, S1+Taper]. False if degenerate.
+	FORCEINLINE bool ResolveWindow(double Len, double& OutS0, double& OutS1) const
+	{
+		OutS0 = FMath::Clamp((double)StartArcCm, 0.0, Len);
+		OutS1 = (LengthCm > 0.f) ? FMath::Min(Len, OutS0 + (double)LengthCm) : Len;
+		return (OutS1 - OutS0) >= 1.0;
+	}
+
+	// Outward bulge (cm) the carriageway edge takes at arc S: the full stall
+	// depth across the flat window, ramped linearly over each taper, 0 outside.
+	// Shared by the edge geometry and the paint so they cannot disagree.
+	FORCEINLINE double BulgeAt(double S, double Len) const
+	{
+		double S0, S1;
+		if (!ResolveWindow(Len, S0, S1)) { return 0.0; }
+		const double Depth = FMath::Max(0.0, (double)StallDepthCm);
+		if (S >= S0 && S <= S1) { return Depth; }
+		const double Taper = FMath::Max(0.0, (double)TaperCm);
+		if (Taper <= 0.0) { return 0.0; }
+		const double U = (S < S0) ? (S - (S0 - Taper)) / Taper : ((S1 + Taper) - S) / Taper;
+		return (U > 0.0) ? Depth * U : 0.0;
+	}
 };
 
 // ---------------------------------------------------------------------------
@@ -584,6 +615,16 @@ struct ROADNET_API FRoadDef
 	// alongside (not replacing) any Edge-tool outer-edge bulge.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking")
 	TArray<FRoadNetParkingBay> ParkingBays;
+
+	// Deepest bay pocket on this road (cm), 0 with no bays. Everything derived
+	// from a constant half-width — the sidewalk masks, the terrain corridor —
+	// must reach this much further out, or it clips the retreated walk away.
+	FORCEINLINE double MaxBayDepthCm() const
+	{
+		double D = 0.0;
+		for (const FRoadNetParkingBay& B : ParkingBays) { D = FMath::Max(D, (double)B.StallDepthCm); }
+		return D;
+	}
 
 	// Grade separation (§10.12). Layer/bridge/tunnel decide which road is on top.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Grade")
