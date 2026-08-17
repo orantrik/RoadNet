@@ -312,6 +312,36 @@ Still TODO for full parity: native landscape-spline mirror (vs heightmap raster)
 per-side asymmetric falloff, junction `ULandscapeTexturePatch`, dirty-tracked
 per-road re-sculpt, and validating the dedicated-layer path as default.
 
+## 3c. ⚠️ Pipeline 4 uses a DIFFERENT sculpt — `SculptCorridorsToBed`
+
+> Practical map of our own conform code, its triggers, knobs and failure modes:
+> **`OSMRoadCore/Docs/RoadTerrainConform.md`**. Read that before touching the
+> deform; this document is the RoadBLD study it is derived from.
+
+Everything in §3b landed in `SculptRoadCorridors`, which pipelines 0/2 use.
+**Pipeline 4 (RoadNet, the default) does not call it** — it calls
+`SculptCorridorsToBed`, which walks RoadNet's own smoothed centrelines. That
+function was written later and never received the §3b parity work, so the two
+"conform terrain" implementations silently diverged. If a fix from this document
+is not visible in-editor, check WHICH of the two ran (the log line names itself).
+
+Two §3b behaviours were missing from `SculptCorridorsToBed` and caused the
+"landscape covers the road" + "terrain steps instead of ramping" regression:
+
+| Missing | Symptom | Fix |
+|---|---|---|
+| **No downward bias.** `DeformLandscapeToRoadMesh` pins terrain to `SurfaceZ - EpsilonCm` (25 cm, RoadBLD `BiasDown` parity); the corridor ramp pinned it to *exactly* the road centreline Z. The RoadNet carriageway layer is committed with `ExtraLift 0`, so clearance was zero and `RoundToInt` + the 2-pass blur pushed cells back up **through** the road surface. | Landscape laps over the carriageway. | `osm.RoadDeformClearanceCm` (default 25). Bed = road Z − clearance. |
+| **Fixed-width lateral grade.** The cosine ring was `max(clamp(half,150,600), 2.5·quad)` — capped at 6 m *regardless of how much height it had to recover*. On a hillside the bed met natural terrain in a near-vertical wall. | Stepping / cliff at the corridor edge instead of a ramp. | `osm.RoadDeformEmbankmentSlope` (default 0.5 = 1:2) + `osm.RoadDeformMaxEmbankmentM` (default 12). The ring width is now sized per cell from the actual drop (`drop / slope`), which required rasterizing a **distance field** and deferring the weight until the heightmap read. |
+
+`SculptCorridorsToBed` now also counts flat-core cells left above the road and
+warns, naming Deform Policy as the cause when it is set to fill-only/cut-only —
+the invariant check for "nothing above the road".
+
+Still missing in `SculptCorridorsToBed` vs §3b: **junction discs / plane-fit
+pads** (§1b, RoadBLD's `ULandscapeTexturePatch`) and `EndFalloff`. Junction
+fillets fan out wider than any single road's corridor half-width, so terrain can
+still lap over intersection **corners**. That is the next parity item.
+
 ## 4. Open questions to resolve back in MyProject5
 - Which **edit layer name** does RoadBLD create for the spline deform? (confirm
   it's a reserved Landscape layer, and whether it's per‑landscape.)

@@ -86,6 +86,10 @@ void FEdModeRoadNet::Enter()
 	DraftPoints.Reset();
 	bHasHover = false;
 	LastTool = ActiveTool();
+	// Baseline the conform watch on whatever the network already is, so entering
+	// the mode does not re-sculpt terrain that a prior import already conformed.
+	bConformPending = false;
+	LastConformSerial = GetNetwork() ? GetNetwork()->GetRebuildSerial() : 0;
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw mode: pick a TOOL (OSM Roads panel or keys 1-5): 1 Draw, 2 Points, 3 Lanes, 4 Junctions, 5 Edge. Each tool scopes its own clicks/hotkeys. Full list: 'OSM Roads' panel > Legend tab."));
 	if (GEngine)
 	{
@@ -299,6 +303,43 @@ void FEdModeRoadNet::Tick(FEditorViewportClient* ViewportClient, float DeltaTime
 		}
 		if (ViewportClient) { ViewportClient->Invalidate(); }
 	}
+
+	TickTerrainConform();
+}
+
+// Every authoring edit reshapes the road footprint, so the landscape underneath
+// it has to be re-ramped -- not just the Draw tool's commit. Rather than adding
+// a notify next to each of the ~17 Net->Rebuild() call sites in this file (and
+// relying on every future one remembering), watch the network's rebuild serial:
+// one place that cannot be bypassed by a new edit path.
+//
+// Debounced because the conform is a heightmap write: holding '-' to strip lanes
+// or dragging a point rebuilds repeatedly, and only the settled shape matters.
+void FEdModeRoadNet::TickTerrainConform()
+{
+	URoadNetwork* Net = GetNetwork();
+	if (!Net) { return; }
+
+	const uint32 Serial = Net->GetRebuildSerial();
+	if (Serial != LastConformSerial)
+	{
+		LastConformSerial = Serial;
+		ConformLastRebuildTime = FPlatformTime::Seconds();
+		bConformPending = true;
+	}
+	if (!bConformPending) { return; }
+
+	// Never sculpt mid-gesture: a draft in progress or a live widget drag will
+	// rebuild again in a moment, and a queued smoothing rebuild owns its own
+	// debounce (its rebuild re-arms this one).
+	if (DraftPoints.Num() > 0 || bDirtyDuringDrag || bMarquee || bSmoothingRebuildPending) { return; }
+
+	constexpr double kConformDebounceSec = 0.4;
+	if (FPlatformTime::Seconds() - ConformLastRebuildTime < kConformDebounceSec) { return; }
+
+	bConformPending = false;
+	// No-op unless OSMRoadCore is loaded and registered the sculpt handler.
+	RoadNetEditorBridge::NotifyRoadSegmentPlaced();
 }
 
 void FEdModeRoadNet::ClearSelection()
@@ -2271,10 +2312,7 @@ void FEdModeRoadNet::FinalizeDraft()
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw: committed a hand-drawn road (shape %d) with %d points."),
 		(int32)Shape, R.Ref.Num());
 	DraftPoints.Reset();
-
-	// Same effect as pressing "Conform Terrain" — OSMRoadCore registers the
-	// sculpt handler; no-op if that module isn't loaded.
-	RoadNetEditorBridge::NotifyRoadSegmentPlaced();
+	// The terrain conform is picked up from the rebuild serial in TickTerrainConform.
 }
 
 bool FEdModeRoadNet::AddParkingBayToActiveSelection(uint8 LayoutInt, FString& OutMsg)

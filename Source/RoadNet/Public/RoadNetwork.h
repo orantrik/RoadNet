@@ -599,6 +599,13 @@ public:
 	const TArray<FVector>& GetConformVerts() const { return ConformVerts; }
 	const TArray<int32>&   GetConformTris()  const { return ConformTris;  }
 
+	// Bumped at the end of every Rebuild (full or windowed). The editor mode
+	// watches this so the terrain conform runs after ANY authoring edit --
+	// drawing, dragging a point, widening lanes/sidewalks, deleting, merging --
+	// instead of only after the Draw tool commits. Transient, so it starts at 0
+	// on load and the first rebuild of a session always registers as a change.
+	uint32 GetRebuildSerial() const { return RebuildSerial; }
+
 	// ---- interactive edit API (§9.3 edit/split controllers) ---------------
 	// Move one reference point of a road to a new world position. Returns false
 	// if indices are invalid. Caller triggers Rebuild().
@@ -819,6 +826,9 @@ private:
 	// serialized.
 	TArray<FVector> ConformVerts;
 	TArray<int32>   ConformTris;
+
+	// See GetRebuildSerial. Not serialized.
+	uint32 RebuildSerial = 0;
 
 #if WITH_EDITOR
 	// Not serialized / not in the transaction: which roads the last authoring

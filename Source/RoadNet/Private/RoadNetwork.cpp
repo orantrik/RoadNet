@@ -1707,8 +1707,24 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 
 	FRoadNetRebuildContext Ctx;
 	Ctx.ExplicitDirtyBox = DirtyRegionWorld;
-	if (Modified.IsEmpty())
+
+	// The terrain-conform caches are transient, so right after a level load they
+	// hold nothing. A windowed pass would then leave DeformCorridors/ConformTris
+	// describing ONLY the edited roads, and the landscape sculpt would ramp just
+	// those while every other road kept whatever bed it had — the "conform terrain
+	// only works on part of the network" symptom. The header documents that the
+	// first rebuild of a session is a full one; enforce it rather than assume it.
+	// Costs one full rebuild per session; windowing resumes from the next edit.
+	const bool bCachesCold = Roads.Num() > 0 && DeformCache.IsEmpty() && ConformCache.IsEmpty();
+	if (Modified.IsEmpty() || bCachesCold)
 	{
+		if (bCachesCold && !Modified.IsEmpty())
+		{
+			UE_LOG(LogRoadNet, Log,
+				TEXT("[RoadNet] Rebuild: terrain-conform caches are cold (first rebuild since load) — "
+					 "promoting this windowed pass to a full rebuild so the conform sees the whole network."));
+			Ctx.ExplicitDirtyBox = FBox2D(ForceInit);   // a scoped commit would defeat the promotion
+		}
 		Ctx.Modified.SetNumUninitialized(Roads.Num());
 		for (int32 i = 0; i < Roads.Num(); ++i) { Ctx.Modified[i] = i; }
 	}
@@ -1827,6 +1843,8 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 		(tCurves - tA) * 1000.0, (tCross - tCurves) * 1000.0, (tGrade - tCross) * 1000.0,
 		(tSnap - tGrade) * 1000.0, (tZones - tSnap) * 1000.0, (tSurface - tZones) * 1000.0,
 		(tPerim - tSurface) * 1000.0, (tGraph - tPerim) * 1000.0, (tCommit - tRibbon) * 1000.0);
+
+	++RebuildSerial;
 }
 
 void URoadNetwork::DeterminePendingRoads(FRoadNetRebuildContext& Ctx) const

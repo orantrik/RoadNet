@@ -16,8 +16,9 @@ namespace RoadNetEditorBridge
 	ROADNETEDITOR_API bool AddParkingBayToActiveSelection(uint8 LayoutInt, FString& OutMsg);
 
 	// OSMRoadCore registers a handler that runs the same path as the panel's
-	// "Conform Terrain" button. RoadNetEditor fires it after a hand-drawn road
-	// is committed (FinalizeDraft) without taking a dependency on OSMRoadCore.
+	// "Conform Terrain" button. RoadNetEditor fires it (debounced, off the
+	// network's rebuild serial) after ANY authoring edit settles, without taking
+	// a dependency on OSMRoadCore. The network is already rebuilt when it fires.
 	ROADNETEDITOR_API void SetPostPlaceConformHandler(TFunction<void()>&& Handler);
 	ROADNETEDITOR_API void ClearPostPlaceConformHandler();
 	ROADNETEDITOR_API void NotifyRoadSegmentPlaced();

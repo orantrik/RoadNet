@@ -249,5 +249,16 @@ private:
 	// Flush a pending debounced smoothing rebuild now (no-op if none pending).
 	void FlushPendingSmoothing(FEditorViewportClient* ViewportClient);
 
+	// Terrain-conform watch. Every authoring edit rebuilds the network, and the
+	// landscape under the changed footprint has to be re-ramped; watching the
+	// network's rebuild serial catches all of them (draw, drag, lane/sidewalk/
+	// median width, parking bays, split/delete/merge, junction edits) from one
+	// place. Debounced so a burst of edits costs one heightmap write.
+	// Called from Tick; see TickTerrainConform.
+	uint32 LastConformSerial      = 0;
+	bool   bConformPending        = false;
+	double ConformLastRebuildTime = 0.0;
+	void TickTerrainConform();
+
 	TWeakObjectPtr<ARoadNetActor> NetActorPtr;
 };
