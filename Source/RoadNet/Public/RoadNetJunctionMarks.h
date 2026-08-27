@@ -32,14 +32,39 @@ namespace RoadNetJunctionMarks
 		float   YawDeg   = 0.f;
 	};
 
+	// One zebra crossing band: stripes run ALONG travel and repeat laterally to
+	// cover the whole carriageway, so the band itself is handedness-agnostic.
+	//
+	// Shared with mid-block crossings (FRoadDef::Crossings) so a crossing painted
+	// away from a junction is identical to one at a junction mouth.
+	ROADNET_API void EmitZebra(
+		const FVector2D& BandCenter,
+		const FVector2D& Travel,      // unit, direction traffic moves through the band
+		double HalfWidthCm,           // half the carriageway width to span
+		double DepthCm,               // band depth along travel
+		TArray<UE::Geometry::FGeneralPolygon2d>& OutWhite);
+
+	// A solid stop bar across the half of the carriageway that traffic ENTERS on.
+	// EnterSide is the unit lateral direction of that half.
+	ROADNET_API void EmitStopBar(
+		const FVector2D& StopPos,
+		const FVector2D& Travel,
+		const FVector2D& EnterSide,
+		double HalfWidthCm,
+		TArray<UE::Geometry::FGeneralPolygon2d>& OutWhite);
+
 	// Build paint + signals for one junction from its precomputed approaches.
 	// White paint (bars/stripes) is APPENDED to OutWhite; signal placements are
 	// APPENDED to OutSignals.
+	//
+	// bDriveOnLeft decides which half of each approach the stop bar, give-way
+	// dashes and signal head belong to — the half that traffic enters on.
 	ROADNET_API void BuildJoint(
 		const FVector2D& Center,
 		double CenterZ,
 		const TArray<FApproach>& Approaches,
 		ERoadNetJunctionPreset Preset,
+		bool bDriveOnLeft,
 		TArray<UE::Geometry::FGeneralPolygon2d>& OutWhite,
 		TArray<FSignal>& OutSignals);
 }

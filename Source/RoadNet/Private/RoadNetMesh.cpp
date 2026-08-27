@@ -23,6 +23,15 @@ static TAutoConsoleVariable<float> CVarRoadNetHeightTauCm(
 	TEXT("RoadNet junction height soft-max temperature (cm): highest road wins. Small = crisp crown (through road stays, connecting road ramps to it); large = smooth average of both. Default 50."),
 	ECVF_Default);
 
+// Traffic handedness for the whole network. Registered here in the always-loaded
+// runtime module so the OSM Roads panel can push it without a module link; the
+// authority is URoadNetwork::bDriveOnLeft and this only seeds it.
+static TAutoConsoleVariable<int32> CVarRoadNetDriveOnLeft(
+	TEXT("roadnet.DriveOnLeft"),
+	0,
+	TEXT("1 = drive on the left (UK/JP/AU), 0 = drive on the right. Moves forward traffic to the other side, swaps the stop-bar/zebra half at junctions, and paints the centre line white instead of yellow."),
+	ECVF_Default);
+
 // Active RoadNet Draw sub-tool (see ERoadNetDrawTool): 0=Draw 1=Points 2=Lanes
 // 3=Junctions 4=Edge. Registered here in the always-loaded runtime module so the
 // OSM Roads panel (which writes it) and the RoadNetEditor mode (which reads it)

@@ -15,7 +15,8 @@
 //
 // EDIT (idle — no draft): left-click on an existing hand-drawn road point
 // selects it; the transform widget moves it (rebuild on release); Delete
-// removes it; Insert/double-click on a segment... (split is a later add).
+// removes it; Ctrl+click anywhere on a segment inserts a new point there, with
+// a ghost marker previewing the position while Ctrl is held.
 // The mode never selects level actors.
 // ===========================================================================
 class ARoadNetActor;
@@ -108,6 +109,22 @@ public:
 	// true on success; OutMsg carries a status / error message for the panel.
 	bool AddParkingBayToActiveSelection(uint8 LayoutInt, FString& OutMsg);
 
+	// ---- cross-section panel surface (see RoadNetEditorBridge) ------------
+	// The panel polls these every tick rather than being pushed to, so it can
+	// never end up editing a road the mode has since dropped. Public because
+	// the bridge is the only caller and it is not a friend.
+	class URoadNetwork* GetNetworkForPanel() const { return GetNetwork(); }
+	int32 GetSelectedRoadForPanel() const { return SelRoad; }
+	int32 GetSelectedLaneForPanel() const { return SelLane; }
+	// Highlight a lane picked in the 2D editor. Materialises the road's lanes
+	// first, so the highlight anchors to a stable LaneId the way a viewport
+	// pick does and survives the rebuild that follows an edit.
+	void SelectLaneFromPanel(int32 LaneLtoR);
+	// Rebuild only the edited road and redraw. The caller owns the transaction
+	// and has already called ModifyForEdit.
+	void CommitLaneEditFromPanel(int32 RoadIdx);
+	void ModifyForEdit();
+
 private:
 	ARoadNetActor* GetOrSpawnNetActor();
 	class URoadNetwork* GetNetwork() const;
@@ -154,7 +171,6 @@ private:
 	void SelectPointsInMarquee(FEditorViewportClient* ViewportClient, bool bAdd);
 	// Mark BOTH the actor and its network dirty for the open transaction so the
 	// road source-of-truth (URoadNetwork::Roads) is captured by undo/redo.
-	void ModifyForEdit();
 	// Proximity pick under the cursor (used when the carriageway mesh occludes
 	// the thin point/segment hit proxies). Selects the nearest editable control
 	// point, else the nearest road centreline. bToggle (Shift) adds/removes the
@@ -187,6 +203,9 @@ private:
 
 	TArray<FVector> DraftPoints;
 	FVector HoverPoint = FVector::ZeroVector;
+	// The cursor's ground hit BEFORE endpoint snapping. The Points tool's insert
+	// preview needs the true cursor, not a position pulled toward a weld target.
+	FVector HoverRaw = FVector::ZeroVector;
 	bool bHasHover = false;
 	bool bSnapActive = false;
 	FVector SnapPoint = FVector::ZeroVector;
@@ -248,6 +267,24 @@ private:
 	FVector2D SmoothingPendingLoc   = FVector2D::ZeroVector;
 	// Flush a pending debounced smoothing rebuild now (no-op if none pending).
 	void FlushPendingSmoothing(FEditorViewportClient* ViewportClient);
+
+	// ---- auto-release -----------------------------------------------------
+	// An authoring action used to leave its target selected until Escape, so the
+	// road you just edited kept absorbing the next keystroke. Actions now let go
+	// of their target when they are done.
+	//
+	// Two flavours, because they are genuinely different gestures:
+	//   * AutoRelease() — a one-shot placement (junction preset, corner islands,
+	//     parking bay, crossing) is finished the moment it lands, so it drops the
+	//     selection immediately.
+	//   * ArmAutoRelease() — a repeat adjustment (median or sidewalk width,
+	//     junction smoothing, lane type) has to keep its target or you could not
+	//     nudge a value twice, so it starts an idle timer instead and releases
+	//     once the user stops for roadnet.AutoReleaseSec.
+	void AutoRelease(FEditorViewportClient* ViewportClient);
+	void ArmAutoRelease();
+	bool   bAutoReleasePending = false;
+	double AutoReleaseArmTime  = 0.0;
 
 	// Terrain-conform watch. Every authoring edit rebuilds the network, and the
 	// landscape under the changed footprint has to be re-ramped; watching the

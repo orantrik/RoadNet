@@ -143,15 +143,31 @@ enum class ERoadNetLaneType : uint8
 	Bicycle      // dedicated bicycle path
 };
 
-// Which side of the reference line a lane sits on. RoadBLD ERoadSide parity:
-// direction is side-based (left travels one way, right the other), not a
-// per-lane forward/back flag.
+// Which side of the reference line a lane sits on. RoadBLD ERoadSide parity.
 UENUM(BlueprintType)
 enum class ERoadNetSide : uint8
 {
 	Left,    // −lateral offset off the road frame's right axis
 	Right,   // +lateral offset
 	Center   // straddles the centerline (center-turn / median)
+};
+
+// Which way traffic runs along a lane, relative to the road's own +arc
+// direction (first reference point → last).
+//
+// FromSide is the default ON PURPOSE. Before this property existed direction
+// was inferred from Side alone, so every authored lane already on disk
+// deserialises as FromSide and keeps travelling exactly the way it did. Only
+// lanes explicitly set to something else break that rule — which is what makes
+// a contraflow bus lane, or a one-way pair on the "wrong" side, expressible.
+UENUM(BlueprintType)
+enum class ERoadNetLaneDirection : uint8
+{
+	FromSide,   // legacy rule: the traffic side travels +arc, the other −arc
+	Forward,    // +arc (start → end) whatever side the lane sits on
+	Backward,   // −arc
+	Both,       // bidirectional — centre turn lanes
+	None        // not driven at all — parking, median, shoulder
 };
 
 // A single (distance-along-road, lateral-offset) knot of a lane boundary curve.
@@ -212,6 +228,9 @@ struct ROADNET_API FRoadNetLane
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
 	ERoadNetSide Side = ERoadNetSide::Right;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	ERoadNetLaneDirection Direction = ERoadNetLaneDirection::FromSide;
+
 	// Signed lateral offset (cm, +right) of the lane centre from the reference.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
 	double CenterOffset = 0.0;
@@ -238,6 +257,39 @@ struct ROADNET_API FRoadNetLane
 		return Type == ERoadNetLaneType::Normal
 		    || Type == ERoadNetLaneType::Restricted
 		    || Type == ERoadNetLaneType::CenterTurn;
+	}
+
+	// Does traffic on this lane run start→end along the reference line?
+	//
+	// bDriveOnLeft only reaches the FromSide fallback: an explicit Direction
+	// means what it says on either side of the road, so flipping the network's
+	// handedness must not flip it a second time.
+	bool bTravelsForward(bool bDriveOnLeft = false) const
+	{
+		switch (Direction)
+		{
+		case ERoadNetLaneDirection::Forward:  return true;
+		case ERoadNetLaneDirection::Backward: return false;
+		case ERoadNetLaneDirection::Both:     return true;
+		case ERoadNetLaneDirection::None:     return false;
+		default: break;
+		}
+		if (Side == ERoadNetSide::Center) { return true; }
+		return (Side == ERoadNetSide::Right) != bDriveOnLeft;
+	}
+
+	bool bTravelsBackward(bool bDriveOnLeft = false) const
+	{
+		switch (Direction)
+		{
+		case ERoadNetLaneDirection::Forward:  return false;
+		case ERoadNetLaneDirection::Backward: return true;
+		case ERoadNetLaneDirection::Both:     return true;
+		case ERoadNetLaneDirection::None:     return false;
+		default: break;
+		}
+		if (Side == ERoadNetSide::Center) { return true; }
+		return (Side == ERoadNetSide::Left) != bDriveOnLeft;
 	}
 };
 
@@ -338,10 +390,14 @@ struct ROADNET_API FRoadNetLaneSpec
 	}
 
 	// Resolve to concrete lane entities: return authored lanes when present, else
-	// synthesize a uniform lane set from the count model. Backward lanes land on
-	// the LEFT (−offset), forward on the RIGHT (+offset), stacked outward from
+	// synthesize a uniform lane set from the count model, stacked outward from
 	// the centerline (RoadBLD side-based direction; ROADBLD_FEATURES.md §4).
-	TArray<FRoadNetLane> ResolveLanes() const
+	//
+	// Drive-on-right puts forward traffic on the RIGHT (+offset) and backward on
+	// the left; drive-on-left mirrors that. Synthesized lanes carry an explicit
+	// Direction rather than leaning on FromSide, so the lane graph reads the same
+	// answer under either handedness without inferring it twice.
+	TArray<FRoadNetLane> ResolveLanes(bool bDriveOnLeft = false) const
 	{
 		if (HasDetailedLanes()) { return DetailedLanes; }
 
@@ -366,34 +422,30 @@ struct ROADNET_API FRoadNetLaneSpec
 		// reference line, so the innermost lanes start beyond the median.
 		const double MedianHalf = (double)MedianHalfCm();
 
-		// Forward (right) lanes stack from the centerline (or median edge) outward.
-		double RightEdge = MedianHalf;
-		for (int32 i = 0; i < Fwd; ++i)
+		// Each direction stacks from the centerline (or median edge) outward on
+		// its own side. Widths stay indexed forward-lanes-first either way, so a
+		// road's LaneWidths array does not have to be rewritten to change side.
+		double FwdEdge = MedianHalf, BwdEdge = MedianHalf;
+
+		auto Emit = [&](int32 Count, double& Edge, bool bLeftSide, ERoadNetLaneDirection Dir)
 		{
-			const float LW = WidthAt(GlobalIdx++);
-			FRoadNetLane L;
-			L.LaneId = FGuid::NewGuid();
-			L.Type = ERoadNetLaneType::Normal;
-			L.Side = ERoadNetSide::Right;
-			L.Width = LW;
-			L.CenterOffset = RightEdge + 0.5 * LW;
-			RightEdge += LW;
-			Out.Add(L);
-		}
-		// Backward (left) lanes stack from the centerline (or median edge) outward.
-		double LeftEdge = MedianHalf;
-		for (int32 i = 0; i < Bwd; ++i)
-		{
-			const float LW = WidthAt(GlobalIdx++);
-			FRoadNetLane L;
-			L.LaneId = FGuid::NewGuid();
-			L.Type = ERoadNetLaneType::Normal;
-			L.Side = ERoadNetSide::Left;
-			L.Width = LW;
-			L.CenterOffset = -(LeftEdge + 0.5 * LW);
-			LeftEdge += LW;
-			Out.Add(L);
-		}
+			for (int32 i = 0; i < Count; ++i)
+			{
+				const float LW = WidthAt(GlobalIdx++);
+				FRoadNetLane L;
+				L.LaneId = FGuid::NewGuid();
+				L.Type = ERoadNetLaneType::Normal;
+				L.Side = bLeftSide ? ERoadNetSide::Left : ERoadNetSide::Right;
+				L.Direction = Dir;
+				L.Width = LW;
+				L.CenterOffset = (bLeftSide ? -1.0 : 1.0) * (Edge + 0.5 * LW);
+				Edge += LW;
+				Out.Add(L);
+			}
+		};
+
+		Emit(Fwd, FwdEdge, /*bLeftSide*/ bDriveOnLeft,  ERoadNetLaneDirection::Forward);
+		Emit(Bwd, BwdEdge, /*bLeftSide*/ !bDriveOnLeft, ERoadNetLaneDirection::Backward);
 		return Out;
 	}
 };
@@ -476,6 +528,31 @@ enum class ERoadNetParkingLayout : uint8
 	Parallel,        // stalls parallel to the kerb
 	Perpendicular,   // 90° stalls
 	Angled           // stalls at AngleDeg to the kerb
+};
+
+// ---------------------------------------------------------------------------
+// A pedestrian crossing painted somewhere ALONG a road, away from any junction.
+// Junction zebras come from the junction preset instead; this is the mid-block
+// crossing outside a school or a shop that no junction preset can express.
+// ---------------------------------------------------------------------------
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetCrossingMark
+{
+	GENERATED_BODY()
+
+	// Arc distance along the reference centreline, cm.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Crossings")
+	float DistanceCm = 0.f;
+
+	// Depth of the zebra band along the direction of travel (cm).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Crossings",
+		meta=(ClampMin="100.0", UIMin="200.0", UIMax="1000.0"))
+	float DepthCm = 400.f;
+
+	// Paint a stop bar on the approach half of each direction, just before the
+	// band, the way a signalled or marked crossing is striped.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Crossings")
+	bool bStopBar = true;
 };
 
 USTRUCT(BlueprintType)
@@ -615,6 +692,10 @@ struct ROADNET_API FRoadDef
 	// alongside (not replacing) any Edge-tool outer-edge bulge.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Parking")
 	TArray<FRoadNetParkingBay> ParkingBays;
+
+	// Mid-block pedestrian crossings authored on this road, by arc distance.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Crossings")
+	TArray<FRoadNetCrossingMark> Crossings;
 
 	// Deepest bay pocket on this road (cm), 0 with no bays. Everything derived
 	// from a constant half-width — the sidewalk masks, the terrain corridor —

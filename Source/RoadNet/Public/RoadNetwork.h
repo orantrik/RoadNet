@@ -285,6 +285,17 @@ public:
 		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "60.0"))
 	double GradeSmoothingM = 20.0;
 
+	// ---- traffic handedness -----------------------------------------------
+	// Which side of the road traffic drives on, for the WHOLE network — a city
+	// does not change handedness street by street.
+	//
+	// This decides three things that must agree or the street reads wrong:
+	// which side forward lanes stack on, which half of the carriageway a stop
+	// bar and its zebra sit on, and whether the centre line is painted yellow
+	// (right-hand convention) or white (UK).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
+	bool bDriveOnLeft = false;
+
 	// ---- lanes (§12.1) ----------------------------------------------------
 	// Render each resolved lane as its own ribbon strip (alternating shades)
 	// layered above the carriageway. Reflects lane add/remove + authored widths.
@@ -481,6 +492,27 @@ public:
 	// Returns the new type. Caller triggers Rebuild().
 	ERoadNetLaneType CycleLaneType(int32 RoadIdx, int32 LaneLtoR, int32 Dir);
 
+	// ---- cross-section authoring (the Streetmix-style 2D editor) ----------
+	// All four take the same left→right index as CycleLaneType, convert the
+	// road to authored DetailedLanes on first use, and relayout so the stack
+	// stays centred on the reference line. Caller triggers Rebuild().
+
+	// Set one lane's width in cm, clamped to the range a lane can usefully be.
+	bool SetLaneWidth(int32 RoadIdx, int32 LaneLtoR, double WidthCm);
+
+	// Set one lane's type WITHOUT snapping its width, unlike CycleLaneType.
+	// The 2D editor sets width and type independently, and a palette click that
+	// silently discarded a width just dragged is what makes an editor feel
+	// broken. Use CycleLaneType for the viewport hotkey, this for the panel.
+	bool SetLaneType(int32 RoadIdx, int32 LaneLtoR, ERoadNetLaneType Type);
+
+	// Set which way traffic runs on one lane.
+	bool SetLaneDirection(int32 RoadIdx, int32 LaneLtoR, ERoadNetLaneDirection Dir);
+
+	// Delete one lane. Refuses to remove the last, so a road always keeps a
+	// carriageway. False on a bad index or that refusal.
+	bool RemoveLaneAt(int32 RoadIdx, int32 LaneLtoR);
+
 	// ---- outer-edge authoring (Edge tool, §Phase 4) -----------------------
 	// Side Right = +offset outer edge, Left = −offset. Distances are arc length
 	// along the reference polyline (cm); Offset is signed lateral (cm, +right).
@@ -547,6 +579,29 @@ public:
 	// sides on first widening. Returns the new width. Caller triggers Rebuild().
 	float AdjustSidewalkWidth(int32 RoadIdx, float DeltaCm);
 
+	// ---- junction approach conditioning -----------------------------------
+	// Control points bunch up around intersections for two reasons, both in the
+	// import path: densification subdivides every segment including the short
+	// ones at a junction, and arc-length resampling adds a knot wherever the turn
+	// is tight — which a junction approach always is. The result is a knot every
+	// few centimetres right where the spline most needs room to behave, so the
+	// curve kinks and the terrain conform steps.
+	//
+	// Both passes leave PROTECTED points exactly where they are: an endpoint, or
+	// a node id shared with another road, is a weld and moving it would tear the
+	// junction apart. This is the same rule SmoothAllRoads uses.
+
+	// Within RadiusCm of a protected point, drop unprotected points that sit
+	// closer than MinSpacingCm to the previous kept point. Returns roads changed.
+	int32 DeclusterNearJunctions(double RadiusCm = 1500.0, double MinSpacingCm = 400.0);
+
+	// Cosine-blend the first LengthCm of each protected point's approach onto the
+	// straight tangent leaving it, so a road enters a junction square instead of
+	// wandering into it. Full correction at the junction, none at LengthCm out —
+	// this is what stops two roads meeting at a visible angle. Returns roads
+	// changed.
+	int32 StraightenJunctionApproaches(double LengthCm = 2000.0);
+
 	// ---- standard parking bays (street features) --------------------------
 	// Append a standard parking bay to a road on the given side + layout, using
 	// the network's default stall dimensions. CenterArcCm is the arc-length (cm)
@@ -559,6 +614,15 @@ public:
 	// Remove all standard parking bays from a road. Returns the count removed.
 	// Caller triggers Rebuild().
 	int32 ClearParkingBays(int32 RoadIdx);
+
+	// ---- mid-block pedestrian crossings -----------------------------------
+	// Add a crossing to the road nearest WorldXY, at the arc distance of the
+	// closest point on its centreline. A crossing already within MergeCm of that
+	// spot is REMOVED instead, so the same click toggles one off. Returns the
+	// road index touched (INDEX_NONE if nothing was near enough), and reports
+	// through bOutAdded whether paint went on or came off. Caller rebuilds.
+	int32 ToggleCrossingNear(const FVector2D& WorldXY, double PickRadiusCm,
+		bool& bOutAdded, double MergeCm = 800.0);
 
 	// Clear all roads (e.g. before a fresh OSM import).
 	void ResetRoads();

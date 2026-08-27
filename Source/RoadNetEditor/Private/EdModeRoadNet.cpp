@@ -252,6 +252,15 @@ static FBox2D JunctionDirtyBox(const FVector2D& Loc, double HalfCm)
 // then dilates by the geometry reach so border cells still commit.
 static constexpr double kJunctionDirtyHalfCm = 6000.0; // 60 m
 
+// How long an adjustment keeps its target after the last keystroke. Long enough
+// to tap ',' four times in a row without losing the road, short enough that you
+// never wonder why the next key went somewhere unexpected.
+static TAutoConsoleVariable<float> CVarRoadNetAutoReleaseSec(
+	TEXT("roadnet.AutoReleaseSec"),
+	1.5f,
+	TEXT("Idle seconds before a repeat adjustment (median/sidewalk width, junction smoothing, lane type) releases the road it was acting on. 0 disables auto-release for those; one-shot placements always release immediately."),
+	ECVF_Default);
+
 void FEdModeRoadNet::FlushPendingSmoothing(FEditorViewportClient* ViewportClient)
 {
 	if (!bSmoothingRebuildPending) { return; }
@@ -279,6 +288,24 @@ void FEdModeRoadNet::Tick(FEditorViewportClient* ViewportClient, float DeltaTime
 		if (FPlatformTime::Seconds() - SmoothingLastEditTime >= kSmoothDebounceSec)
 		{
 			FlushPendingSmoothing(ViewportClient);
+		}
+	}
+
+	// Release the road an adjustment was acting on once the user has stopped
+	// nudging it, so the next keystroke does not land on a stale target. Never
+	// mid-gesture: a live drag or an unfinished draft still owns the selection.
+	if (bAutoReleasePending)
+	{
+		const double IdleSec = (double)CVarRoadNetAutoReleaseSec.GetValueOnGameThread();
+		const bool bBusy = bDirtyDuringDrag || bMarquee || DraftPoints.Num() > 0;
+		if (IdleSec <= 0.0)
+		{
+			bAutoReleasePending = false;
+		}
+		else if (!bBusy && FPlatformTime::Seconds() - AutoReleaseArmTime >= IdleSec)
+		{
+			bAutoReleasePending = false;
+			AutoRelease(ViewportClient);
 		}
 	}
 
@@ -351,6 +378,22 @@ void FEdModeRoadNet::ClearSelection()
 	SelEdgeKnot = INDEX_NONE;
 	SelPoints.Reset();
 	bDirtyDuringDrag = false;
+	bAutoReleasePending = false;
+}
+
+void FEdModeRoadNet::AutoRelease(FEditorViewportClient* ViewportClient)
+{
+	// A queued smoothing rebuild is owned by the junction we are about to let go
+	// of, so commit it rather than strand it.
+	FlushPendingSmoothing(ViewportClient);
+	ClearSelection();
+	if (ViewportClient) { ViewportClient->Invalidate(); }
+}
+
+void FEdModeRoadNet::ArmAutoRelease()
+{
+	bAutoReleasePending = true;
+	AutoReleaseArmTime = FPlatformTime::Seconds();
 }
 
 bool FEdModeRoadNet::RefFrameAt(int32 RoadIdx, double ArcCm, FVector& OutPoint, FVector2D& OutRight) const
@@ -445,6 +488,29 @@ void FEdModeRoadNet::SelectLaneOnRoad(int32 RoadIdx, int32 LaneLtoR)
 	Net->MaterializeLanes(RoadIdx);
 	const TArray<FRoadNetLane> Lanes = Net->GetLanesLeftToRight(RoadIdx);
 	if (Lanes.IsValidIndex(LaneLtoR)) { SelLaneId = Lanes[LaneLtoR].LaneId; }
+}
+
+void FEdModeRoadNet::SelectLaneFromPanel(int32 LaneLtoR)
+{
+	if (SelRoad == INDEX_NONE) { return; }
+	SelectLaneOnRoad(SelRoad, LaneLtoR);
+	if (GEditor) { GEditor->RedrawLevelEditingViewports(); }
+}
+
+void FEdModeRoadNet::CommitLaneEditFromPanel(int32 RoadIdx)
+{
+	URoadNetwork* Net = GetNetwork();
+	if (!Net || RoadIdx == INDEX_NONE) { return; }
+
+	const int32 Modified[] = { RoadIdx };
+	Net->Rebuild(Modified);
+	// The rebuild can reorder lanes (a width change moves every offset), so the
+	// highlight has to come back from the id rather than from the stale index.
+	ResolveSelLaneFromId();
+	// Same settle path a viewport edit takes, so the terrain conform runs after
+	// a cross-section change too rather than only after a drag in the viewport.
+	RoadNetEditorBridge::NotifyRoadSegmentPlaced();
+	if (GEditor) { GEditor->RedrawLevelEditingViewports(); }
 }
 
 void FEdModeRoadNet::ResolveSelLaneFromId()
@@ -1525,11 +1591,10 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 						LayoutName, Target, CenterArc);
 				}
 
-				SelRoad = Target;
-				SelPoint = INDEX_NONE;
 				{ const int32 M = Target; Net->Rebuild(MakeArrayView(&M, 1)); }
 				if (GEngine) { GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Cyan, Msg); }
-				if (ViewportClient) { ViewportClient->Invalidate(); }
+				// The bay is placed; let go of the edge point it was anchored to.
+				AutoRelease(ViewportClient);
 				return true;
 			}
 
@@ -1590,6 +1655,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				bSmoothingRebuildPending = true;
 				SmoothingPendingLoc = JLoc;
 				SmoothingLastEditTime = FPlatformTime::Seconds();
+				ArmAutoRelease();
 				if (GEngine)
 				{
 					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
@@ -1646,7 +1712,57 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
 						FString::Printf(TEXT("RoadNet: junction marking = %s  ( J next / Shift+J prev )"), PresetName(P)));
 				}
-				if (ViewportClient) { ViewportClient->Invalidate(); }
+				// One-shot: the preset is applied, so drop any road context. The
+				// junction itself is picked under the cursor, not held.
+				AutoRelease(ViewportClient);
+				return true;
+			}
+
+			// Mid-block pedestrian crossing (Junctions tool):
+			//   'C' → add a zebra crossing wherever the cursor is on a road, or
+			//         remove the one already there. Junction zebras come from the
+			//         junction preset; this is for the crossing outside a school
+			//         that sits nowhere near an intersection.
+			if (Tool == ERoadNetDrawTool::Junctions && Key == EKeys::C)
+			{
+				URoadNetwork* Net = GetNetwork();
+				if (!Net) { return true; }
+
+				FVector Hit;
+				if (!ViewportClient || !LineTraceCursor(ViewportClient, Hit))
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: hover a road, then press C to place a pedestrian crossing"));
+					}
+					return true;
+				}
+
+				const FScopedTransaction Transaction(LOCTEXT("RoadNetCrossing", "Edit RoadNet Crossing"));
+				ModifyForEdit();
+
+				bool bAdded = false;
+				const int32 Road = Net->ToggleCrossingNear(FVector2D(Hit.X, Hit.Y), 2000.0, bAdded);
+				if (Road == INDEX_NONE)
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: no road under cursor — hover a road, then press C"));
+					}
+					return true;
+				}
+
+				{ const int32 M = Road; Net->Rebuild(MakeArrayView(&M, 1)); }
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+						FString::Printf(TEXT("RoadNet: crossing %s on road %d  ( press C on it again to remove )"),
+							bAdded ? TEXT("added") : TEXT("removed"), Road));
+				}
+				// One-shot placement: nothing to keep hold of.
+				AutoRelease(ViewportClient);
 				return true;
 			}
 
@@ -1693,7 +1809,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 						FString::Printf(TEXT("RoadNet: corner islands = %s  ( press K to toggle )"),
 							bOn ? TEXT("ON") : TEXT("OFF")));
 				}
-				if (ViewportClient) { ViewportClient->Invalidate(); }
+				AutoRelease(ViewportClient);
 				return true;
 			}
 
@@ -1770,8 +1886,11 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					Msg = FString::Printf(TEXT("RoadNet: median width = %.0f cm"), W);
 				}
 
+				// Keep the road so ',' / '.' can be tapped again, but start the
+				// idle timer that hands it back.
 				SelRoad = Target;
 				SelPoint = INDEX_NONE;
+				ArmAutoRelease();
 				{ const int32 M = Target; Net->Rebuild(MakeArrayView(&M, 1)); }   // windowed: one road's median
 				if (GEngine) { GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan, Msg); }
 				if (ViewportClient) { ViewportClient->Invalidate(); }
@@ -1826,6 +1945,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				const float W = Net->AdjustSidewalkWidth(Target, Step);
 				SelRoad = Target;
 				SelPoint = INDEX_NONE;
+				ArmAutoRelease();
 				{ const int32 M = Target; Net->Rebuild(MakeArrayView(&M, 1)); }   // windowed: one road's sidewalk
 				if (GEngine)
 				{
@@ -1846,6 +1966,7 @@ bool FEdModeRoadNet::MouseMove(FEditorViewportClient* ViewportClient, FViewport*
 	bHasHover = LineTraceCursor(ViewportClient, Hit);
 	if (bHasHover)
 	{
+		HoverRaw = Hit;
 		HoverPoint = ResolveCursorPoint(Hit);
 		if (ViewportClient) { ViewportClient->Invalidate(); }
 	}
@@ -1899,6 +2020,33 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 							bSel ? kPointSize + 4.f : kPointSize, SDPG_Foreground);
 						PDI->SetHitProxy(nullptr);
 					}
+				}
+			}
+
+			// Ghost insert marker (Points tool, Ctrl held): show exactly where a
+			// Ctrl+click would drop a new point. Inserting mid-span has worked
+			// since the tool shipped, but nothing on screen said so, so nobody
+			// found it — this is the discoverability, not the feature.
+			if (Tool == ERoadNetDrawTool::Points && bHasHover && Viewport &&
+				(Viewport->KeyState(EKeys::LeftControl) || Viewport->KeyState(EKeys::RightControl)))
+			{
+				FVector Best = FVector::ZeroVector;
+				FVector SegA = FVector::ZeroVector, SegB = FVector::ZeroVector;
+				double BestD2 = FMath::Square(2000.0);   // 20 m pick radius, as elsewhere
+				for (const FRoadDef& Road : Roads)
+				{
+					for (int32 i = 0; i + 1 < Road.Ref.Num(); ++i)
+					{
+						const FVector C = FMath::ClosestPointOnSegment(HoverRaw, Road.Ref[i], Road.Ref[i + 1]);
+						const double D2 = FVector::DistSquaredXY(HoverRaw, C);
+						if (D2 < BestD2) { BestD2 = D2; Best = C; SegA = Road.Ref[i]; SegB = Road.Ref[i + 1]; }
+					}
+				}
+				if (BestD2 < FMath::Square(2000.0))
+				{
+					const FVector Lift(0, 0, 25.f);
+					PDI->DrawLine(SegA + Lift, SegB + Lift, kColorSnap, SDPG_Foreground, 3.f);
+					PDI->DrawPoint(Best + Lift, kColorSnap, kPointSize + 6.f, SDPG_Foreground);
 				}
 			}
 
@@ -2368,15 +2516,69 @@ bool FEdModeRoadNet::AddParkingBayToActiveSelection(uint8 LayoutInt, FString& Ou
 	return true;
 }
 
+namespace
+{
+	// The RoadNet edit mode when it is the active one, else null. Every bridge
+	// entry point goes through this, so "the mode is not open" degrades to an
+	// empty answer rather than to a crash.
+	FEdModeRoadNet* ActiveRoadNetMode()
+	{
+		FEdMode* Mode = GLevelEditorModeTools().GetActiveMode(FEdModeRoadNet::GetModeID());
+		return Mode ? static_cast<FEdModeRoadNet*>(Mode) : nullptr;
+	}
+}
+
 bool RoadNetEditorBridge::AddParkingBayToActiveSelection(uint8 LayoutInt, FString& OutMsg)
 {
-	FEdMode* Mode = GLevelEditorModeTools().GetActiveMode(FEdModeRoadNet::GetModeID());
+	FEdModeRoadNet* Mode = ActiveRoadNetMode();
 	if (!Mode)
 	{
 		OutMsg = TEXT("Activate the RoadNet edit mode and select a road first.");
 		return false;
 	}
-	return static_cast<FEdModeRoadNet*>(Mode)->AddParkingBayToActiveSelection(LayoutInt, OutMsg);
+	return Mode->AddParkingBayToActiveSelection(LayoutInt, OutMsg);
+}
+
+URoadNetwork* RoadNetEditorBridge::GetActiveNetwork()
+{
+	FEdModeRoadNet* Mode = ActiveRoadNetMode();
+	return Mode ? Mode->GetNetworkForPanel() : nullptr;
+}
+
+int32 RoadNetEditorBridge::GetSelectedRoad()
+{
+	FEdModeRoadNet* Mode = ActiveRoadNetMode();
+	return Mode ? Mode->GetSelectedRoadForPanel() : INDEX_NONE;
+}
+
+int32 RoadNetEditorBridge::GetSelectedLane()
+{
+	FEdModeRoadNet* Mode = ActiveRoadNetMode();
+	return Mode ? Mode->GetSelectedLaneForPanel() : INDEX_NONE;
+}
+
+void RoadNetEditorBridge::SelectLaneInViewport(int32 LaneLtoR)
+{
+	if (FEdModeRoadNet* Mode = ActiveRoadNetMode())
+	{
+		Mode->SelectLaneFromPanel(LaneLtoR);
+	}
+}
+
+void RoadNetEditorBridge::ModifyNetworkForEdit()
+{
+	if (FEdModeRoadNet* Mode = ActiveRoadNetMode())
+	{
+		Mode->ModifyForEdit();
+	}
+}
+
+void RoadNetEditorBridge::CommitLaneEdit(int32 RoadIdx)
+{
+	if (FEdModeRoadNet* Mode = ActiveRoadNetMode())
+	{
+		Mode->CommitLaneEditFromPanel(RoadIdx);
+	}
 }
 
 static TFunction<void()> GPostPlaceConformHandler;
