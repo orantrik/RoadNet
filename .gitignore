@@ -4,6 +4,12 @@ Intermediate/
 Saved/
 DerivedDataCache/
 
+# Verbatim extractions of the Netivei Israel geometric design volumes (text dumps
+# and rendered page images). Kept on disk so the UNCERTAIN items in
+# docs/ISRAELI_JUNCTION_STANDARDS.md can be re-verified, but this repo is public
+# and the source PDFs are not ours to redistribute.
+docs/research/
+
 # IDE / OS
 .vs/
 *.sln

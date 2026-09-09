@@ -62,6 +62,39 @@ namespace RoadNetSurface
 		}
 	}
 
+	// A fillet between two arms reaches (half-width + radius) / sin(angle/2)
+	// from the junction. A width-sized disc clips that corner off before the
+	// close can round it, particularly on sparse hand-drawn T/X junctions.
+	static double JunctionWorkRadius(const FJunctionClose& J, const TArray<const FRoadCurves*>& Curves)
+	{
+		TArray<double> Bearings;
+		double Reach = J.FillRadiusCm;
+		for (const FRoadCurves* C : Curves)
+		{
+			if (!C || C->Sampled.Num() < 2) { continue; }
+			const auto P = RoadNetMath::ProjectToPolyline(C->Sampled, J.Center);
+			if (P.Segment == INDEX_NONE || P.Distance > J.FillRadiusCm + 5.0) { continue; }
+			const FVector D = C->Sampled[P.Segment + 1] - C->Sampled[P.Segment];
+			if (D.SizeSquared2D() < 1.e-6) { continue; }
+			const double A = FMath::Atan2(D.Y, D.X);
+			const double Length = RoadNetMath::TotalLength(C->Sampled);
+			if (P.AlongDist > 1.0) { Bearings.Add(FMath::Fmod(A + 3.0 * PI, 2.0 * PI)); }
+			if (Length - P.AlongDist > 1.0) { Bearings.Add(FMath::Fmod(A + 2.0 * PI, 2.0 * PI)); }
+			Reach = FMath::Max(Reach, Length + P.Distance);
+		}
+		Bearings.Sort();
+		double Radius = J.FillRadiusCm + J.CloseCm + 50.0;
+		for (int32 i = 0; i < Bearings.Num(); ++i)
+		{
+			const double Next = i + 1 < Bearings.Num() ? Bearings[i + 1] : Bearings[0] + 2.0 * PI;
+			const double Angle = Next - Bearings[i];
+			if (Angle < 1.e-4 || Angle >= PI) { continue; }
+			const double CornerReach = (J.FillRadiusCm + J.CloseCm) / FMath::Sin(0.5 * Angle);
+			Radius = FMath::Max(Radius, FMath::Min(CornerReach, Reach) + J.CloseCm + 50.0);
+		}
+		return Radius;
+	}
+
 	bool BuildMergedSurface(
 		const TArray<const FRoadCurves*>& Curves,
 		TArray<FGeneralPolygon2d>& OutMerged,
@@ -104,20 +137,53 @@ namespace RoadNetSurface
 		// A junction's rounding is computed on the local surface patch (surface ∩
 		// disc) and unioned back, so junctions carry independent smoothing while
 		// straight road runs are untouched.
-		const double WeldCm = FMath::Min(InflateEpsilonCm, 5.0);
+		// The weld is NOT a rounding radius: it exists only to close the hairline
+		// between two abutting arm outlines. Deriving it from InflateEpsilonCm
+		// meant dialling junction smoothing down to 0 also dropped the weld from
+		// 5 cm to 2 cm, so the merged carriageway came apart into dozens of
+		// fragments — same pavement area, many more rings — and every downstream
+		// pass that scales with ring count (offsets, sidewalk bands, kerbs) went
+		// with it. Sharp corners and connected pavement are separate requests.
+		constexpr double WeldCm = 5.0;
 		MorphClose(OutMerged, WeldCm);
+
+		auto BoxesOverlap = [](const FAxisAlignedBox2d& A, const FAxisAlignedBox2d& B)
+		{
+			return !(A.Max.X < B.Min.X || A.Min.X > B.Max.X ||
+			         A.Max.Y < B.Min.Y || A.Min.Y > B.Max.Y);
+		};
+		// OutMerged is fixed for the whole loop (patches land in Patches), and
+		// Bounds() is itself a full vertex scan, so compute the boxes once.
+		TArray<FAxisAlignedBox2d> MergedBounds;
+		MergedBounds.Reserve(OutMerged.Num());
+		for (const FGeneralPolygon2d& GP : OutMerged) { MergedBounds.Add(GP.Bounds()); }
 
 		TArray<FGeneralPolygon2d> Patches;
 		Patches.Reserve(PerJunction->Num());
 		for (const FJunctionClose& J : *PerJunction)
 		{
 			if (J.CloseCm <= WeldCm) { continue; } // no extra rounding at this junction
+			const double R = JunctionWorkRadius(J, Curves);
 			FGeneralPolygon2d Disc;
-			MakeDisc(J.Center, J.FillRadiusCm + J.CloseCm + 50.0, /*Segments*/48, Disc);
+			MakeDisc(J.Center, R, /*Segments*/48, Disc);
 			const TArray<FGeneralPolygon2d> DiscArr = { MoveTemp(Disc) };
 
+			// Clipping the WHOLE network against one junction's disc, once per
+			// junction, is the dominant cost of this stage on a city-sized net.
+			// A junction disc is a few metres across, so all but a handful of
+			// rings are rejected by their bounding box for free.
+			const FAxisAlignedBox2d DiscBox(
+				FVector2d(J.Center.X - R, J.Center.Y - R),
+				FVector2d(J.Center.X + R, J.Center.Y + R));
+			TArray<FGeneralPolygon2d> Near;
+			for (int32 i = 0; i < OutMerged.Num(); ++i)
+			{
+				if (BoxesOverlap(MergedBounds[i], DiscBox)) { Near.Add(OutMerged[i]); }
+			}
+			if (Near.Num() == 0) { continue; }
+
 			TArray<FGeneralPolygon2d> Region;
-			if (!PolygonsIntersection(OutMerged, DiscArr, Region) || Region.Num() == 0) { continue; }
+			if (!PolygonsIntersection(Near, DiscArr, Region) || Region.Num() == 0) { continue; }
 			MorphClose(Region, J.CloseCm);
 			Patches.Append(MoveTemp(Region));
 		}

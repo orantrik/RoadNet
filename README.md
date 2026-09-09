@@ -44,7 +44,28 @@ junctions. Fully independent of RoadBLD / WorldBLD / CityBLD.
   trade width between them, drag an outer edge to widen the road, and set type and
   travel direction from the palettes. Edits go through `SetLaneWidth` / `SetLaneType` /
   `SetLaneDirection` / `RemoveLaneAt`, which materialise `DetailedLanes` and relayout,
-  then rebuild that one road. `RoadNet.LaneSelfCheck` asserts their invariants.
+  then rebuild that one road. `RoadNet.LaneSelfCheck` asserts their invariants, and the
+  junction rules alongside them (lane continuity, the rightmost drop, taper lengths,
+  and the junction grade bounds — a `Table 8.1` ceiling of 4–6% on each arm, and the
+  §8.2.3 *floor* of 1% that a junction needs in order to drain).
+- **Rounded junctions out of the box** — `JunctionSmoothingCm` defaults to 150 (the 15
+  `]` steps a new junction used to need by hand), and rounding is always applied
+  *locally* per junction rather than as one close over the whole zone, so a larger radius
+  buys rounder corners without welding roads that merely run near each other. Junction
+  paint and signals set themselves back by the smoothing radius on top of
+  `JunctionClearanceCm`, since the fillet carries pavement further up each approach.
+- **Standards-based junctions** — junction geometry follows the Israeli interurban
+  design guidelines (`docs/ISRAELI_JUNCTION_STANDARDS.md`). An arm keeps its full width
+  right up to the node: where two arms disagree on lane count, the surplus lane is
+  carried *out* of the junction and tapered away beyond it on the rightmost lane over
+  the `Table 5.1` length, and a single-lane approach is widened into a turn bay rather
+  than having a through lane repurposed. Every arm carries a bearing, lane count and
+  design speed, arms are ordered around the node, and the main axis is elected by road
+  class then lane count so it keeps its alignment and level through the junction.
+  Behind `bChannelizeJunctions`.
+- **Lane matching, not a cross-product** — the connectivity graph pairs through lanes by
+  position counting out from the kerb, and takes each turn off the lane it is signed
+  from, instead of joining every incoming lane to every outgoing one.
 - **PCG export** — perimeter loops (outer outlines + inner block holes) emitted as
   closed spline components for PCG graphs.
 - **Material overrides** — per-layer materials for road, sidewalk, and markings.

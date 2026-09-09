@@ -74,6 +74,13 @@ namespace RoadNetMesh
 	// instead of centreline offset/arc-length. Use for grass islands (medians)
 	// so a tiling ground texture reads world-aligned with no mirror seam down the
 	// centre (offset UVs flip sign across the reference line = a mirrored look).
+	//
+	// If bSkirtToGround, a vertical wall is dropped from every polygon boundary
+	// (outer edge AND holes) down past the height field, turning the draped shell
+	// into a slab that meets terrain. Use for layers raised clear of the road —
+	// a sidewalk lifted a kerb height is otherwise a floating sheet with daylight
+	// under its outer edge at eye level. Flat-on-the-road layers (paint, lane
+	// overlays) do not want it.
 	ROADNET_API int32 AppendSurfaceMesh(
 		const TArray<UE::Geometry::FGeneralPolygon2d>& Polys,
 		const TArray<const TArray<FVector>*>& CenterLines,
@@ -83,7 +90,8 @@ namespace RoadNetMesh
 		bool bComputeUVs = false,
 		double UVUnitCm = 100.0,
 		bool bGradientNormals = false,
-		bool bWorldUVs = false);
+		bool bWorldUVs = false,
+		bool bSkirtToGround = false);
 
 	// Enable attributes and compute per-vertex normals (call once, after all
 	// zones have been appended). No-op on an empty mesh.

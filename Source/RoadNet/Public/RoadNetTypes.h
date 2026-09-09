@@ -108,9 +108,13 @@ enum class ERoadNetDrawTool : uint8
 {
 	Draw      = 0,  // click drops road points; never selects
 	Points    = 1,  // select/move/delete control points, marquee, split, merge
-	Lanes     = 2,  // select a lane, insert lanes, cycle lane type
-	Junctions = 3,  // junction presets, islands, smoothing, medians
-	Edge      = 4   // drag the outer-edge vertices (sidewalk/curb/markings follow)
+	Lanes     = 2,  // select a lane, insert lanes, cycle lane type, central median
+	Junctions = 3,  // junction presets, islands, smoothing
+	Edge       = 4,  // drag the outer-edge vertices (sidewalk/curb/markings follow)
+	Markings   = 5,  // lane-mark pick + turn-role cycle
+	Crosswalk  = 6,  // draw a spline gesture; projects to a centreline zebra
+	Island     = 7,  // draw a closed loop for a placed pedestrian island
+	CurbBrush  = 8   // paint existing kerb stones (no road-mesh rebuild)
 };
 
 // Shape drawn by the Draw sub-tool. Freehand is the classic click-per-point
@@ -141,6 +145,30 @@ enum class ERoadNetLaneType : uint8
 	CenterTurn,  // center two-way turn lane
 	Median,      // median (non-drivable divider)
 	Bicycle      // dedicated bicycle path
+};
+
+// Authored turn intent on one lane. Auto = paint whatever the rebuild's
+// lane-connectivity graph says that lane does at the next junction. The other
+// values FILTER graph movements (a Right lane never gets a left arrow).
+UENUM(BlueprintType)
+enum class ERoadNetTurnRole : uint8
+{
+	Auto,
+	Through,
+	Left,
+	Right,
+	UTurn,
+	None         // never paint a turn mark on this lane
+};
+
+// Curb-brush paint type. Unpainted stones keep the CurbA/CurbB zebra.
+UENUM(BlueprintType)
+enum class ERoadNetCurbPaintType : uint8
+{
+	Gray,
+	WhiteBlack,
+	WhiteRed,
+	WhiteBlue
 };
 
 // Which side of the reference line a lane sits on. RoadBLD ERoadSide parity.
@@ -252,6 +280,10 @@ struct ROADNET_API FRoadNetLane
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
 	TObjectPtr<class UMaterialInterface> OverlayMaterial = nullptr;
 
+	// Authored turn filter. Auto (default) trusts the junction graph.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	ERoadNetTurnRole TurnRole = ERoadNetTurnRole::Auto;
+
 	bool bDrivable() const
 	{
 		return Type == ERoadNetLaneType::Normal
@@ -332,6 +364,22 @@ struct ROADNET_API FRoadNetLaneSpec
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
 	float SidewalkWidth = 200.f;      // 2 m
 
+	// ---- outboard cycle track (separated cycling) -------------------------
+	// A bike path built OUTSIDE the footway, so the sidewalk is what stands
+	// between riders and moving traffic. This is a different thing from
+	// ERoadNetLaneType::Bicycle, which is a bike LANE inside the carriageway
+	// separated only by paint — a road can carry either, or both.
+	// Sides follow the sidewalk convention: left = +right-axis.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	bool bBikePathLeft = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	bool bBikePathRight = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes",
+		meta=(ClampMin="60.0", UIMin="60.0", UIMax="600.0"))
+	float BikePathWidth = 200.f;      // 2 m
+
 	// ---- central median (divided road) -----------------------------------
 	// When bMedian, a raised central strip of MedianWidth splits the
 	// carriageway: driving lanes are pushed outward by MedianWidth/2 (a central
@@ -370,7 +418,13 @@ struct ROADNET_API FRoadNetLaneSpec
 				Lo = FMath::Min(Lo, L.CenterOffset - 0.5 * L.Width);
 				Hi = FMath::Max(Hi, L.CenterOffset + 0.5 * L.Width);
 			}
-			return 0.5f * (float)(Hi - Lo) + MedianHalfCm();
+			// No MedianHalfCm() here: RelayoutLanes pins the gap to +/-MedianHalf
+			// and stacks the lanes around it, so the span measured above already
+			// spans the median. Adding it again counted the median twice, and the
+			// two models then disagreed — the count-model branch below adds it
+			// because ITS widths are lanes only. Both now report the same number
+			// for the same road.
+			return 0.5f * (float)(Hi - Lo);
 		}
 		const int32 N = EffectiveLaneCount();
 		float W = 0.f;
@@ -555,6 +609,106 @@ struct ROADNET_API FRoadNetCrossingMark
 	bool bStopBar = true;
 };
 
+// A pedestrian cut-through on a placed island (crosswalk attaching to it).
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetIslandPath
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FVector2D A = FVector2D::ZeroVector;
+
+	UPROPERTY()
+	FVector2D B = FVector2D::ZeroVector;
+
+	UPROPERTY()
+	float WidthCm = 250.f;
+};
+
+// Authored pedestrian island (closed ring in world XY cm). Meshed each rebuild
+// (extrude + kerb ring, or a seated static mesh when IslandMesh is set).
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetIsland
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Islands")
+	TArray<FVector> Ring;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Islands",
+		meta=(ClampMin="0.0", UIMin="0.0", UIMax="800.0"))
+	float SmoothCm = 150.f;
+
+	UPROPERTY()
+	TArray<FRoadNetIslandPath> Paths;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Islands")
+	TObjectPtr<class UStaticMesh> MeshOverride = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Islands")
+	TObjectPtr<class UMaterialInterface> MaterialOverride = nullptr;
+};
+
+// Which arrow a road mark paints. The order IS the mesh/material slot order on
+// URoadNetwork (ArrowThrough..ArrowLeftRight) and the order of the panel's
+// dropdown, so adding a kind means adding a slot pair and a stencil row.
+UENUM(BlueprintType)
+enum class ERoadNetMarkKind : uint8
+{
+	Through      UMETA(DisplayName = "Through"),
+	Left         UMETA(DisplayName = "Left"),
+	Right        UMETA(DisplayName = "Right"),
+	UTurn        UMETA(DisplayName = "U-Turn"),
+	ThroughLeft  UMETA(DisplayName = "Through + Left"),
+	ThroughRight UMETA(DisplayName = "Through + Right"),
+	LeftRight    UMETA(DisplayName = "Left + Right"),
+};
+
+// A hand-placed road mark. Unlike the automatic turn arrows (which are derived
+// from the lane graph every rebuild and vanish when it changes), this is
+// authored data: it stays exactly where it was clicked until it is deleted.
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetPlacedMark
+{
+	GENERATED_BODY()
+
+	// World cm, on the road surface. The commit lifts it clear of the paint tier.
+	UPROPERTY()
+	FVector Location = FVector::ZeroVector;
+
+	// Direction of TRAVEL the arrow points along, degrees.
+	UPROPERTY()
+	float YawDeg = 0.f;
+
+	UPROPERTY()
+	ERoadNetMarkKind Kind = ERoadNetMarkKind::Through;
+};
+
+// Persistent curb-brush sample. Keyed by road + side + arc distance so it
+// survives HISM ClearInstances (instance indices do not).
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetCurbPaint
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Road = INDEX_NONE;
+
+	UPROPERTY()
+	ERoadNetSide Side = ERoadNetSide::Right;
+
+	UPROPERTY()
+	float DistanceCm = 0.f;
+
+	UPROPERTY()
+	ERoadNetCurbPaintType Type = ERoadNetCurbPaintType::Gray;
+
+	// World XY of the stroke (cm). Rebuild uses Road+Side+Distance; the brush
+	// also matches stones by proximity to this point so island kerbs paint.
+	UPROPERTY()
+	FVector World = FVector::ZeroVector;
+};
+
 USTRUCT(BlueprintType)
 struct ROADNET_API FRoadNetParkingBay
 {
@@ -662,6 +816,14 @@ struct ROADNET_API FRoadDef
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet")
 	ERoadNetClass Class = ERoadNetClass::Residential;
+
+	// Design speed (km/h) — the key every geometric-design table is looked up
+	// by (כרך 1 Table 2.4). 0 means "not authored": RoadNetStandards derives it
+	// from Class instead, so roads on disk from before this field keep working.
+	// OSM fills it from maxspeed= where the tag exists.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet",
+		meta=(ClampMin="0", UIMin="0", UIMax="130"))
+	int32 DesignSpeedKph = 0;
 
 	// Reference centerline, world-space cm. Drives all generation (§10.2).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Geometry")
@@ -782,4 +944,9 @@ struct ROADNET_API FRoadNetLaneConnection
 	// (a straight-through movement, not a turn).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
 	bool bThrough = false;
+
+	// Graph classification of this movement (Through/Left/Right/UTurn). Auto
+	// is unused here — Emit always writes a concrete kind.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	ERoadNetTurnRole Kind = ERoadNetTurnRole::Through;
 };

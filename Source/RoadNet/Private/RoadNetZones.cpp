@@ -42,9 +42,9 @@ namespace RoadNetZones
 		for (const FRoadNetJoint& J : Joints)
 		{
 			int32 First = INDEX_NONE;
-			for (const TPair<int32, bool>& Arm : J.Arms)
+			for (const FRoadNetJointArm& Arm : J.Arms)
 			{
-				const int32* L = Local.Find(Arm.Key);
+				const int32* L = Local.Find(Arm.Road);
 				if (!L) { continue; }
 				if (First == INDEX_NONE) { First = *L; }
 				else { UF.Union(First, *L); }

@@ -45,6 +45,9 @@ namespace
 		R.bBridge = Way.bBridge;
 		R.bTunnel = Way.bTunnel;
 		R.Name   = Way.Name;
+		// maxspeed= is the only real design-speed signal OSM carries. 0 leaves
+		// RoadNetStandards to fall back to the class default.
+		R.DesignSpeedKph = FMath::Max(0, Way.MaxSpeedKph);
 
 		// Lanes: preserve OSM directional data; derive a lane width that makes
 		// FRoadNetLaneSpec::HalfWidthCm() match the shared OSM half-width so

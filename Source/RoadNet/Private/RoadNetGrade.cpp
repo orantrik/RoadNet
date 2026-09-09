@@ -13,6 +13,7 @@
 // ===========================================================================
 #include "RoadNetwork.h"
 #include "RoadNetMath.h"
+#include "RoadNetStandards.h"
 #include "RoadNetLog.h"
 #include "HAL/IConsoleManager.h"
 
@@ -76,8 +77,18 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	const double MaxSlope   = FMath::Max(0.005, ReadCVarFloat(TEXT("osm.RoadGradeMaxSlope"),     0.12));
 
 	// -----------------------------------------------------------------------
-	// 1. Junction elevations — "highest Z wins" over every arriving road.
+	// 1. Junction elevations (כרך 2 §8.5).
 	// -----------------------------------------------------------------------
+	// This used to be "highest Z wins" over every arriving road, which is where
+	// the spikes came from: one noisy drape sample on one minor arm lifted the
+	// whole junction, and every chord radiating out of it became a berm.
+	//
+	// §8.5.3 says the opposite. The MAIN road holds its own level and crossfall
+	// straight through the junction, and each secondary arm is warped up or
+	// down into it. So the junction's elevation is the main axis's own
+	// elevation, and a minor arm has no vote at all. Where no arm dominates
+	// (a Y with no through road), §8.5.4's plane method applies instead: fit
+	// the junction plate to all the arms together.
 	// Z at one end of a road. Prefers the freshly built curve (this rebuild's
 	// draped + grade-smoothed bed); roads outside a windowed rebuild fall back
 	// to their persistent Ref/Elev, which is also what the NEXT full rebuild
@@ -101,10 +112,10 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	};
 
 	const int32 NumJoints = Ctx.Joints.Num();
-	TArray<double> JointZ, JointKing;
+	TArray<double> JointZ, JointBase;
 	TBitArray<>    JointRelaxable(false, NumJoints);
 	JointZ.SetNumZeroed(NumJoints);
-	JointKing.SetNumZeroed(NumJoints);
+	JointBase.SetNumZeroed(NumJoints);
 
 	// Road end -> joint. Keyed by an encoded (road, end) so the map hashes ints.
 	auto ArmKey = [](int32 RoadIdx, bool bStart) { return RoadIdx * 2 + (bStart ? 0 : 1); };
@@ -112,18 +123,34 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	for (int32 j = 0; j < NumJoints; ++j)
 	{
 		const FRoadNetJoint& J = Ctx.Joints[j];
-		double King = -TNumericLimits<double>::Max();
-		for (const TPair<int32, bool>& Arm : J.Arms)
+		for (const FRoadNetJointArm& Arm : J.Arms)
 		{
-			King = FMath::Max(King, ArmEndZ(Arm.Key, Arm.Value));
-			ArmToJoint.Add(ArmKey(Arm.Key, Arm.Value), j);
+			ArmToJoint.Add(ArmKey(Arm.Road, Arm.bAtStart), j);
 		}
-		if (J.Arms.Num() == 0)
+
+		double Base = J.Z;
+		if (J.Arms.IsValidIndex(J.MainA) && J.Arms.IsValidIndex(J.MainB))
 		{
-			King = J.Z;
+			// §8.5.3 crossfall preservation — the main road runs through at its
+			// own level, so the node sits on the main road's profile.
+			Base = 0.5 * (ArmEndZ(J.Arms[J.MainA].Road, J.Arms[J.MainA].bAtStart)
+			            + ArmEndZ(J.Arms[J.MainB].Road, J.Arms[J.MainB].bAtStart));
 		}
-		JointKing[j]      = King;
-		JointZ[j]         = King;
+		else if (J.Arms.Num() > 0)
+		{
+			// §8.5.4 plane method. ponytail: the mean of the arm elevations,
+			// not a least-squares plane evaluated at the node. The arm ends are
+			// welded to within kEndpointWeldCm of each other, so the two answers
+			// differ by less than the drape noise they are both smoothing. If
+			// junction plates ever get big enough for the tilt to read, the
+			// upgrade is a proper plane fit through (x, y, z) of the arm ends.
+			double Sum = 0.0;
+			for (const FRoadNetJointArm& Arm : J.Arms) { Sum += ArmEndZ(Arm.Road, Arm.bAtStart); }
+			Base = Sum / (double)J.Arms.Num();
+		}
+
+		JointBase[j] = Base;
+		JointZ[j]    = Base;
 		// A dead end is not a junction: it stays pinned to its own ground level.
 		JointRelaxable[j] = (J.Arms.Num() >= 2);
 	}
@@ -137,8 +164,10 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	// that puts its chords closest to the ground: for a link to neighbour k whose
 	// mean terrain elevation is T, the chord midpoint lands on the ground when
 	// Zj = 2*T - Zk. Short links pull harder (weight 1/Length). Every sweep is
-	// clamped so a junction is never lifted above its king Z and never sinks more
-	// than the budget below it.
+	// clamped to within the budget of the §8.5 base elevation, in EITHER
+	// direction — under "highest wins" the base was an upper bound so the clamp
+	// was one-sided, but the main road's own level is a target to stay near,
+	// not a ceiling.
 	struct FGradeLink { int32 Ja = 0; int32 Jb = 0; double Weight = 0.0; double MeanZ = 0.0; };
 	TArray<FGradeLink> Links;
 	for (int32 r = 0; r < Roads.Num(); ++r)
@@ -195,7 +224,7 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 				{
 					continue;
 				}
-				JointZ[j] = FMath::Clamp(Acc[j] / W[j], JointKing[j] - RelaxCm, JointKing[j]);
+				JointZ[j] = FMath::Clamp(Acc[j] / W[j], JointBase[j] - RelaxCm, JointBase[j] + RelaxCm);
 			}
 		}
 	}
@@ -237,8 +266,7 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 
 	for (int32 j = 0; j < NumJoints; ++j)
 	{
-		if (JointZ[j] > JointKing[j] + 1e-3 ||
-			(JointRelaxable[j] && JointZ[j] < JointKing[j] - RelaxCm - 1e-3))
+		if (JointRelaxable[j] && FMath::Abs(JointZ[j] - JointBase[j]) > RelaxCm + 1e-3)
 		{
 			++RelaxEscapes;
 		}
@@ -465,8 +493,94 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 		}
 	}
 
+	// -----------------------------------------------------------------------
+	// 5. Junction grades (כרך 2 §8.2.3 and Table 8.1).
+	// -----------------------------------------------------------------------
+	// Two rules pointing in OPPOSITE directions, which is easy to get backwards:
+	//
+	//   Table 8.1 is the CEILING — an arm may not exceed 4% (6% below 80 km/h)
+	//   through the junction, or turning traffic tips.
+	//
+	//   §8.2.3 is a FLOOR — «לא יפחת מ-1%», the junction's steepest direction
+	//   must be at least 1% or water ponds on it. Its section is titled
+	//   «שיפועים מזעריים» (minimum grades) and sits beside the 0.5% longitudinal
+	//   minimum. The quantity is *named* "maximum resultant grade" because it is
+	//   the grade in the steepest direction, not because it is a limit.
+	const double MaxArmGrade = RoadNetStandards::MaxArmGradeAtJunction(
+		/*worst case, the flattest allowance*/ 80);
+	const double MinDrainage = RoadNetStandards::MinJunctionResultantGrade();
+
+	int32 SteepJunctions = 0, PondingJunctions = 0, Reported = 0;
+
+	for (const FRoadNetJoint& J : Ctx.Joints)
+	{
+		if (J.Arms.Num() < 3) { continue; }
+
+		double AreaCm = 0.0;
+		for (const FRoadNetJointArm& Arm : J.Arms) { AreaCm = FMath::Max(AreaCm, Arm.HalfWidthCm); }
+		if (AreaCm < 1.0) { continue; }
+
+		double Worst = 0.0;
+		for (const FRoadNetJointArm& Arm : J.Arms)
+		{
+			const FRoadCurves* C = Ctx.Curves.Find(Arm.Road);
+			if (!C || C->Sampled.Num() < 2) { continue; }
+
+			const int32 Cnt  = C->Sampled.Num();
+			const int32 From = Arm.bAtStart ? 0 : Cnt - 1;
+			const int32 Step = Arm.bAtStart ? 1 : -1;
+
+			double Walked = 0.0;
+			for (int32 i = From; Walked < AreaCm; i += Step)
+			{
+				const int32 Nxt = i + Step;
+				if (!C->Sampled.IsValidIndex(Nxt)) { break; }
+				const double dS = FVector::Dist2D(C->Sampled[i], C->Sampled[Nxt]);
+				if (dS < 1.0) { continue; }
+				Walked += dS;
+
+				const double Longitudinal = (C->Sampled[Nxt].Z - C->Sampled[i].Z) / dS;
+				// Crossfall is zero in this model — the outer edges take the
+				// centreline's Z — but the resultant is the quantity both rules
+				// are written in, so it is spelled out for when crossfall lands.
+				Worst = FMath::Max(Worst, RoadNetStandards::ResultantGrade(Longitudinal, 0.0));
+			}
+		}
+
+		// The ceiling is the per-junction failure worth naming: it is caused by
+		// terrain the alignment could not absorb, and it is fixable by moving or
+		// re-levelling that junction.
+		if (Worst > MaxArmGrade + 1e-4)
+		{
+			++SteepJunctions;
+			if (Reported < 5)
+			{
+				++Reported;
+				UE_LOG(LogRoadNet, Warning,
+					TEXT("[RoadNet][GRADE] junction at (%.0f, %.0f) carries %.2f%% across its %.1f m area, past the %.0f%% arm limit (כרך 2 Table 8.1). Lower a neighbouring junction, or raise roadnet.MaxJunctionRelaxCm so this one can sink."),
+					J.Location.X, J.Location.Y, Worst * 100.0, AreaCm / 100.0, MaxArmGrade * 100.0);
+			}
+		}
+		if (Worst < MinDrainage) { ++PondingJunctions; }
+	}
+
+	// The drainage floor is reported as a COUNT, not per junction, because the
+	// flat plate makes every junction violate it by construction — the warning
+	// would be one line per junction saying the same thing about the design.
+	//
+	// ponytail: the plate is dead level. A junction that drains needs the plate
+	// tilted to ~1% in a chosen direction (§8.2.3) with inlets on the upstream
+	// kerb (§8.7). Until then this counter is a standing reminder, not a bug
+	// report — and it is the reason a real drainage pass is still outstanding.
+	if (PondingJunctions > 0)
+	{
+		UE_LOG(LogRoadNet, Log,
+			TEXT("[RoadNet][GRADE] %d junction(s) are flatter than the %.0f%% drainage minimum (כרך 2 §8.2.3). Expected: the junction plate is level by design, so nothing sheds water off it yet."),
+			PondingJunctions, MinDrainage * 100.0);
+	}
+
 	UE_LOG(LogRoadNet, Log,
-		TEXT("[RoadNet][GRADE] aligned %d road(s) over %d junction(s) | straight span %.0f m, chord budget %.1f m, relax %.0f cm, curve %.1f m/%% | %d steep chord(s), %d budget break(s), %d relax escape(s)"),
+		TEXT("[RoadNet][GRADE] aligned %d road(s) over %d junction(s) | straight span %.0f m, chord budget %.1f m, relax %.0f cm, curve %.1f m/%% | %d steep chord(s), %d budget break(s), %d relax escape(s), %d over-graded junction(s)"),
 		RoadsAligned, NumJoints, StraightCm / 100.0, MaxDevCm / 100.0, RelaxCm, CurveKCm / 100.0,
-		SteepChords, BudgetBreaks, RelaxEscapes);
+		SteepChords, BudgetBreaks, RelaxEscapes, SteepJunctions);
 }

@@ -61,6 +61,9 @@ public:
 	UHierarchicalInstancedStaticMeshComponent* GetOrCreateHISM(FName Key, UStaticMesh* Mesh,
 		UMaterialInterface* Mat0 = nullptr, UMaterialInterface* Mat1 = nullptr);
 
+	// Existing HISM or null — does not create. Used by curb-paint rebucket.
+	UHierarchicalInstancedStaticMeshComponent* FindHISM(FName Key) const;
+
 	// Add a fresh spline component (perimeter / lane-graph / median centre). The
 	// caller sets points + ComponentTags. Recreated every rebuild.
 	USplineComponent* AddSpline();

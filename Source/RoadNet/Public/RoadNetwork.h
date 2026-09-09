@@ -53,15 +53,75 @@ struct FRoadNetTileConform
 	TArray<FVector> Verts; // world cm, one triple per triangle
 };
 
+// ---- One road end arriving at a topology node (§10.7) ----------------------
+// Everything junction design needs to know about an arm without going back to
+// the road: which way it points, how wide it is, how many lanes it carries.
+// כרך 2 §3.1.4 gives the main road natural continuity through the junction, so
+// one arm pair is elected main and the rest are minor.
+struct FRoadNetJointArm
+{
+	int32 Road = INDEX_NONE;
+	bool  bAtStart = true;      // true = the road's first point sits on the node
+
+	// Bearing of the arm as seen FROM the node looking outward along the road,
+	// radians in (-pi, pi] from +X. Outward (not inward) so two opposite arms of
+	// a straight through-road differ by pi, which is what the main-axis pairing
+	// and the through/left/right classification both test.
+	double BearingRad = 0.0;
+
+	int32  DrivableLanes = 0;   // lanes that carry traffic, both directions
+	double HalfWidthCm = 0.0;   // carriageway half-width incl. any median gap
+	ERoadNetClass Class = ERoadNetClass::Unknown;
+	int32  DesignSpeedKph = 0;  // resolved, never 0
+
+	// Elected main axis (§3.1.4). At most two arms per joint carry this.
+	bool   bMain = false;
+};
+
 // ---- Derived topology node (§10.7) -----------------------------------------
 struct FRoadNetJoint
 {
 	int64 NodeId = -1;
 	FVector2D Location = FVector2D::ZeroVector;
-	// (RoadIndex, bAtStart) arms meeting at this node.
-	TArray<TPair<int32, bool>> Arms;
+	// Arms meeting at this node, sorted by outward bearing (§3.1.4), so
+	// neighbouring entries are neighbouring approaches going anticlockwise.
+	TArray<FRoadNetJointArm> Arms;
 	ERoadNetJointKind Kind = ERoadNetJointKind::Terminal;
 	double Z = 0.0;
+
+	// Index into Arms of the two elected main-axis arms, or INDEX_NONE. A T
+	// junction elects both ends of the through road; a Y with no clear main
+	// road elects only one (or none), which is the plane-method fallback signal
+	// for the elevation stage (§8.5.4).
+	int32 MainA = INDEX_NONE;
+	int32 MainB = INDEX_NONE;
+};
+
+// ---- Junction-driven widening of one road end (כרך 2 §5.2.4, §6, §7) -------
+// The standard never narrows an arm at a junction. Where arms disagree, or a
+// turn needs its own lane, the answer is to WIDEN — a surplus through lane is
+// carried out of the junction and tapered away past it, and a turn bay is
+// added on the approach. Both are the same shape: full extra width at the
+// junction end, ramping linearly to nothing over TaperCm.
+//
+// This rides the outer-edge bulge path BuildCurves already runs for parking
+// bays, so no second width pipeline exists to disagree with the first.
+struct FRoadNetArmWidening
+{
+	int32  Road = INDEX_NONE;
+	bool   bAtStart = true;                     // which end of the road sits on the junction
+	ERoadNetSide Side = ERoadNetSide::Right;    // Right = +offset side, Left = −offset side
+	double WidthCm = 0.0;                       // extra carriageway width AT the junction
+	double TaperCm = 0.0;                       // length over which it ramps to zero
+
+	// Extra width at arc position S on a road of arc length Len.
+	FORCEINLINE double BulgeAt(double S, double Len) const
+	{
+		if (WidthCm <= 0.0 || TaperCm <= 0.0) { return 0.0; }
+		const double D = bAtStart ? S : (Len - S);   // distance from the junction end
+		if (D >= TaperCm) { return 0.0; }
+		return WidthCm * (1.0 - FMath::Max(0.0, D) / TaperCm);
+	}
 };
 
 // ---- 2-D centerline crossing between two roads (§10.12 / §10.8) -------------
@@ -94,6 +154,10 @@ struct FRoadNetRebuildContext
 	TArray<int32> TestAgainst;
 	TMap<int32, FRoadCurves> Curves;
 	TArray<FRoadNetJoint> Joints;
+	// כרך 2 §5.2.4 / §6 / §7 — junction lane drops and turn bays, expressed as
+	// outer-edge widenings on the arms. Built between the joints and the curves
+	// so BuildCurves can fold them into the same variable offset as parking.
+	TArray<FRoadNetArmWidening> ArmWidenings;
 	// §10.12/§10.8 all 2-D centerline crossings (computed once, shared).
 	TArray<FRoadNetCrossing> Crossings;
 	// §10.12 grade-separation zones: each group is a set of road indices that are
@@ -103,6 +167,11 @@ struct FRoadNetRebuildContext
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneSurfacePolys;
 	// §8.12 sidewalk bands, per zone (parallel to Zones).
 	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneSidewalkPolys;
+	// Outboard cycle tracks, per zone (parallel to Zones) — the band beyond the
+	// sidewalk, so the footway separates riders from traffic. Built after (and
+	// subtracted against) ZoneSidewalkPolys, which is what guarantees the two
+	// never claim the same ground.
+	TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneBikePathPolys;
 	// Central median strips, per zone (parallel to Zones) — raised block in the
 	// carriageway gap of divided roads. Soil = Plantable/CurbOnly (green);
 	// Walk = SidewalkAndCurb (concrete, walkable).
@@ -144,6 +213,11 @@ struct FRoadNetRebuildContext
 	// Flattened unions (for logging/QA only).
 	TArray<UE::Geometry::FGeneralPolygon2d> SurfacePolys;
 	TArray<UE::Geometry::FGeneralPolygon2d> SidewalkPolys;
+	// Parcel access spurs, kept in their OWN array and never merged into
+	// ZoneSidewalkPolys — see URoadNetwork::bBuildParcelAccessPaths for why that
+	// separation is the whole point. Flat, for logging/QA; the geometry that gets
+	// meshed goes straight into the "Sidewalks" tile buckets.
+	TArray<UE::Geometry::FGeneralPolygon2d> ParcelAccessPolys;
 	// §10.11 perimeter loops (network outlines + block holes) for PCG export (§8.4).
 	TArray<FRoadNetLoop> PerimeterLoops;
 	// §12.2 lane-connectivity graph (derived from joints + resolved lanes).
@@ -266,6 +340,55 @@ public:
 		meta = (ClampMin = "50.0", UIMin = "100.0", UIMax = "600.0"))
 	float DefaultSidewalkWidthCm = 200.f;
 
+	// ---- parcel access paths ----------------------------------------------
+	// Branch the sidewalk off the band and land it on each parcel's road-facing
+	// edge, so a plot's frontage is reachable on foot instead of being separated
+	// from the pavement by bare terrain.
+	//
+	// The spur is sidewalk MESH — same layer, material, kerb lift, terrain conform
+	// and ground skirt — but it is deliberately NOT added to the sidewalk band
+	// itself. The band drives three other things besides the mesh (it is carved out
+	// of outboard cycle tracks, it generates the kerb line, and it is the placement
+	// guard for street furniture), and an access path wants none of them: a garden
+	// path with a kerb down both sides and a bench parked on it is not what this is
+	// for. So the spurs go straight into the Sidewalks TILE bucket after the
+	// partition, which is the one consumer that means "mesh this".
+	//
+	// Best effort per parcel, never a guarantee: a plot with no road within reach,
+	// or whose frontage is already inside the band, gets no path and is counted in
+	// the log rather than given an invented route.
+	//
+	// Costs nothing on a level with no parcels, which is why it is on by default.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parcel Access")
+	bool bBuildParcelAccessPaths = true;
+
+	// Width (cm) of the spur and of the apron along the frontage. Its own setting
+	// rather than the sidewalk width: a footpath to a plot reads narrower than the
+	// pavement it leaves, and matching them makes the spur look like a mistake in
+	// the band rather than a path.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parcel Access",
+		meta = (EditCondition = "bBuildParcelAccessPaths",
+			ClampMin = "50.0", UIMin = "80.0", UIMax = "600.0"))
+	float ParcelAccessWidthCm = 180.f;
+
+	// How far (m) a parcel's frontage may be from the kerb and still get a path.
+	// This is the "which parcels qualify" rule: everything within reach, nothing
+	// beyond it. Set it long and a back-lot plot grows an absurd corridor across
+	// its neighbours; set it short and genuine frontages are missed.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parcel Access",
+		meta = (EditCondition = "bBuildParcelAccessPaths",
+			ClampMin = "1.0", UIMin = "5.0", UIMax = "100.0"))
+	float ParcelAccessMaxReachM = 25.f;
+
+	// Length (cm) of the apron laid along the frontage edge where the spur lands.
+	// This is the part of the drawing that was a long horizontal stroke rather than
+	// a stub: the path arrives and opens out along the plot boundary instead of
+	// stopping at a point. 0 gives a bare spur.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parcel Access",
+		meta = (EditCondition = "bBuildParcelAccessPaths",
+			ClampMin = "0.0", UIMin = "0.0", UIMax = "3000.0"))
+	float ParcelAccessApronCm = 500.f;
+
 	// ---- sampling (§2.6) --------------------------------------------------
 	// Arc-length spacing (cm) used to resample every road's reference polyline
 	// before offsetting/meshing. Lower = more points per segment = smoother
@@ -320,6 +443,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
 	bool bBuildLaneGraph = true;
 
+	// Channelize junctions to the Israeli standard (כרך 2): carry surplus
+	// through lanes out of the junction and taper them away past it (§5.2.4,
+	// Table 5.1), and widen single-lane approaches into turn bays (§6, §7).
+	// Disable to get the plain constant-width arms.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
+	bool bChannelizeJunctions = true;
+
 	// ---- kerbs (§8.12 companion) ------------------------------------------
 	// Instance a kerb-segment mesh along the road/sidewalk boundary as a HISM.
 	// The kerb line is derived from the merged carriageway + sidewalk polygons
@@ -343,6 +473,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
 	TObjectPtr<UMaterialInterface> CurbMaterial1;
 
+	// Four curb-brush materials (Assets strip). Unpainted stones keep CurbA/B.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
+	TObjectPtr<UMaterialInterface> CurbPaintGray;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
+	TObjectPtr<UMaterialInterface> CurbPaintWhiteBlack;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
+	TObjectPtr<UMaterialInterface> CurbPaintWhiteRed;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
+	TObjectPtr<UMaterialInterface> CurbPaintWhiteBlue;
+
 	// Standard kerb-piece length (cm). Pieces are tiled at EXACTLY this length on
 	// straights (uniform, no stretch) and only compress SHORTER at corners/curves
 	// so the stone follows the arc. Lower = finer corners + more instances.
@@ -357,10 +500,83 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions")
 	bool bBuildJunctionMarkings = true;
 
-	// Placeholder mesh for a signalized junction (one per approach). If unset a
-	// scaled engine cylinder is instanced as a visible "pole" placeholder.
+	// Signal placed at a signalized junction (one per approach). Resolution
+	// order mirrors furniture: SignalBlueprint > SignalMesh > engine cylinder
+	// scaled into a visible "pole" placeholder.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions")
 	TObjectPtr<UStaticMesh> SignalMesh;
+
+	// Assign to spawn real signal actors instead of instancing SignalMesh. The
+	// Blueprint's own pivot and scale are used as authored; only the approach
+	// position and heading are applied.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions")
+	TSoftClassPtr<AActor> SignalBlueprint;
+
+	// Turn-arrow meshes/materials (lane marks). Unset mesh = scaled cube.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UStaticMesh> ArrowThroughMesh;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UMaterialInterface> ArrowThroughMaterial;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UStaticMesh> ArrowLeftMesh;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UMaterialInterface> ArrowLeftMaterial;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UStaticMesh> ArrowRightMesh;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UMaterialInterface> ArrowRightMaterial;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UStaticMesh> ArrowUTurnMesh;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UMaterialInterface> ArrowUTurnMaterial;
+
+	// COMBINED arrows, for a lane that carries more than one movement. A shared
+	// left+through lane is one lane with one arrow showing both heads, not a left
+	// arrow and a through arrow stacked on the same tarmac — which is what you got
+	// before, because CommitLaneMarks placed one instance per CONNECTION and every
+	// movement out of that lane landed on the same setback point. Leave a slot
+	// empty and that combination falls back to its dominant single arrow.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UStaticMesh> ArrowThroughLeftMesh;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UMaterialInterface> ArrowThroughLeftMaterial;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UStaticMesh> ArrowThroughRightMesh;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UMaterialInterface> ArrowThroughRightMaterial;
+	// The שיטה ד case in §7.3.6: one shared lane serving both turns, no widening.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UStaticMesh> ArrowLeftRightMesh;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TObjectPtr<UMaterialInterface> ArrowLeftRightMaterial;
+
+	// Ignore the meshes assigned above and use the stencil set shipped in
+	// /Game/OSM/Stencils instead. A switch, not a fallback: it overrides even a
+	// filled slot, so one tick swaps the whole arrow family without clearing
+	// anything. Missing stencils fall back to the assigned mesh, so a partial
+	// stencil folder degrades to a mix rather than to nothing.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	bool bUseOSMStencils = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings",
+		meta = (ClampMin = "400.0", UIMin = "800.0", UIMax = "4000.0"))
+	float ArrowSetbackCm = 1800.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Islands")
+	TObjectPtr<UStaticMesh> IslandMesh;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Islands")
+	TObjectPtr<UMaterialInterface> IslandMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Islands")
+	TArray<FRoadNetIsland> PlacedIslands;
+
+	// Hand-placed road marks. Authored, so unlike the automatic arrows these are
+	// not re-derived on rebuild and survive any change to the lane graph.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TArray<FRoadNetPlacedMark> PlacedMarks;
+
+	UPROPERTY()
+	TArray<FRoadNetCurbPaint> CurbPaints;
 
 	// ---- median (§ divided road) ------------------------------------------
 	// Material for the raised median strip. If unset a flat green (plantable)
@@ -371,10 +587,15 @@ public:
 	// ---- junctions (§10.8/§10.9) ------------------------------------------
 	// Morphological "close" radius (cm) applied to the merged carriageway. Larger
 	// = rounder junction corners / more gap bridging. Adjustable live with the
-	// [ and ] hotkeys in the RoadNet Draw mode.
+	// [ and ] hotkeys in the RoadNet Draw mode, which step by 10 cm (50 with
+	// Shift) — so the 150 default is the 15 steps a freshly spawned junction
+	// used to need by hand before it read as a real corner rather than a
+	// mitre. Junction paint and signals set themselves back by this much on top
+	// of JunctionClearanceCm: the close fillets the wedge between adjacent
+	// arms, which carries the pavement that much further up each approach.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions",
 		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "300.0"))
-	double JunctionSmoothingCm = 20.0;
+	double JunctionSmoothingCm = 150.0;
 
 	// Stop-line setback (cm): how far markings and lane ribbons stop BACK from the
 	// true junction area (§2.1 מבואות). Applied as a dilation of the edge-line
@@ -473,6 +694,11 @@ public:
 	// per-lane edit ops below take that same left→right index. Empty on bad idx.
 	TArray<FRoadNetLane> GetLanesLeftToRight(int32 RoadIdx) const;
 
+	// Backs the RoadNet.LaneSelfCheck console command. A member so it can drive
+	// the joint and channelization stages directly — they need no world, and
+	// asserting their output is the whole point of the check.
+	static void RunSelfCheck();
+
 	// Materialise a road's lanes as authored DetailedLanes (each with a stable
 	// LaneId) so the interactive editor can track a selection across rebuilds.
 	// A no-op if already authored; geometry is unchanged. Returns false on bad
@@ -505,6 +731,39 @@ public:
 	// silently discarded a width just dragged is what makes an editor feel
 	// broken. Use CycleLaneType for the viewport hotkey, this for the panel.
 	bool SetLaneType(int32 RoadIdx, int32 LaneLtoR, ERoadNetLaneType Type);
+
+	// Authored turn-role filter. Converts to DetailedLanes on first use.
+	bool SetLaneTurnRole(int32 RoadIdx, int32 LaneLtoR, ERoadNetTurnRole Role);
+	ERoadNetTurnRole CycleLaneTurnRole(int32 RoadIdx, int32 LaneLtoR, int32 Dir);
+
+	// Add a placed island from a closed world-XY ring. Returns its index.
+	int32 AddPlacedIsland(const TArray<FVector>& Ring);
+
+	// ---- hand-placed road marks -------------------------------------------
+	// Add one mark at a world point. Returns its index in PlacedMarks.
+	int32 AddPlacedMark(const FVector& WorldLoc, float YawDeg, ERoadNetMarkKind Kind);
+
+	// Delete the nearest mark within RadiusCm of a world point (XY). Returns the
+	// index that was removed, or INDEX_NONE if nothing was close enough.
+	int32 RemovePlacedMarkNear(const FVector& WorldLoc, double RadiusCm);
+
+	// Heading of travel (degrees) of the road nearest WorldLoc, so a placed arrow
+	// lines up with the lane instead of the camera. Returns false when no road is
+	// within RadiusCm and the caller should pick its own yaw.
+	bool HeadingOfNearestRoad(const FVector& WorldLoc, double RadiusCm, float& OutYawDeg) const;
+
+	// Cut a pedestrian path through any island the gesture crosses.
+	void TryCutIslandPaths(const TArray<FVector>& Gesture);
+
+	// [ / ] on the Island tool: round the nearest island. Returns its index.
+	int32 AdjustIslandSmoothNear(const FVector& WorldHit, float DeltaCm);
+
+	// Curb-brush sample at a world hit. Returns stones rebucketed (0 = miss).
+	int32 AddCurbPaintNear(const FVector& WorldHit, ERoadNetCurbPaintType Type);
+
+	// Rebucket existing curb HISMs from CurbPaints — no road-mesh rebuild.
+	// Returns the number of instances moved onto a paint HISM.
+	int32 RebucketCurbPaint();
 
 	// Set which way traffic runs on one lane.
 	bool SetLaneDirection(int32 RoadIdx, int32 LaneLtoR, ERoadNetLaneDirection Dir);
@@ -553,9 +812,17 @@ public:
 	// Nudge the median width (cm, clamped). Returns the new width.
 	float AdjustMedianWidth(int32 RoadIdx, float DeltaCm);
 
-	// Median state accessors (for HUD/debug).
+	// Set the median width outright (cm, clamped 30–2000). Returns the new width.
+	// The cross-section editor drives this; the hotkeys go through AdjustMedianWidth.
+	float SetMedianWidth(int32 RoadIdx, float WidthCm);
+
+	// Set the edge treatment directly. Turns the median on, as cycling does.
+	void SetMedianEdge(int32 RoadIdx, ERoadNetMedianEdge Edge);
+
+	// Median state accessors (for HUD/debug and the cross-section view).
 	bool IsMedian(int32 RoadIdx) const;
 	float GetMedianWidth(int32 RoadIdx) const;
+	ERoadNetMedianEdge GetMedianEdge(int32 RoadIdx) const;
 
 	// ---- sidewalk width (street features) ---------------------------------
 	// Set every road's sidewalk width (cm) and enable both sides where a width
@@ -578,6 +845,13 @@ public:
 	// Nudge one road's sidewalk width by DeltaCm (clamped ≥ 0). Enables both
 	// sides on first widening. Returns the new width. Caller triggers Rebuild().
 	float AdjustSidewalkWidth(int32 RoadIdx, float DeltaCm);
+
+	// Toggle the outboard cycle track on one road (both sides). Turning it on
+	// also turns a sidewalk on if the road has none: the track is DEFINED as the
+	// band beyond the footway, so without one there is nothing for it to be
+	// outboard of and it would just be a bike lane with extra steps. Returns the
+	// new state. Caller triggers Rebuild().
+	bool ToggleBikePath(int32 RoadIdx);
 
 	// ---- junction approach conditioning -----------------------------------
 	// Control points bunch up around intersections for two reasons, both in the
@@ -602,6 +876,29 @@ public:
 	// changed.
 	int32 StraightenJunctionApproaches(double LengthCm = 2000.0);
 
+	// ---- turning crossings into junctions ---------------------------------
+	// Split a road in two at arc distance ArcCm along its reference line. Both
+	// halves keep the cut point as an endpoint, and that shared coordinate is
+	// exactly what the spatial weld in BuildJoints collapses into one node.
+	// Returns the new (far half) road index, or INDEX_NONE when ArcCm sits within
+	// the weld radius of an end — there is already an endpoint there to weld
+	// against, so cutting would only make a stub. Caller triggers Rebuild().
+	int32 SplitRoadAt(int32 RoadIdx, double ArcCm);
+
+	// Turn every at-grade centreline crossing into a real junction by splitting
+	// both roads at the crossing point.
+	//
+	// This exists because a CROSSING and a JUNCTION are different things here:
+	// BuildCrossings finds centrelines overlapping in plan, while BuildJoints only
+	// ever grows arms from road ENDS. Draw one road over another and the surfaces
+	// merge into something that looks like a crossroads, but the arm count never
+	// passes 2 — so the lane graph produces no movements and turn arrows, stop
+	// lines, corner islands and signals all stay silently empty.
+	//
+	// Grade-separated crossings are left alone: a bridge crosses on purpose.
+	// Returns the number of roads created. Caller triggers Rebuild().
+	int32 SplitRoadsAtCrossings(double MaxZGapCm = 350.0);
+
 	// ---- standard parking bays (street features) --------------------------
 	// Append a standard parking bay to a road on the given side + layout, using
 	// the network's default stall dimensions. CenterArcCm is the arc-length (cm)
@@ -623,6 +920,11 @@ public:
 	// through bOutAdded whether paint went on or came off. Caller rebuilds.
 	int32 ToggleCrossingNear(const FVector2D& WorldXY, double PickRadiusCm,
 		bool& bOutAdded, double MergeCm = 800.0);
+
+	// Add (or update) a mid-block crossing at the nearest centreline. DepthCm
+	// is the zebra band along travel. Returns the road index, or INDEX_NONE.
+	int32 AddCrossingAt(const FVector2D& WorldXY, float DepthCm, double PickRadiusCm,
+		double MergeCm = 800.0);
 
 	// Clear all roads (e.g. before a fresh OSM import).
 	void ResetRoads();
@@ -869,6 +1171,13 @@ private:
 	// can steal a sidewalk. Also runs the both-sides self-check ([TILECHK]).
 	void BuildTilePartition(FRoadNetRebuildContext& Ctx);
 
+	// Branch the sidewalk to each reachable parcel's frontage (RoadNetParcelAccess.cpp).
+	//
+	// Must run AFTER BuildTopoAccel (it resolves each spur to a tile through TopoKeyOf)
+	// and AFTER BuildTilePartition (it appends into the "Sidewalks" buckets that stage
+	// creates, and subtracts what is already in them so nothing overlaps).
+	void BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx);
+
 	// (Former network-wide Geo* actors removed — all committed geometry now lives
 	// in per-cell ARoadNetTileActor components; see the tile registry above.)
 
@@ -905,6 +1214,13 @@ private:
 	void BuildCurves(FRoadNetRebuildContext& Ctx) const;
 	void BuildCrossings(FRoadNetRebuildContext& Ctx) const;      // §10.12 grid broadphase (shared)
 	void BuildEndpointJoints(FRoadNetRebuildContext& Ctx) const;
+	// כרך 2 §5.2.4 / §6 / §7 — resolve arm mismatches and turn demand by
+	// WIDENING the arms (lane drops carried outside the junction, turn bays
+	// added on the approach), never by narrowing anything at the node. Emits
+	// Ctx.ArmWidenings, which BuildCurves folds into the outer-edge offset, so
+	// this must run after the joints and before the curves. See
+	// RoadNetJunctions.cpp.
+	void BuildJunctionChannelization(FRoadNetRebuildContext& Ctx) const;
 	// Vertical alignment: junctions become the vertical points of intersection,
 	// the road runs a straight tangent grade between them (with a span-scaled
 	// deviation budget so long links may still follow the ground), and each
@@ -924,6 +1240,16 @@ private:
 	void CommitCurbs(FRoadNetRebuildContext& Ctx);               // §8.12 kerb-line HISM
 	void CommitFurniture(FRoadNetRebuildContext& Ctx);           // § street-furniture HISM / actors
 	void CommitJunctionSignals(FRoadNetRebuildContext& Ctx);     // § signal placeholder HISM
+	void CommitLaneMarks(FRoadNetRebuildContext& Ctx);           // turn arrows from the lane graph
+	void CommitPlacedMarks(FRoadNetRebuildContext& Ctx);         // hand-placed road marks
+	void CommitPlacedIslands(FRoadNetRebuildContext& Ctx);       // authored pedestrian islands
+
+	// Mesh + material for one arrow kind, honouring bUseOSMStencils. OutKey is
+	// the HISM bucket name. Cache spans one commit so a missing stencil warns
+	// once instead of once per arrow. Returns null when the slot is empty.
+	UStaticMesh* ResolveMarkMesh(ERoadNetMarkKind Kind, TMap<FName, UStaticMesh*>& Cache,
+		UMaterialInterface*& OutMat, FName& OutKey) const;
+	bool LookupCurbPaint(const FVector& WorldLoc, ERoadNetCurbPaintType& OutType) const;
 	void CommitMedian(FRoadNetRebuildContext& Ctx);              // § raised median strip + centre splines
 	void CommitPerimeters(FRoadNetRebuildContext& Ctx);          // §8.4 spline loops for PCG
 	void CommitLaneGraph(FRoadNetRebuildContext& Ctx);           // §12.2 lane-graph splines for PCG
@@ -937,10 +1263,14 @@ private:
 	// If Material is set it is applied to slot 0; otherwise the constant Color is
 	// used as a vertex-colour override so the layer is always visible. Only cells
 	// allowed by the commit scope (Ctx.bFullCommit / Ctx.DirtyTiles) are written.
+	// bSkirtToGround drops a wall from every polygon boundary to the ground, so a
+	// layer raised clear of the road (the sidewalk band) is a slab rather than a
+	// floating sheet. The walls are excluded from the terrain conform.
 	int32 CommitLayer(FName LayerName,
 		const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
 		double ExtraLiftCm, FColor Color, UMaterialInterface* Material, FRoadNetRebuildContext& Ctx,
-		bool bBakeLaneColors = false, bool bWorldUVs = false, bool bConformSurface = false);
+		bool bBakeLaneColors = false, bool bWorldUVs = false, bool bConformSurface = false,
+		bool bSkirtToGround = false);
 
 	// True if grid cell Coord may be written this commit pass (full rebuild, or
 	// Coord is in the dirty set).

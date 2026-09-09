@@ -15,6 +15,8 @@
 #include "Engine/World.h"
 #include "ScopedTransaction.h"
 #include "Editor.h"
+#include "EngineUtils.h"
+#include "GameFramework/Actor.h"
 #include "HAL/IConsoleManager.h"
 
 #define LOCTEXT_NAMESPACE "RoadNetEditor"
@@ -26,6 +28,16 @@ static TAutoConsoleVariable<float> CVarRoadNetGhostThickness(
 	TEXT("roadnet.GhostThickness"),
 	3.0f,
 	TEXT("Draw-time road ghost line width in screen pixels (the halo behind each line is 2 px wider). Default 3."),
+	ECVF_Default);
+
+// Click-snap radius for the shape-tracing tools (Island, Crosswalk). Road
+// drawing keeps its own wide radius because it is welding road ends into
+// junctions; a traced shape has no ends to weld, so snapping only fought the
+// user. Set > 0 to trace against road vertices again.
+static TAutoConsoleVariable<float> CVarRoadNetGestureSnapCm(
+	TEXT("roadnet.GestureSnapCm"),
+	0.0f,
+	TEXT("Click-snap radius in cm while tracing an Island or Crosswalk. 0 = no snap (default)."),
 	ECVF_Default);
 
 IMPLEMENT_HIT_PROXY(HRoadNetPointProxy, HHitProxy);
@@ -123,7 +135,12 @@ ERoadNetDrawTool FEdModeRoadNet::ActiveTool() const
 {
 	static IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(TEXT("roadnet.DrawTool"));
 	const int32 V = CV ? CV->GetInt() : 0;
-	return (ERoadNetDrawTool)(uint8)FMath::Clamp(V, 0, 4);
+	return (ERoadNetDrawTool)(uint8)FMath::Clamp(V, 0, 8);
+}
+
+bool FEdModeRoadNet::PointsAreEditable(const FRoadDef& Rd) const
+{
+	return Rd.Source == ERoadNetSource::HandDrawn || bShowAllPoints;
 }
 
 void FEdModeRoadNet::SetActiveTool(ERoadNetDrawTool Tool)
@@ -236,6 +253,29 @@ void FEdModeRoadNet::DrawRoadGhost(FPrimitiveDrawInterface* PDI, const TArray<FV
 	}
 }
 
+void FEdModeRoadNet::DrawGestureGhost(FPrimitiveDrawInterface* PDI, const TArray<FVector>& Poly, bool bClosed) const
+{
+	if (!PDI || Poly.Num() < 1) { return; }
+	constexpr double kLiftCm = 20.0;
+	constexpr float kVtx = 7.f;
+	const FColor LineCol(80, 220, 255);
+	const FColor VtxCol(255, 255, 255);
+	auto Lift = [](const FVector& P) { return FVector(P.X, P.Y, P.Z + kLiftCm); };
+	const int32 N = Poly.Num();
+	const int32 Segs = bClosed ? N : (N - 1);
+	for (int32 i = 0; i < Segs; ++i)
+	{
+		const FVector A = Lift(Poly[i]);
+		const FVector B = Lift(Poly[(i + 1) % N]);
+		PDI->DrawLine(A, B, kColorGhostHalo, SDPG_Foreground, 3.f, 0.f, /*bScreenSpace*/ true);
+		PDI->DrawLine(A, B, LineCol,          SDPG_Foreground, 1.5f, 0.f, /*bScreenSpace*/ true);
+	}
+	for (const FVector& P : Poly)
+	{
+		PDI->DrawPoint(Lift(P), VtxCol, kVtx, SDPG_Foreground);
+	}
+}
+
 // Defined further down; forward-declared so the debounce flush (above it) can
 // scope the smoothing rebuild to the junction's arm roads.
 static void CollectRoadsNearPoint(const URoadNetwork* Net, const FVector2D& Loc, double RadiusCm, TArray<int32>& Out);
@@ -251,6 +291,25 @@ static FBox2D JunctionDirtyBox(const FVector2D& Loc, double HalfCm)
 // a junction's fillet / markings / islands / signal placeholders; the rebuild
 // then dilates by the geometry reach so border cells still commit.
 static constexpr double kJunctionDirtyHalfCm = 6000.0; // 60 m
+
+// Which arrow the Markings tool places on click, or -1 for the tool's original
+// turn-role filter (see roadnet.MarkKind, registered in the runtime module so
+// the OSM Roads panel can write it without a module link). Cached because the
+// click path reads it every event and FindConsoleVariable is not free.
+static int32 RoadNetMarkKind()
+{
+	static IConsoleVariable* CV = nullptr;
+	if (!CV) { CV = IConsoleManager::Get().FindConsoleVariable(TEXT("roadnet.MarkKind")); }
+	return CV ? CV->GetInt() : -1;
+}
+// A placed mark only paints a couple of metres of tarmac, so its commit window
+// is far smaller than a junction's.
+static constexpr double kMarkDirtyHalfCm = 2000.0;  // 20 m
+// How far from a road centreline a click still takes that road's heading. Wider
+// than a carriageway so a mark near the kerb still lines up with traffic.
+static constexpr double kMarkAlignCm = 2500.0;      // 25 m
+// Click-to-delete radius for a placed mark.
+static constexpr double kMarkPickCm = 300.0;        // 3 m
 
 // How long an adjustment keeps its target after the last keystroke. Long enough
 // to tap ',' four times in a row without losing the road, short enough that you
@@ -318,13 +377,15 @@ void FEdModeRoadNet::Tick(FEditorViewportClient* ViewportClient, float DeltaTime
 		// Don't strand a queued smoothing rebuild when switching tools.
 		FlushPendingSmoothing(ViewportClient);
 		LastTool = T;
-		if (T != ERoadNetDrawTool::Draw) { DraftPoints.Reset(); }
-		else                             { ClearSelection(); }
+		DraftPoints.Reset();
+		if (T == ERoadNetDrawTool::Draw) { ClearSelection(); }
 		bMarquee = false;
 		bMarqueeMoved = false;
 		if (GEngine)
 		{
-			static const TCHAR* Names[] = { TEXT("Draw"), TEXT("Points"), TEXT("Lanes"), TEXT("Junctions"), TEXT("Edge") };
+			static const TCHAR* Names[] = {
+				TEXT("Draw"), TEXT("Points"), TEXT("Lanes"), TEXT("Junctions"), TEXT("Edge"),
+				TEXT("Markings"), TEXT("Crosswalk"), TEXT("Island"), TEXT("Curb Brush") };
 			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
 				FString::Printf(TEXT("RoadNet tool: %s"), Names[(int32)T]));
 		}
@@ -686,7 +747,7 @@ void FEdModeRoadNet::SelectPointsInMarquee(FEditorViewportClient* ViewportClient
 		const FRoadDef& Rd = Roads[r];
 		// Only points that are actually SHOWN are selectable (hand-drawn always,
 		// imported only while "edit all points" is on).
-		if (!(Rd.Source == ERoadNetSource::HandDrawn || bShowAllPoints)) { continue; }
+		if (!PointsAreEditable(Rd)) { continue; }
 		for (int32 i = 0; i < Rd.Ref.Num(); ++i)
 		{
 			FVector2D Px;
@@ -754,7 +815,7 @@ bool FEdModeRoadNet::TrySelectUnderCursor(FEditorViewportClient* ViewportClient,
 		// roads while "edit all points" (P) is on. Only those are point-selectable.
 		// The Lanes/Junctions/Edge tools pass bRoadOnly so a click always resolves
 		// to a whole road, never a control point.
-		if (!bRoadOnly && (Rd.Source == ERoadNetSource::HandDrawn || bShowAllPoints))
+		if (!bRoadOnly && PointsAreEditable(Rd))
 		{
 			for (int32 i = 0; i < Rd.Ref.Num(); ++i)
 			{
@@ -820,6 +881,19 @@ ARoadNetActor* FEdModeRoadNet::GetOrSpawnNetActor()
 	return Actor;
 }
 
+// Does the actor's class (or any ancestor) carry this name? A name walk rather
+// than IsA<>: RoadNetEditor deliberately links neither CesiumRuntime nor
+// Landscape, and this is only used to label what the cursor is over.
+// "LandscapeProxy" matches ALandscape and ALandscapeStreamingProxy alike.
+static bool ActorClassIsNamed(const AActor* A, const TCHAR* ClassName)
+{
+	for (const UClass* C = A ? A->GetClass() : nullptr; C; C = C->GetSuperClass())
+	{
+		if (C->GetName() == ClassName) { return true; }
+	}
+	return false;
+}
+
 bool FEdModeRoadNet::LineTraceCursor(FEditorViewportClient* ViewportClient, FVector& OutHit) const
 {
 	if (!ViewportClient) { return false; }
@@ -837,19 +911,72 @@ bool FEdModeRoadNet::LineTraceCursor(FEditorViewportClient* ViewportClient, FVec
 	UWorld* World = GetWorld();
 	if (!World) { return false; }
 
+	LastCursorSurface = ECursorSurface::None;
+	LastCursorActor.Reset();
+
+	const FVector End = Origin + Dir * 1.0e7;
+
+	// Whatever surface is physically nearest the cursor wins — landscape, Cesium
+	// tile or an existing mesh — so there is no mode for the user to get wrong.
+	// bTraceComplex because both landscapes and Cesium tiles only have
+	// per-triangle collision; a simple-shape query would miss them entirely.
 	FHitResult Hit;
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(RoadNetDraw), true);
-	if (World->LineTraceSingleByChannel(Hit, Origin, Origin + Dir * 1.0e7, ECC_Visibility, Params))
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(RoadNetDraw), /*bTraceComplex*/true);
+	bool bHit = World->LineTraceSingleByChannel(Hit, Origin, End, ECC_Visibility, Params);
+	if (!bHit)
+	{
+		// Cesium sets its tile components to ignore the Visibility channel in some
+		// configurations while still carrying physics geometry, so retry as an
+		// object query before falling back to guessing at a plane.
+		bHit = World->LineTraceSingleByObjectType(Hit, Origin, End,
+			FCollisionObjectQueryParams(FCollisionObjectQueryParams::AllStaticObjects), Params);
+	}
+	if (bHit)
 	{
 		OutHit = Hit.Location;
+		const AActor* HitActor = Hit.GetActor();
+		LastCursorActor = HitActor ? HitActor->GetActorNameOrLabel() : FString();
+		LastCursorSurface =
+			ActorClassIsNamed(HitActor, TEXT("Cesium3DTileset"))  ? ECursorSurface::Cesium :
+			ActorClassIsNamed(HitActor, TEXT("LandscapeProxy"))   ? ECursorSurface::Landscape :
+			                                                        ECursorSurface::Other;
 		return true;
+	}
+
+	// Nothing collidable under the cursor. If a Cesium tileset exists it is drawn
+	// but not collidable, so approximate it with a plane at the tileset actor Z —
+	// only right on flat ground, which is why the HUD flags it.
+	if (UClass* TilesetClass = LoadObject<UClass>(nullptr, TEXT("/Script/CesiumRuntime.Cesium3DTileset")))
+	{
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			if (!It->IsA(TilesetClass)) { continue; }
+			const double PlaneZ = It->GetActorLocation().Z;
+			if (!FMath::IsNearlyZero(Dir.Z))
+			{
+				const double T = (PlaneZ - Origin.Z) / Dir.Z;
+				if (T > 0.0)
+				{
+					OutHit = Origin + Dir * T;
+					LastCursorActor = It->GetActorNameOrLabel();
+					LastCursorSurface = ECursorSurface::CesiumPlane;
+					return true;
+				}
+			}
+			break;
+		}
 	}
 
 	// Fall back to the Z=0 ground plane so drawing works without collision.
 	if (!FMath::IsNearlyZero(Dir.Z))
 	{
 		const double T = -Origin.Z / Dir.Z;
-		if (T > 0) { OutHit = Origin + Dir * T; return true; }
+		if (T > 0)
+		{
+			OutHit = Origin + Dir * T;
+			LastCursorSurface = ECursorSurface::GroundPlane;
+			return true;
+		}
 	}
 	return false;
 }
@@ -861,7 +988,19 @@ bool FEdModeRoadNet::FindSnap(const FVector& Query, FVector& OutSnap) const
 	const URoadNetwork* Net = const_cast<ARoadNetActor*>(Actor)->GetNetwork();
 	if (!Net) { return false; }
 
-	const double R2 = kSnapCm * kSnapCm;
+	// The snap radius is sized for welding road ENDS into a junction — 6 m, just
+	// over the 4 m weld radius. That is wider than a whole traffic island (the
+	// minimum is 10 m2), so while tracing one every vertex got yanked onto a
+	// nearby centreline. The shape tools opt out by default. This is only the
+	// click snap: an island's back edge still snaps to the median, but that
+	// happens at rebuild time in BuildJunctionIslands.
+	const ERoadNetDrawTool Tool = ActiveTool();
+	const bool bGesture = (Tool == ERoadNetDrawTool::Island || Tool == ERoadNetDrawTool::Crosswalk);
+	const double Radius = bGesture
+		? (double)CVarRoadNetGestureSnapCm.GetValueOnAnyThread() : kSnapCm;
+	if (Radius <= 0.0) { return false; }
+
+	const double R2 = Radius * Radius;
 	double BestD2 = R2;
 	bool bFound = false;
 
@@ -929,6 +1068,52 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 			return true;
 		}
 
+		if (Tool == ERoadNetDrawTool::Crosswalk || Tool == ERoadNetDrawTool::Island)
+		{
+			if (Click.GetEvent() == IE_DoubleClick) { FinalizeDraft(); return true; }
+			FVector Hit;
+			if (LineTraceCursor(InViewportClient, Hit))
+			{
+				DraftPoints.Add(ResolveCursorPoint(Hit));
+				if (InViewportClient) { InViewportClient->Invalidate(); }
+			}
+			return true;
+		}
+
+		if (Tool == ERoadNetDrawTool::CurbBrush)
+		{
+			if (Click.GetEvent() == IE_DoubleClick) { return true; }
+			FVector Hit;
+			URoadNetwork* Net = GetNetwork();
+			if (!Net)
+			{
+				if (ARoadNetActor* Actor = GetOrSpawnNetActor()) { Net = Actor->GetNetwork(); }
+			}
+			if (Net && LineTraceCursor(InViewportClient, Hit))
+			{
+				const FScopedTransaction Transaction(LOCTEXT("RoadNetCurbPaint", "Paint RoadNet Curb"));
+				ModifyForEdit();
+				const int32 N = Net->AddCurbPaintNear(Hit, CurbBrushType);
+				if (GEngine)
+				{
+					static const TCHAR* Names[] = { TEXT("Gray"), TEXT("White/Black"), TEXT("White/Red"), TEXT("White/Blue") };
+					const int32 Ti = FMath::Clamp((int32)CurbBrushType, 0, 3);
+					if (N > 0)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
+							FString::Printf(TEXT("RoadNet curb brush: %d stones → %s  (T cycles type)"), N, Names[Ti]));
+					}
+					else
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet curb brush: no kerb under the cursor — click a visible curb stone"));
+					}
+				}
+				if (InViewportClient) { InViewportClient->Invalidate(); }
+			}
+			return true;
+		}
+
 		// Non-draw tools never draw. Drop any stray draft and ignore double-clicks.
 		if (DraftPoints.Num() > 0) { DraftPoints.Reset(); }
 		if (Click.GetEvent() == IE_DoubleClick) { return true; }
@@ -992,7 +1177,39 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 			return true;
 		}
 
-		if (Tool == ERoadNetDrawTool::Lanes)
+		// Markings tool with an arrow picked in the panel: each click PLACES that
+		// arrow where the cursor lands. With no arrow picked (roadnet.MarkKind
+		// -1) the tool keeps its original job below — selecting a lane for the
+		// turn-role filter — so one tool covers both without a modifier key.
+		if (Tool == ERoadNetDrawTool::Markings && RoadNetMarkKind() >= 0)
+		{
+			FVector Hit;
+			if (!LineTraceCursor(InViewportClient, Hit)) { return true; }
+
+			URoadNetwork* Net = GetNetwork();
+			if (!Net) { if (ARoadNetActor* A = GetOrSpawnNetActor()) { Net = A->GetNetwork(); } }
+			if (!Net) { return true; }
+
+			// Line the arrow up with the road it lands on, falling back to the
+			// camera when the click is off in open ground. Shift flips it: a
+			// two-way road is one centreline, so the heading alone cannot say
+			// which of the two directions the driver is facing.
+			float Yaw = InViewportClient ? (float)InViewportClient->GetViewRotation().Yaw : 0.f;
+			Net->HeadingOfNearestRoad(Hit, kMarkAlignCm, Yaw);
+			if (Click.IsShiftDown()) { Yaw += 180.f; }
+
+			const FScopedTransaction Transaction(LOCTEXT("RoadNetPlaceMark", "Place RoadNet Mark"));
+			ModifyForEdit();
+			Net->AddPlacedMark(Hit, Yaw, (ERoadNetMarkKind)RoadNetMarkKind());
+			const FVector2D Loc(Hit.X, Hit.Y);
+			TArray<int32> Near;
+			CollectRoadsNearPoint(Net, Loc, kMarkDirtyHalfCm, Near);
+			Net->Rebuild(Near, JunctionDirtyBox(Loc, kMarkDirtyHalfCm));
+			if (InViewportClient) { InViewportClient->Invalidate(); }
+			return true;
+		}
+
+		if (Tool == ERoadNetDrawTool::Lanes || Tool == ERoadNetDrawTool::Markings)
 		{
 			// Lane proxy → select that exact lane (stable LaneId).
 			if (HRoadNetLaneProxy* Lp = HitProxyCast<HRoadNetLaneProxy>(HitProxy))
@@ -1075,7 +1292,8 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 	}
 	if (Click.GetKey() == EKeys::RightMouseButton)
 	{
-		if (Tool == ERoadNetDrawTool::Draw) { FinalizeDraft(); return true; }
+		if (Tool == ERoadNetDrawTool::Draw || Tool == ERoadNetDrawTool::Crosswalk
+			|| Tool == ERoadNetDrawTool::Island) { FinalizeDraft(); return true; }
 		return false;   // let RMB drive the camera / context menu in the edit tools
 	}
 	return FEdMode::HandleClick(InViewportClient, HitProxy, Click);
@@ -1110,13 +1328,18 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 		// Number keys 1-5 switch the active sub-tool (mirrors the OSM Roads panel
 		// toggle). Kept global so you can flip tools without reaching for the panel.
 		if (Key == EKeys::One || Key == EKeys::Two || Key == EKeys::Three ||
-			Key == EKeys::Four || Key == EKeys::Five)
+			Key == EKeys::Four || Key == EKeys::Five ||
+			Key == EKeys::Six || Key == EKeys::Seven || Key == EKeys::Eight || Key == EKeys::Nine)
 		{
 			const ERoadNetDrawTool NewTool =
 				(Key == EKeys::One)   ? ERoadNetDrawTool::Draw :
 				(Key == EKeys::Two)   ? ERoadNetDrawTool::Points :
 				(Key == EKeys::Three) ? ERoadNetDrawTool::Lanes :
-				(Key == EKeys::Four)  ? ERoadNetDrawTool::Junctions : ERoadNetDrawTool::Edge;
+				(Key == EKeys::Four)  ? ERoadNetDrawTool::Junctions :
+				(Key == EKeys::Five)  ? ERoadNetDrawTool::Edge :
+				(Key == EKeys::Six)   ? ERoadNetDrawTool::Markings :
+				(Key == EKeys::Seven) ? ERoadNetDrawTool::Crosswalk :
+				(Key == EKeys::Eight) ? ERoadNetDrawTool::Island : ERoadNetDrawTool::CurbBrush;
 			SetActiveTool(NewTool);
 			if (ViewportClient) { ViewportClient->Invalidate(); }
 			return true;
@@ -1167,6 +1390,51 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					}
 					if (ViewportClient) { ViewportClient->Invalidate(); }
 				}
+				return true;
+			}
+			// Placement mode: Delete lifts the hand-placed mark under the cursor.
+			// The turn-role clear below stays on the filter mode, which is the
+			// only mode where a selected lane means anything.
+			if (Tool == ERoadNetDrawTool::Markings && RoadNetMarkKind() >= 0)
+			{
+				URoadNetwork* Net = GetNetwork();
+				FVector Hit;
+				if (Net && LineTraceCursor(ViewportClient, Hit))
+				{
+					const FScopedTransaction Transaction(LOCTEXT("RoadNetRemoveMark", "Remove RoadNet Mark"));
+					ModifyForEdit();
+					const int32 Gone = Net->RemovePlacedMarkNear(Hit, kMarkPickCm);
+					if (Gone != INDEX_NONE)
+					{
+						const FVector2D Loc(Hit.X, Hit.Y);
+						TArray<int32> Near;
+						CollectRoadsNearPoint(Net, Loc, kMarkDirtyHalfCm, Near);
+						Net->Rebuild(Near, JunctionDirtyBox(Loc, kMarkDirtyHalfCm));
+					}
+					else if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Orange,
+							TEXT("RoadNet: no placed mark under the cursor"));
+					}
+				}
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
+			if (Tool == ERoadNetDrawTool::Markings && SelRoad != INDEX_NONE && SelLane != INDEX_NONE)
+			{
+				if (URoadNetwork* Net = GetNetwork())
+				{
+					const FScopedTransaction Transaction(LOCTEXT("RoadNetClearTurn", "Clear RoadNet Turn Role"));
+					ModifyForEdit();
+					Net->SetLaneTurnRole(SelRoad, SelLane, ERoadNetTurnRole::None);
+					{ const int32 M = SelRoad; Net->Rebuild(MakeArrayView(&M, 1)); }
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+							TEXT("RoadNet: selected lane turn role = None (no arrows)"));
+					}
+				}
+				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
 			}
 			// Point/road deletion belongs to the Points tool only.
@@ -1223,7 +1491,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 						for (int32 r = 0; r < Roads.Num(); ++r)
 						{
 							const FRoadDef& Rd = Roads[r];
-							if (Rd.Source == ERoadNetSource::HandDrawn || bShowAllPoints)
+							if (PointsAreEditable(Rd))
 							{
 								for (int32 i = 0; i < Rd.Ref.Num(); ++i)
 								{
@@ -1510,6 +1778,65 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				return true;
 			}
 
+			// Turn-role cycle (Lanes + Markings): T / Shift+T.
+			if ((Tool == ERoadNetDrawTool::Lanes || Tool == ERoadNetDrawTool::Markings)
+				&& Key == EKeys::T)
+			{
+				URoadNetwork* Net = GetNetwork();
+				if (!Net) { return true; }
+				if (SelRoad == INDEX_NONE || SelLane == INDEX_NONE)
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: click a lane first, then T to cycle its turn role"));
+					}
+					return true;
+				}
+				const bool bBack = Viewport &&
+					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
+				const FScopedTransaction Transaction(LOCTEXT("RoadNetTurnRole", "Cycle RoadNet Turn Role"));
+				ModifyForEdit();
+				const ERoadNetTurnRole Role = Net->CycleLaneTurnRole(SelRoad, SelLane, bBack ? -1 : 1);
+				{ const int32 M = SelRoad; Net->Rebuild(MakeArrayView(&M, 1)); }
+				if (GEngine)
+				{
+					const TCHAR* Name =
+						(Role == ERoadNetTurnRole::Through) ? TEXT("Through") :
+						(Role == ERoadNetTurnRole::Left)    ? TEXT("Left") :
+						(Role == ERoadNetTurnRole::Right)   ? TEXT("Right") :
+						(Role == ERoadNetTurnRole::UTurn)   ? TEXT("U-turn") :
+						(Role == ERoadNetTurnRole::None)    ? TEXT("None") : TEXT("Auto");
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+						FString::Printf(TEXT("RoadNet: lane turn role = %s"), Name));
+				}
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
+
+			if (Tool == ERoadNetDrawTool::CurbBrush && Key == EKeys::T)
+			{
+				static const ERoadNetCurbPaintType kCycle[] = {
+					ERoadNetCurbPaintType::Gray, ERoadNetCurbPaintType::WhiteBlack,
+					ERoadNetCurbPaintType::WhiteRed, ERoadNetCurbPaintType::WhiteBlue };
+				int32 Cur = 0;
+				for (int32 i = 0; i < UE_ARRAY_COUNT(kCycle); ++i)
+				{
+					if (kCycle[i] == CurbBrushType) { Cur = i; break; }
+				}
+				CurbBrushType = kCycle[(Cur + 1) % UE_ARRAY_COUNT(kCycle)];
+				if (GEngine)
+				{
+					const TCHAR* Name =
+						(CurbBrushType == ERoadNetCurbPaintType::WhiteBlack) ? TEXT("White/Black") :
+						(CurbBrushType == ERoadNetCurbPaintType::WhiteRed)   ? TEXT("White/Red") :
+						(CurbBrushType == ERoadNetCurbPaintType::WhiteBlue)  ? TEXT("White/Blue") : TEXT("Gray");
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
+						FString::Printf(TEXT("RoadNet curb brush: %s"), Name));
+				}
+				return true;
+			}
+
 			// Standard parking bay (Edge tool, draft not in progress):
 			//   'P'       → centre a bay on the selected edge point, LEFT and RIGHT.
 			//               Layout from roadnet.ParkingLayout (0=Parallel 1=Perp 2=Angled).
@@ -1605,6 +1932,43 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 			// debounced into one scoped rebuild (see Tick / FlushPendingSmoothing).
 			const bool bSmoothDown = (Key == EKeys::LeftBracket);
 			const bool bSmoothUp   = (Key == EKeys::RightBracket);
+			if ((bSmoothDown || bSmoothUp) && Tool == ERoadNetDrawTool::Island)
+			{
+				URoadNetwork* Net = GetNetwork();
+				FVector Hit;
+				if (!Net || !ViewportClient || !LineTraceCursor(ViewportClient, Hit))
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: hover a placed island, then [ ] to round it"));
+					}
+					return true;
+				}
+				const bool bShift = Viewport &&
+					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
+				const float Step = (bShift ? 80.f : 20.f) * (bSmoothUp ? 1.f : -1.f);
+				const FScopedTransaction Transaction(LOCTEXT("RoadNetIslandSmooth", "Smooth RoadNet Island"));
+				ModifyForEdit();
+				const int32 Idx = Net->AdjustIslandSmoothNear(Hit, Step);
+				if (Idx == INDEX_NONE)
+				{
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+							TEXT("RoadNet: no placed island under cursor"));
+					}
+					return true;
+				}
+				Net->Rebuild();
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+						FString::Printf(TEXT("RoadNet: island %d smooth = %.0f cm  ( [ less / ] more )"),
+							Idx, Net->PlacedIslands.IsValidIndex(Idx) ? Net->PlacedIslands[Idx].SmoothCm : 0.f));
+				}
+				return true;
+			}
 			if ((bSmoothDown || bSmoothUp) && Tool == ERoadNetDrawTool::Junctions)
 			{
 				URoadNetwork* Net = GetNetwork();
@@ -1818,7 +2182,10 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 			//   'Shift+M'   → cycle median edge (Plantable → CurbOnly → Sidewalk+Curb → Plantable+Sidewalk+Curb)
 			//   ',' / '.'   → narrow / widen the median (Shift = ×5 step)
 			// Targets the selected road, else the nearest road under the cursor.
-			if (Tool == ERoadNetDrawTool::Junctions &&
+			// On the LANES tool, not Junctions: the median is part of the road's
+			// cross-section, so it belongs with the lane stack the Cross-section tab
+			// draws it into, not with the junction presets it happens to affect.
+			if (Tool == ERoadNetDrawTool::Lanes &&
 				(Key == EKeys::M || Key == EKeys::Comma || Key == EKeys::Period))
 			{
 				URoadNetwork* Net = GetNetwork();
@@ -1898,10 +2265,13 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 			}
 
 			// Sidewalk width (Edge tool): ',' narrow / '.' widen the sidewalk on
-			// the target road (Shift = ×5 step). Targets SelRoad, else the road
-			// under the cursor. The sidewalk, curb and edge marking all follow.
+			// the target road (Shift = ×5 step). 'K' toggles the outboard cycle
+			// track on the same road — it lives here rather than with the Lanes
+			// tool because it is a verge feature beyond the kerb, not part of the
+			// carriageway stack. Targets SelRoad, else the road under the cursor.
+			// The sidewalk, curb and edge marking all follow.
 			if (Tool == ERoadNetDrawTool::Edge &&
-				(Key == EKeys::Comma || Key == EKeys::Period))
+				(Key == EKeys::Comma || Key == EKeys::Period || Key == EKeys::K))
 			{
 				URoadNetwork* Net = GetNetwork();
 				if (!Net) { return true; }
@@ -1931,7 +2301,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					if (GEngine)
 					{
 						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
-							TEXT("RoadNet: no road under cursor — hover a road, then , . to size the sidewalk"));
+							TEXT("RoadNet: no road under cursor — hover a road, then , . to size the sidewalk, K for a cycle track"));
 					}
 					return true;
 				}
@@ -1940,17 +2310,31 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
 				const float Step = (bShift ? 100.f : 20.f) * (Key == EKeys::Period ? 1.f : -1.f);
 
-				const FScopedTransaction Transaction(LOCTEXT("RoadNetSidewalk", "Edit RoadNet Sidewalk"));
+				const bool bTrack = (Key == EKeys::K);
+				const FScopedTransaction Transaction(bTrack
+					? LOCTEXT("RoadNetBikePath", "Toggle RoadNet Cycle Track")
+					: LOCTEXT("RoadNetSidewalk", "Edit RoadNet Sidewalk"));
 				ModifyForEdit();
-				const float W = Net->AdjustSidewalkWidth(Target, Step);
+				FString Msg;
+				if (bTrack)
+				{
+					const bool bOn = Net->ToggleBikePath(Target);
+					Msg = bOn
+						? TEXT("RoadNet: cycle track ON (outboard of the sidewalk)")
+						: TEXT("RoadNet: cycle track OFF");
+				}
+				else
+				{
+					Msg = FString::Printf(TEXT("RoadNet: sidewalk width = %.0f cm"),
+						Net->AdjustSidewalkWidth(Target, Step));
+				}
 				SelRoad = Target;
 				SelPoint = INDEX_NONE;
 				ArmAutoRelease();
-				{ const int32 M = Target; Net->Rebuild(MakeArrayView(&M, 1)); }   // windowed: one road's sidewalk
+				{ const int32 M = Target; Net->Rebuild(MakeArrayView(&M, 1)); }   // windowed: one road's edge
 				if (GEngine)
 				{
-					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
-						FString::Printf(TEXT("RoadNet: sidewalk width = %.0f cm"), W));
+					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan, Msg);
 				}
 				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
@@ -2009,7 +2393,7 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 				// Per-point handles (Points tool only): hand-drawn roads always,
 				// imported roads only while "edit all points" (P) is on. Imported
 				// handles use a warmer tint so it's clear which points came from OSM.
-				if (Tool == ERoadNetDrawTool::Points && (bHand || bShowAllPoints))
+				if (Tool == ERoadNetDrawTool::Points && PointsAreEditable(Road))
 				{
 					const FColor PtCol = bHand ? kColorEditPt : kColorOsmPt;
 					for (int32 i = 0; i < Road.Ref.Num(); ++i)
@@ -2066,7 +2450,7 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 			// entity, then highlight the selected lane's centre + edges (tinted by
 			// type). Restricted to SelRoad so a city-scale import stays cheap; the
 			// first pick comes from the segment proxy + PickLaneAt.
-			if (Tool == ERoadNetDrawTool::Lanes
+			if ((Tool == ERoadNetDrawTool::Lanes || Tool == ERoadNetDrawTool::Markings)
 				&& SelRoad != INDEX_NONE && SelPoint == INDEX_NONE
 				&& Roads.IsValidIndex(SelRoad) && Roads[SelRoad].Ref.Num() >= 2)
 			{
@@ -2183,11 +2567,22 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 	}
 
 	// Anchor dots so placed clicks stay visible over the ghost.
-	for (const FVector& P : DraftPoints)
+	const ERoadNetDrawTool ToolNow = ActiveTool();
+	const bool bGesture = (ToolNow == ERoadNetDrawTool::Crosswalk || ToolNow == ERoadNetDrawTool::Island);
+	if (bGesture)
 	{
-		PDI->DrawPoint(P, kColorPoint, kPointSize, SDPG_Foreground);
+		TArray<FVector> G = DraftPoints;
+		if (G.Num() > 0 && bHasHover) { G.Add(HoverPoint); }
+		DrawGestureGhost(PDI, G, ToolNow == ERoadNetDrawTool::Island && G.Num() >= 3);
 	}
-	if (Preview.Num() >= 2) { DrawRoadGhost(PDI, Preview); }
+	else
+	{
+		for (const FVector& P : DraftPoints)
+		{
+			PDI->DrawPoint(P, kColorPoint, kPointSize, SDPG_Foreground);
+		}
+		if (Preview.Num() >= 2) { DrawRoadGhost(PDI, Preview); }
+	}
 	// Highlight the active snap target so the user sees where the point will weld.
 	if (bHasHover && bSnapActive)
 	{
@@ -2360,15 +2755,114 @@ void FEdModeRoadNet::DrawHUD(FEditorViewportClient* ViewportClient, FViewport* V
 	// clicks/hotkeys are live (the panel toggle + 1-5 keys drive this).
 	if (Canvas && GEngine && GEngine->GetSmallFont())
 	{
-		static const TCHAR* Names[] = { TEXT("DRAW"), TEXT("POINTS"), TEXT("LANES"), TEXT("JUNCTIONS"), TEXT("EDGE") };
+		static const TCHAR* Names[] = {
+			TEXT("DRAW"), TEXT("POINTS"), TEXT("LANES"), TEXT("JUNCTIONS"), TEXT("EDGE"),
+			TEXT("MARKINGS"), TEXT("CROSSWALK"), TEXT("ISLAND"), TEXT("CURB BRUSH") };
 		static const FLinearColor Cols[] = {
 			FLinearColor(0.4f, 1.0f, 0.4f), FLinearColor(0.4f, 0.8f, 1.0f),
 			FLinearColor(0.3f, 0.9f, 1.0f), FLinearColor(1.0f, 0.85f, 0.3f),
-			FLinearColor(1.0f, 0.6f, 0.3f) };
+			FLinearColor(1.0f, 0.6f, 0.3f), FLinearColor(0.9f, 0.7f, 1.0f),
+			FLinearColor(0.5f, 1.0f, 0.8f), FLinearColor(0.7f, 1.0f, 0.4f),
+			FLinearColor(0.9f, 0.9f, 0.5f) };
 		const int32 Ti = (int32)ActiveTool();
 		Canvas->DrawShadowedString(12.f, 12.f,
-			*FString::Printf(TEXT("RoadNet tool: %s   (1-5 or OSM Roads panel to switch)"), Names[Ti]),
+			*FString::Printf(TEXT("RoadNet tool: %s   (1-9 or OSM Roads panel to switch)"), Names[Ti]),
 			GEngine->GetSmallFont(), Cols[Ti]);
+		float Y = 28.f;
+		if (Ti == (int32)ERoadNetDrawTool::CurbBrush)
+		{
+			static const TCHAR* Paint[] = { TEXT("Gray"), TEXT("White/Black"), TEXT("White/Red"), TEXT("White/Blue") };
+			const int32 Pi = FMath::Clamp((int32)CurbBrushType, 0, 3);
+			Canvas->DrawShadowedString(12.f, Y,
+				*FString::Printf(TEXT("Click a kerb stone to paint  ·  type: %s  (T cycles)"), Paint[Pi]),
+				GEngine->GetSmallFont(), FLinearColor(1.f, 0.9f, 0.4f));
+			Y += 16.f;
+		}
+		else if (Ti == (int32)ERoadNetDrawTool::Island)
+		{
+			Canvas->DrawShadowedString(12.f, Y,
+				TEXT("Click 3+ vertices (small dots)  ·  free placement, no snap  ·  [ ] round corners  ·  back edge meets the median on rebuild"),
+				GEngine->GetSmallFont(), FLinearColor(0.7f, 1.f, 0.4f));
+			Y += 16.f;
+		}
+		else if (Ti == (int32)ERoadNetDrawTool::Crosswalk)
+		{
+			Canvas->DrawShadowedString(12.f, Y,
+				TEXT("Click 2+ points  ·  finish to paint a zebra  ·  draw into an island to cut a walkway"),
+				GEngine->GetSmallFont(), FLinearColor(0.5f, 1.f, 0.8f));
+			Y += 16.f;
+		}
+		else if (Ti == (int32)ERoadNetDrawTool::Markings)
+		{
+			// Two modes on one tool, chosen by the panel's Road Mark dropdown.
+			// Which one is live is not visible from the viewport, so say it.
+			const int32 Kind = RoadNetMarkKind();
+			if (Kind >= 0)
+			{
+				static const TCHAR* kNames[] = { TEXT("Through"), TEXT("Left"), TEXT("Right"),
+					TEXT("U-Turn"), TEXT("Through+Left"), TEXT("Through+Right"), TEXT("Left+Right") };
+				const TCHAR* Name = (Kind < UE_ARRAY_COUNT(kNames)) ? kNames[Kind] : TEXT("?");
+				Canvas->DrawShadowedString(12.f, Y,
+					*FString::Printf(TEXT("Place road mark: %s  ·  click to place  ·  Shift+click faces the other way  ·  Delete lifts the one under the cursor"), Name),
+					GEngine->GetSmallFont(), FLinearColor(0.4f, 1.f, 0.6f));
+				Y += 16.f;
+				Canvas->DrawShadowedString(12.f, Y,
+					TEXT("Arrows align with the nearest road. Pick 'Off (lane filter)' in the panel to go back to selecting lanes."),
+					GEngine->GetSmallFont(), FLinearColor(0.6f, 0.85f, 0.7f));
+				Y += 16.f;
+			}
+			else
+			{
+				// This mode paints nothing on click — it filters which TURN ARROWS
+				// the lane graph is allowed to emit. Clicking around with nothing
+				// selected looks broken, so spell out the steps and the precondition.
+				const TCHAR* What = (SelRoad == INDEX_NONE) ? TEXT("click a road, then a lane")
+					: (SelLane == INDEX_NONE) ? TEXT("now click one of its lanes")
+					: TEXT("T cycles the turn role  ·  Delete = no marks");
+				Canvas->DrawShadowedString(12.f, Y,
+					*FString::Printf(TEXT("Turn-arrow filter — %s"), What),
+					GEngine->GetSmallFont(), FLinearColor(1.f, 0.75f, 0.35f));
+				Y += 16.f;
+				Canvas->DrawShadowedString(12.f, Y,
+					TEXT("Automatic arrows are OFF by default (Roads > Auto turn arrows). Pick an arrow in the Road Mark dropdown to place them by hand."),
+					GEngine->GetSmallFont(), FLinearColor(0.85f, 0.7f, 0.4f));
+				Y += 16.f;
+			}
+		}
+
+		// Which surface a click would land on, resolved from the cursor ray. The
+		// two plane cases are guesses, so they are coloured as warnings.
+		if (LastCursorSurface != ECursorSurface::None)
+		{
+			FString Where;
+			FLinearColor Col(0.75f, 0.75f, 0.8f);
+			switch (LastCursorSurface)
+			{
+			case ECursorSurface::Landscape:
+				Where = FString::Printf(TEXT("on TERRAIN (%s)"), *LastCursorActor);
+				Col = FLinearColor(0.5f, 1.f, 0.5f);
+				break;
+			case ECursorSurface::Cesium:
+				Where = FString::Printf(TEXT("on CESIUM mesh (%s)"), *LastCursorActor);
+				Col = FLinearColor(0.4f, 0.85f, 1.f);
+				break;
+			case ECursorSurface::Other:
+				Where = FString::Printf(TEXT("on %s"), *LastCursorActor);
+				break;
+			case ECursorSurface::CesiumPlane:
+				Where = FString::Printf(
+					TEXT("on a FLAT PLANE guess — '%s' has no collision; tick Create Physics Meshes on the tileset"),
+					*LastCursorActor);
+				Col = FLinearColor(1.f, 0.6f, 0.2f);
+				break;
+			default:
+				Where = TEXT("on the Z=0 ground plane — no terrain or Cesium collision under the cursor");
+				Col = FLinearColor(1.f, 0.6f, 0.2f);
+				break;
+			}
+			Canvas->DrawShadowedString(12.f, Y, *FString::Printf(TEXT("Drawing %s"), *Where),
+				GEngine->GetSmallFont(), Col);
+		}
 	}
 
 	if (bMarquee && bMarqueeMoved && Canvas)
@@ -2386,6 +2880,9 @@ void FEdModeRoadNet::DrawHUD(FEditorViewportClient* ViewportClient, FViewport* V
 
 void FEdModeRoadNet::FinalizeDraft()
 {
+	if (ActiveTool() == ERoadNetDrawTool::Crosswalk) { FinalizeCrosswalk(); return; }
+	if (ActiveTool() == ERoadNetDrawTool::Island) { FinalizeIsland(); return; }
+
 	if (DraftPoints.Num() < 2)
 	{
 		DraftPoints.Reset();
@@ -2461,6 +2958,92 @@ void FEdModeRoadNet::FinalizeDraft()
 		(int32)Shape, R.Ref.Num());
 	DraftPoints.Reset();
 	// The terrain conform is picked up from the rebuild serial in TickTerrainConform.
+}
+
+void FEdModeRoadNet::FinalizeCrosswalk()
+{
+	if (DraftPoints.Num() < 2)
+	{
+		DraftPoints.Reset();
+		return;
+	}
+
+	double Len = 0.0;
+	FVector Mid = FVector::ZeroVector;
+	for (int32 i = 0; i < DraftPoints.Num(); ++i)
+	{
+		Mid += DraftPoints[i];
+		if (i + 1 < DraftPoints.Num()) { Len += FVector::Dist2D(DraftPoints[i], DraftPoints[i + 1]); }
+	}
+	Mid /= (double)DraftPoints.Num();
+
+	URoadNetwork* Net = GetNetwork();
+	if (!Net)
+	{
+		if (ARoadNetActor* Actor = GetOrSpawnNetActor()) { Net = Actor->GetNetwork(); }
+	}
+	if (!Net) { DraftPoints.Reset(); return; }
+
+	const FScopedTransaction Transaction(LOCTEXT("RoadNetCrosswalk", "Add RoadNet Crosswalk"));
+	ModifyForEdit();
+	const int32 Road = Net->AddCrossingAt(FVector2D(Mid.X, Mid.Y), (float)Len, 2500.0);
+	Net->TryCutIslandPaths(DraftPoints);
+	DraftPoints.Reset();
+	if (Road == INDEX_NONE)
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+				TEXT("RoadNet: no road under the gesture — island walkway still applied if you crossed an island"));
+		}
+	}
+	Net->Rebuild();
+	if (Road != INDEX_NONE && GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+			FString::Printf(TEXT("RoadNet: crosswalk on road %d (depth %.0f cm)"), Road, Len));
+	}
+}
+
+void FEdModeRoadNet::FinalizeIsland()
+{
+	if (DraftPoints.Num() < 3)
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+				TEXT("RoadNet: island needs 3+ points"));
+		}
+		DraftPoints.Reset();
+		return;
+	}
+
+	URoadNetwork* Net = GetNetwork();
+	if (!Net)
+	{
+		if (ARoadNetActor* Actor = GetOrSpawnNetActor()) { Net = Actor->GetNetwork(); }
+	}
+	if (!Net) { DraftPoints.Reset(); return; }
+
+	const FScopedTransaction Transaction(LOCTEXT("RoadNetIsland", "Add RoadNet Island"));
+	ModifyForEdit();
+	const int32 Idx = Net->AddPlacedIsland(DraftPoints);
+	DraftPoints.Reset();
+	if (Idx == INDEX_NONE)
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+				TEXT("RoadNet: island too small (min 10 m²)"));
+		}
+		return;
+	}
+	Net->Rebuild();
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+			FString::Printf(TEXT("RoadNet: placed island %d"), Idx));
+	}
 }
 
 bool FEdModeRoadNet::AddParkingBayToActiveSelection(uint8 LayoutInt, FString& OutMsg)

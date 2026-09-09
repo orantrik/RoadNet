@@ -14,12 +14,18 @@ namespace RoadNetCurbs
 		// Ignore boundary edges shorter than this (Clipper micro-segments, cm).
 		constexpr double kMinEdgeCm = 1.0;
 
-		bool PointInAny(const TArray<FGeneralPolygon2d>& Polys, const FVector2D& P)
+		// Bounds[i] is Polys[i]'s outer-ring box, so a box miss is a definite miss
+		// and the expensive ring walk is skipped. Without this reject the kerb pass
+		// is O(surface edges x every vertex of every sidewalk polygon) — on a
+		// city-sized network that is the single most expensive thing in a rebuild.
+		bool PointInAny(const TArray<FGeneralPolygon2d>& Polys,
+			const TArray<FAxisAlignedBox2d>& Bounds, const FVector2D& P)
 		{
 			const FVector2d Q(P.X, P.Y);
-			for (const FGeneralPolygon2d& GP : Polys)
+			for (int32 i = 0; i < Polys.Num(); ++i)
 			{
-				if (GP.Contains(Q)) { return true; }
+				if (!Bounds[i].Contains(Q)) { continue; }
+				if (Polys[i].Contains(Q)) { return true; }
 			}
 			return false;
 		}
@@ -50,7 +56,7 @@ namespace RoadNetCurbs
 			if (Total < 1.0) { return; }
 
 			const double StdLenCm   = FMath::Max(20.0, SpacingCm);       // standard piece length
-			const double MinPieceCm = FMath::Max(15.0, StdLenCm * 0.25); // shortest corner sliver
+			const double MinPieceCm = FMath::Max(15.0, StdLenCm * 0.25); // grade subdivision threshold
 			constexpr double kMaxPieceTurnRad = 0.20;                    // ~11.5° → cut on curves
 			// Max allowed sag/hump (cm) of a straight stone's chord from the real
 			// draped grade at its midpoint. When the LONGITUDINAL slope curves (a
@@ -103,13 +109,15 @@ namespace RoadNetCurbs
 			{
 				double e = s + FMath::Min(StdLenCm, Total - s);
 
-				// Cut early at the first boundary vertex (beyond a min length) whose
+				// Cut early at the first boundary vertex whose
 				// heading has turned away from the piece's start heading — that is
 				// the corner/curve where the stone must shorten to follow the arc.
 				const FVector2D Dir0 = HeadingAt(s);
 				for (int32 k = 1; k + 1 < N; ++k)
 				{
-					if (S[k] <= s + MinPieceCm) { continue; }
+					// A short remainder before a corner is still a real piece. Skipping
+					// it makes the next stone cut diagonally across the junction.
+					if (S[k] <= s + 1.e-6) { continue; }
 					if (S[k] >= e) { break; }
 					const FVector2D Hk = (Pts[k + 1] - Pts[k]).GetSafeNormal();
 					const double Turn = FMath::Acos(FMath::Clamp((double)FVector2D::DotProduct(Dir0, Hk), -1.0, 1.0));
@@ -132,10 +140,8 @@ namespace RoadNetCurbs
 					if (FMath::Abs(Zm - 0.5 * (Za + Zb)) <= kZChordTolCm) { break; }
 					e = s + 0.5 * (e - s);
 				}
-				if ((e - s) < MinPieceCm) { e = FMath::Min(s + MinPieceCm, Total); }
-
-				// Fold a short tail into this piece rather than slivering.
-				if (Total - e < MinPieceCm) { e = Total; }
+				// Do not extend a corner cut or fold a tail across it: either would
+				// undo the heading/grade check above. Short end pieces are intentional.
 
 				HintE = HintS;
 				Emit(PosAt(s, HintS), PosAt(e, HintE));
@@ -146,6 +152,7 @@ namespace RoadNetCurbs
 		// Classify + chain kerb edges on one closed ring, then emit pieces.
 		void ProcessRing(const TArray<FVector2d>& V,
 			const TArray<FGeneralPolygon2d>& Sidewalks,
+			const TArray<FAxisAlignedBox2d>& SidewalkBounds,
 			const FCenterlineHeightField& Height, double SpacingCm, double ZLiftCm,
 			TArray<FCurbInstance>& Out)
 		{
@@ -164,8 +171,8 @@ namespace RoadNetCurbs
 				Dir.Normalize();
 				const FVector2D Mid = 0.5 * (A + B);
 				const FVector2D NLeft(-Dir.Y, Dir.X);      // +90° (CCW) of travel
-				const bool bLeft  = PointInAny(Sidewalks, Mid + NLeft * kProbeCm);
-				const bool bRight = PointInAny(Sidewalks, Mid - NLeft * kProbeCm);
+				const bool bLeft  = PointInAny(Sidewalks, SidewalkBounds, Mid + NLeft * kProbeCm);
+				const bool bRight = PointInAny(Sidewalks, SidewalkBounds, Mid - NLeft * kProbeCm);
 				if (bLeft || bRight)
 				{
 					IsCurb[i] = 1;
@@ -227,12 +234,23 @@ namespace RoadNetCurbs
 		if (SurfacePolys.Num() == 0 || SidewalkPolys.Num() == 0) { return; }
 		SpacingCm = FMath::Max(50.0, SpacingCm);
 
+		// Once per zone, not once per probe: the sidewalk set is constant for the
+		// whole ring walk and TPolygon2::Bounds() is itself a full vertex scan.
+		TArray<FAxisAlignedBox2d> SidewalkBounds;
+		SidewalkBounds.Reserve(SidewalkPolys.Num());
+		for (const FGeneralPolygon2d& GP : SidewalkPolys)
+		{
+			SidewalkBounds.Add(GP.Bounds());
+		}
+
 		for (const FGeneralPolygon2d& GP : SurfacePolys)
 		{
-			ProcessRing(GP.GetOuter().GetVertices(), SidewalkPolys, Height, SpacingCm, ZLiftCm, OutInstances);
+			ProcessRing(GP.GetOuter().GetVertices(), SidewalkPolys, SidewalkBounds,
+				Height, SpacingCm, ZLiftCm, OutInstances);
 			for (const TPolygon2<double>& Hole : GP.GetHoles())
 			{
-				ProcessRing(Hole.GetVertices(), SidewalkPolys, Height, SpacingCm, ZLiftCm, OutInstances);
+				ProcessRing(Hole.GetVertices(), SidewalkPolys, SidewalkBounds,
+					Height, SpacingCm, ZLiftCm, OutInstances);
 			}
 		}
 	}

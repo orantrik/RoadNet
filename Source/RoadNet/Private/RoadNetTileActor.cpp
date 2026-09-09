@@ -90,12 +90,26 @@ UHierarchicalInstancedStaticMeshComponent* ARoadNetTileActor::GetOrCreateHISM(FN
 		HISMs.Add(Key, H);
 	}
 	if (Mesh) { H->SetStaticMesh(Mesh); }
-	if (Mat0) { H->SetMaterial(0, Mat0); }
+	// Set slot 0 unconditionally: components are REUSED across rebuilds, so
+	// skipping the call when Mat0 is null left a previously-applied override in
+	// place forever and clearing the asset slot in the panel appeared to do
+	// nothing. Passing null resets to the mesh's own material, which is what an
+	// empty slot means.
+	H->SetMaterial(0, Mat0);
 	if (Mat1 && H->GetStaticMesh() && H->GetStaticMesh()->GetStaticMaterials().Num() > 1)
 	{
 		H->SetMaterial(1, Mat1);
 	}
 	return H;
+}
+
+UHierarchicalInstancedStaticMeshComponent* ARoadNetTileActor::FindHISM(FName Key) const
+{
+	if (const TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* Found = HISMs.Find(Key))
+	{
+		return Found->Get();
+	}
+	return nullptr;
 }
 
 USplineComponent* ARoadNetTileActor::AddSpline()

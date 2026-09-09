@@ -141,7 +141,11 @@ private:
 	// using the draft actor's lane/sidewalk settings, so the draft previews the
 	// footprint of the finished road rather than a bare line.
 	void DrawRoadGhost(FPrimitiveDrawInterface* PDI, const TArray<FVector>& Center) const;
+	void DrawGestureGhost(FPrimitiveDrawInterface* PDI, const TArray<FVector>& Poly, bool bClosed) const;
 	bool LineTraceCursor(FEditorViewportClient* ViewportClient, FVector& OutHit) const;
+	bool PointsAreEditable(const FRoadDef& Rd) const;
+	void FinalizeCrosswalk();
+	void FinalizeIsland();
 	// Snap Query to the nearest existing road vertex / draft point within radius.
 	// Returns true and writes OutSnap when a candidate is found.
 	bool FindSnap(const FVector& Query, FVector& OutSnap) const;
@@ -244,10 +248,28 @@ private:
 
 	// "Edit all points" toggle (hotkey P). When ON, EVERY road's control points
 	// (imported OR hand-drawn) render as draggable handles and become
-	// select/move/delete targets — not just hand-drawn roads. Off by default
-	// because a city-scale OSM import has thousands of nodes; opt in to edit
-	// imported geometry (edits persist until the next re-import of that road).
-	bool bShowAllPoints = false;
+	// select/move/delete targets — not just hand-drawn roads. On by default so
+	// imported OSM nodes are movable; P hides the dense handles.
+	bool bShowAllPoints = true;
+
+	// Curb Brush paint type (cycled with T while that tool is active).
+	ERoadNetCurbPaintType CurbBrushType = ERoadNetCurbPaintType::WhiteBlack;
+
+	// What the cursor ray last landed on. There is no "draw on terrain / draw on
+	// Cesium" switch: whichever surface is in front of the cursor wins, and this
+	// records which one so the HUD can say so (and warn when we had to guess).
+	enum class ECursorSurface : uint8
+	{
+		None,
+		Landscape,     // ALandscape / ALandscapeStreamingProxy
+		Cesium,        // Cesium3DTileset with collision
+		Other,         // some other collider (an existing road, a building...)
+		CesiumPlane,   // tileset present but uncollidable — flat plane guess
+		GroundPlane    // nothing at all — Z=0
+	};
+	mutable ECursorSurface LastCursorSurface = ECursorSurface::None;
+	// Name of the actor under the cursor, for the HUD readout.
+	mutable FString LastCursorActor;
 
 	// Last observed sub-tool; Tick() watches the CVar and, when it changes,
 	// discards a stray draft / marquee so tools never bleed into each other.

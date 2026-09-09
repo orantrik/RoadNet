@@ -32,14 +32,14 @@ static TAutoConsoleVariable<int32> CVarRoadNetDriveOnLeft(
 	TEXT("1 = drive on the left (UK/JP/AU), 0 = drive on the right. Moves forward traffic to the other side, swaps the stop-bar/zebra half at junctions, and paints the centre line white instead of yellow."),
 	ECVF_Default);
 
-// Active RoadNet Draw sub-tool (see ERoadNetDrawTool): 0=Draw 1=Points 2=Lanes
-// 3=Junctions 4=Edge. Registered here in the always-loaded runtime module so the
-// OSM Roads panel (which writes it) and the RoadNetEditor mode (which reads it)
-// can both reach it by name without a module dependency between them.
+// Active RoadNet Draw sub-tool (see ERoadNetDrawTool): 0=Draw .. 8=CurbBrush.
+// Registered here in the always-loaded runtime module so the OSM Roads panel
+// (which writes it) and the RoadNetEditor mode (which reads it) can both reach
+// it by name without a module dependency between them.
 static TAutoConsoleVariable<int32> CVarRoadNetDrawTool(
 	TEXT("roadnet.DrawTool"),
 	0,
-	TEXT("Active RoadNet Draw sub-tool: 0=Draw, 1=Points, 2=Lanes, 3=Junctions, 4=Edge. Exactly one tool is live at a time so clicks/hotkeys are unambiguous."),
+	TEXT("Active RoadNet Draw sub-tool: 0=Draw, 1=Points, 2=Lanes, 3=Junctions, 4=Edge, 5=Markings, 6=Crosswalk, 7=Island, 8=CurbBrush. Exactly one tool is live at a time so clicks/hotkeys are unambiguous."),
 	ECVF_Default);
 
 // Shape the Draw sub-tool lays down (see ERoadNetDrawShape): 0=Freehand
@@ -59,6 +59,28 @@ static TAutoConsoleVariable<int32> CVarRoadNetDrawAngleDeg(
 	TEXT("roadnet.DrawAngleDeg"),
 	90,
 	TEXT("Curve-shape arc angle in degrees (how far the road bends between the two clicks). Typical: 90, 45, 25."),
+	ECVF_Default);
+
+// Automatic turn arrows off the lane graph. OFF by default: the derivation puts
+// arrows at a fixed setback from the joint rather than at the stop line, which
+// reads wrong, so manual placement is the supported path until the rules are
+// right. Turning this on changes nothing about hand-placed marks — the two
+// sources are independent and both commit.
+static TAutoConsoleVariable<int32> CVarRoadNetAutoTurnArrows(
+	TEXT("roadnet.AutoTurnArrows"),
+	0,
+	TEXT("1 = derive turn arrows automatically from the lane graph at junctions. 0 = hand-placed marks only (default). Hand-placed marks are unaffected either way."),
+	ECVF_Default);
+
+// Which arrow the Markings tool places on click (see ERoadNetMarkKind), or -1
+// for the tool's original turn-ROLE filter behaviour (click a lane, T cycles).
+// Registered here in the always-loaded runtime module so the OSM Roads panel
+// (which writes it) and the RoadNetEditor mode (which reads it) both reach it by
+// name with no module link.
+static TAutoConsoleVariable<int32> CVarRoadNetMarkKind(
+	TEXT("roadnet.MarkKind"),
+	-1,
+	TEXT("Arrow the Markings tool places on click: 0=Through, 1=Left, 2=Right, 3=UTurn, 4=Through+Left, 5=Through+Right, 6=Left+Right. -1 = no placement, click selects a lane for the turn-role filter instead."),
 	ECVF_Default);
 
 // Standard parking-bay layout used by the Lanes-tool 'P' authoring hotkey (see
@@ -326,6 +348,53 @@ namespace RoadNetMesh
 		}
 		return bOk;
 	}
+
+	// The skirt's outward facing is derived from the loop winding, which is easy
+	// to get backwards — and a backwards wall is invisible in the editor until
+	// someone stands in the street and sees straight through the kerb. Extrude
+	// one square band and assert every wall faces away from the middle.
+	bool VerifySkirtWinding()
+	{
+		FPolygon2d Square;
+		Square.AppendVertex(FVector2d(-100.0, -100.0));
+		Square.AppendVertex(FVector2d( 100.0, -100.0));
+		Square.AppendVertex(FVector2d( 100.0,  100.0));
+		Square.AppendVertex(FVector2d(-100.0,  100.0));   // CCW
+
+		TArray<FGeneralPolygon2d> Polys;
+		Polys.Add(FGeneralPolygon2d(Square));
+
+		const TArray<FVector> Line = { FVector(-500.0, 0.0, 0.0), FVector(500.0, 0.0, 0.0) };
+		TArray<const TArray<FVector>*> CenterLines;
+		CenterLines.Add(&Line);
+
+		FDynamicMesh3 M;
+		AppendSurfaceMesh(Polys, CenterLines, /*ZLiftCm*/20.0, M,
+			/*VertexColorFn*/nullptr, /*bComputeUVs*/false, /*UVUnitCm*/100.0,
+			/*bGradientNormals*/false, /*bWorldUVs*/false, /*bSkirtToGround*/true);
+
+		int32 Walls = 0;
+		bool bOk = true;
+		for (int32 Tid : M.TriangleIndicesItr())
+		{
+			const FVector3d N = M.GetTriNormal(Tid);
+			if (FMath::Abs(N.Z) > 0.5) { continue; }      // that one is the top face
+			++Walls;
+			// The square is centred on the origin, so "away from the middle" is
+			// just a positive dot with the wall's own position.
+			const FVector3d C = M.GetTriCentroid(Tid);
+			if (N.X * C.X + N.Y * C.Y <= 0.0) { bOk = false; }
+		}
+		if (Walls != 8) { bOk = false; }                  // 4 edges x 2 triangles
+
+		if (!bOk)
+		{
+			UE_LOG(LogRoadNet, Warning,
+				TEXT("[RoadNet][SKIRTCHK] skirt walls face inward or are miscounted (%d walls, expected 8)."),
+				Walls);
+		}
+		return bOk;
+	}
 #endif
 
 	int32 AppendSurfaceMesh(
@@ -337,11 +406,17 @@ namespace RoadNetMesh
 		bool bComputeUVs,
 		double UVUnitCm,
 		bool bGradientNormals,
-		bool bWorldUVs)
+		bool bWorldUVs,
+		bool bSkirtToGround)
 	{
 #if !UE_BUILD_SHIPPING
 		static const bool bProjOk = VerifyProjectNearest();
 		(void)bProjOk;
+		// Plain flag rather than a static initialiser, because the check calls
+		// back into this function and a static local would be re-entering its
+		// own guarded init. Setting it first makes the inner call a no-op.
+		static bool bSkirtChecked = false;
+		if (!bSkirtChecked) { bSkirtChecked = true; VerifySkirtWinding(); }
 #endif
 		FCenterlineHeightField Field;
 		Field.Build(CenterLines);
@@ -441,6 +516,107 @@ namespace RoadNetMesh
 					if (No)  { No->SetTriangle(Tid, FIndex3i(NMap[I0], NMap[I1], NMap[I2])); }
 				}
 			}
+
+			if (!bSkirtToGround) { continue; }
+
+			// The layer above is a draped SHELL. Raised a kerb height clear of the
+			// road it reads as a floating sheet — at eye level there is daylight
+			// under its outer edge. Drop a wall from each boundary down past the
+			// height field so the band becomes a slab that meets terrain. Going
+			// BELOW the field rather than exactly to it matters: the conform pass
+			// leaves the ground a centimetre or two off in places, and a wall that
+			// stops level with it would show that slack as a gap.
+			//
+			// ponytail: the underside is left open (no bottom cap). It is never
+			// visible from above ground, and capping would roughly double the
+			// skirt's triangles across a whole city. Cap here if these layers ever
+			// need to cast shadows seen from below.
+			constexpr double kSkirtBuryCm = 10.0;
+
+			auto AppendSkirtLoop = [&](const FPolygon2d& Loop)
+			{
+				const TArray<FVector2d>& LV = Loop.GetVertices();
+				const int32 N = LV.Num();
+				if (N < 3) { return; }
+
+				// Which way the wall must face depends on which way the loop runs:
+				// the outer boundary is CCW and faces away from the band, a hole is
+				// CW and faces inward. Reading it from the winding keeps both right
+				// without the caller having to say which loop is which.
+				const bool bCCW = (Loop.SignedArea() >= 0.0);
+
+				for (int32 i = 0; i < N; ++i)
+				{
+					const FVector2d& P0 = LV[i];
+					const FVector2d& P1 = LV[(i + 1) % N];
+					FVector2d E = P1 - P0;
+					if (!E.Normalize()) { continue; } // duplicate vertex: no wall to build
+
+					const double G0 = Field.SampleHeight(P0.X, P0.Y, FallbackZ);
+					const double G1 = Field.SampleHeight(P1.X, P1.Y, FallbackZ);
+					const double Top0 = G0 + ZLiftCm, Bot0 = G0 - kSkirtBuryCm;
+					const double Top1 = G1 + ZLiftCm, Bot1 = G1 - kSkirtBuryCm;
+
+					const int32 T0 = OutMesh.AppendVertex(FVector3d(P0.X, P0.Y, Top0));
+					const int32 T1 = OutMesh.AppendVertex(FVector3d(P1.X, P1.Y, Top1));
+					const int32 B0 = OutMesh.AppendVertex(FVector3d(P0.X, P0.Y, Bot0));
+					const int32 B1 = OutMesh.AppendVertex(FVector3d(P1.X, P1.Y, Bot1));
+
+					if (VertexColorFn)
+					{
+						const FVector3f C0 = (*VertexColorFn)(P0.X, P0.Y);
+						const FVector3f C1 = (*VertexColorFn)(P1.X, P1.Y);
+						OutMesh.SetVertexColor(T0, C0); OutMesh.SetVertexColor(B0, C0);
+						OutMesh.SetVertexColor(T1, C1); OutMesh.SetVertexColor(B1, C1);
+					}
+
+					// Wall UVs run along the edge and up its face, so a kerb texture
+					// tiles by real length instead of stretching over the footprint.
+					int32 UT0 = 0, UT1 = 0, UB0 = 0, UB1 = 0;
+					if (UVo)
+					{
+						const double A0 = bWorldUVs ? P0.X
+							: ProjectNearest(FVector2D(P0.X, P0.Y)).AlongDist;
+						const double A1 = bWorldUVs ? P1.X
+							: ProjectNearest(FVector2D(P1.X, P1.Y)).AlongDist;
+						UT0 = UVo->AppendElement(FVector2f((float)(A0 * UVScale), (float)(Top0 * UVScale)));
+						UT1 = UVo->AppendElement(FVector2f((float)(A1 * UVScale), (float)(Top1 * UVScale)));
+						UB0 = UVo->AppendElement(FVector2f((float)(A0 * UVScale), (float)(Bot0 * UVScale)));
+						UB1 = UVo->AppendElement(FVector2f((float)(A1 * UVScale), (float)(Bot1 * UVScale)));
+					}
+
+					// Flat horizontal normal per wall, so the top surface keeps its
+					// smooth gradient shading and the kerb edge stays a hard crease.
+					int32 NT0 = 0, NT1 = 0, NB0 = 0, NB1 = 0;
+					if (No)
+					{
+						const FVector3f Out = bCCW
+							? FVector3f((float)E.Y, (float)-E.X, 0.f)
+							: FVector3f((float)-E.Y, (float)E.X, 0.f);
+						NT0 = No->AppendElement(Out); NT1 = No->AppendElement(Out);
+						NB0 = No->AppendElement(Out); NB1 = No->AppendElement(Out);
+					}
+
+					// Outward winding, derived above from the loop direction.
+					const FIndex3i Q1 = bCCW ? FIndex3i(0, 2, 3) : FIndex3i(0, 3, 2); // T0,B0,B1
+					const FIndex3i Q2 = bCCW ? FIndex3i(0, 3, 1) : FIndex3i(0, 1, 3); // T0,B1,T1
+					const int32  V[4] = { T0, T1, B0, B1 };
+					const int32  U[4] = { UT0, UT1, UB0, UB1 };
+					const int32  Nn[4] = { NT0, NT1, NB0, NB1 };
+					for (const FIndex3i& Q : { Q1, Q2 })
+					{
+						const int32 Tid = OutMesh.AppendTriangle(
+							FIndex3i(V[Q.A], V[Q.B], V[Q.C]));
+						if (Tid < 0) { continue; }
+						++TriCount;
+						if (UVo) { UVo->SetTriangle(Tid, FIndex3i(U[Q.A], U[Q.B], U[Q.C])); }
+						if (No)  { No->SetTriangle(Tid, FIndex3i(Nn[Q.A], Nn[Q.B], Nn[Q.C])); }
+					}
+				}
+			};
+
+			AppendSkirtLoop(GP.GetOuter());
+			for (const FPolygon2d& Hole : GP.GetHoles()) { AppendSkirtLoop(Hole); }
 		}
 
 		return TriCount;
