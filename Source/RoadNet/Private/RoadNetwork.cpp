@@ -3959,6 +3959,16 @@ void URoadNetwork::RebuildLatent()
 	bLatentRebuild = false;
 }
 
+// Also mirror the carriageway EDGE splines and the sidewalk OUTER-EDGE rings
+// as plan splines (the sidewalk outer edge is the exact line parcels snap to,
+// so this is the QA view for road-parcel connections). Off by default: it
+// roughly quadruples the plan component count.
+static TAutoConsoleVariable<int32> CVarRoadNetPlanEdgeSplines(
+	TEXT("roadnet.PlanEdgeSplines"),
+	0,
+	TEXT("1 = plan splines also show the carriageway edges (white) and sidewalk outer-edge rings (green, the line parcels snap to), not just the centrelines. Default 0."),
+	ECVF_Default);
+
 // ---------------------------------------------------------------------------
 // § plan splines — EVERYTHING is created from a spline, so the spline must be
 // visible. Mirror the reconciled centrelines (post-alignment, post-solver Z)
@@ -3966,7 +3976,8 @@ void URoadNetwork::RebuildLatent()
 // plan can be inspected in the viewport BEFORE any terrain or mesh work: what
 // you see after Import Roads is exactly what the conform and the mesh will be
 // built from. Transient and editor-only: rebuilt from the plan every time,
-// never saved, never cooked.
+// never saved, never cooked. With roadnet.PlanEdgeSplines=1 the carriageway
+// edges and the sidewalk outer-edge rings appear too.
 // ---------------------------------------------------------------------------
 void URoadNetwork::RefreshPlanSplines(FRoadNetRebuildContext& Ctx)
 {
@@ -3982,11 +3993,9 @@ void URoadNetwork::RefreshPlanSplines(FRoadNetRebuildContext& Ctx)
 	}
 
 	int32 Made = 0;
-	for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+	auto MakePlan = [&](const TArray<FVector>& P, const FLinearColor& Color, bool bClosed)
 	{
-		const TArray<FVector>& P = KV.Value.Sampled;
-		if (P.Num() < 2) { continue; }
-
+		if (P.Num() < 2) { return; }
 		USplineComponent* S = NewObject<USplineComponent>(Owner, NAME_None, RF_Transient);
 		S->ComponentTags.Add(kPlanTag);
 		S->bIsEditorOnly = true;
@@ -4005,7 +4014,7 @@ void URoadNetwork::RefreshPlanSplines(FRoadNetRebuildContext& Ctx)
 		{
 			S->AddSplinePoint(P[i], ESplineCoordinateSpace::World, false);
 		}
-		if ((P.Num() - 1) % Step != 0)
+		if (!bClosed && (P.Num() - 1) % Step != 0)
 		{
 			S->AddSplinePoint(P.Last(), ESplineCoordinateSpace::World, false);
 		}
@@ -4013,17 +4022,44 @@ void URoadNetwork::RefreshPlanSplines(FRoadNetRebuildContext& Ctx)
 		{
 			S->SetSplinePointType(i, ESplinePointType::Linear, false);
 		}
+		S->SetClosedLoop(bClosed, false);
 #if WITH_EDITORONLY_DATA
-		S->EditorUnselectedSplineSegmentColor = FLinearColor(0.05f, 0.75f, 1.0f);   // plan blue
+		S->EditorUnselectedSplineSegmentColor = Color;
 		S->bShouldVisualizeScale = false;
 #endif
 		S->UpdateSpline();
 		++Made;
+	};
+
+	const FLinearColor kCentre(0.05f, 0.75f, 1.0f);   // plan blue
+	const FLinearColor kEdge(0.9f, 0.9f, 0.9f);       // carriageway edge white
+	const FLinearColor kWalk(0.1f, 1.0f, 0.25f);      // sidewalk outer edge green
+	const bool bEdges = CVarRoadNetPlanEdgeSplines.GetValueOnAnyThread() != 0;
+
+	for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+	{
+		MakePlan(KV.Value.Sampled, kCentre, /*bClosed*/false);
+		if (bEdges)
+		{
+			MakePlan(KV.Value.LeftEdge,  kEdge, /*bClosed*/false);
+			MakePlan(KV.Value.RightEdge, kEdge, /*bClosed*/false);
+		}
+	}
+	// The sidewalk OUTER edge (with reconciled Z, sidewalk-top height): the
+	// line every street-bound parcel vertex was snapped onto. If a parcel
+	// corner is not ON a green ring, the connection is wrong — that is the QA.
+	if (bEdges)
+	{
+		for (const FRoadNetPlanEdge& E : PlanSidewalkEdges)
+		{
+			MakePlan(E.Points, kWalk, /*bClosed*/true);
+		}
 	}
 
 	UE_LOG(LogRoadNet, Log,
-		TEXT("[RoadNet] PlanSplines: %d road centreline spline(s) mirrored onto %s — the latent plan, visible before any mesh exists."),
-		Made, *Owner->GetName());
+		TEXT("[RoadNet] PlanSplines: %d plan spline(s) mirrored onto %s (%s) — the latent plan, visible before any mesh exists."),
+		Made, *Owner->GetName(),
+		bEdges ? TEXT("centrelines + carriageway edges + sidewalk edge rings") : TEXT("centrelines only"));
 }
 
 void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& DirtyRegionWorld)
