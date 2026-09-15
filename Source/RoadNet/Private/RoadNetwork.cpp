@@ -657,7 +657,7 @@ void URoadNetwork::CaptureStreetPlan(FRoadNetRebuildContext& Ctx)
 			Edge.Zone  = z;
 			Edge.bHole = bHole;
 			Edge.Points.Reserve(Ring.VertexCount());
-			for (const UE::Geometry::FVector2d& P : Ring.GetVertices())
+			for (const FVector2d& P : Ring.GetVertices())
 			{
 				Edge.Points.Emplace(P.X, P.Y,
 					Field.SampleHeight(P.X, P.Y, FallbackZ) + SidewalkTopLiftCm);
