@@ -1417,7 +1417,8 @@ private:
 	void BuildZones(FRoadNetRebuildContext& Ctx) const;          // §10.12 grade separation
 	void BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const;   // §10.9 per-zone union + §8.12 sidewalks
 	void CaptureStreetPlan(FRoadNetRebuildContext& Ctx);         // § street plan API (sidewalk edges w/ Z)
-	void BindParcelsToStreet(FRoadNetRebuildContext& Ctx);       // § snap parcel splines to sidewalk edges + ring hygiene
+	void BindParcelsToStreet(FRoadNetRebuildContext& Ctx);       // § snap/weld/reconcile ALL splines + ring hygiene
+	void RefreshPlanSplines(FRoadNetRebuildContext& Ctx);        // § mirror reconciled centrelines as visible spline components
 	void BuildPerimeterLoops(FRoadNetRebuildContext& Ctx) const; // §10.11 loops for PCG export
 	void BuildLaneGraph(FRoadNetRebuildContext& Ctx) const;      // §12.2 lane connectivity
 	void BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const;    // §12.1 per-lane ribbon polys

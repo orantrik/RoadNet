@@ -3959,6 +3959,73 @@ void URoadNetwork::RebuildLatent()
 	bLatentRebuild = false;
 }
 
+// ---------------------------------------------------------------------------
+// § plan splines — EVERYTHING is created from a spline, so the spline must be
+// visible. Mirror the reconciled centrelines (post-alignment, post-solver Z)
+// onto the owning actor as real USplineComponents, one per road, so the latent
+// plan can be inspected in the viewport BEFORE any terrain or mesh work: what
+// you see after Import Roads is exactly what the conform and the mesh will be
+// built from. Transient and editor-only: rebuilt from the plan every time,
+// never saved, never cooked.
+// ---------------------------------------------------------------------------
+void URoadNetwork::RefreshPlanSplines(FRoadNetRebuildContext& Ctx)
+{
+	AActor* Owner = Cast<AActor>(GetOuter());
+	if (!Owner) { return; }
+	static const FName kPlanTag(TEXT("RoadNetPlanSpline"));
+
+	TArray<USplineComponent*> Old;
+	Owner->GetComponents<USplineComponent>(Old);
+	for (USplineComponent* S : Old)
+	{
+		if (S && S->ComponentHasTag(kPlanTag)) { S->DestroyComponent(); }
+	}
+
+	int32 Made = 0;
+	for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+	{
+		const TArray<FVector>& P = KV.Value.Sampled;
+		if (P.Num() < 2) { continue; }
+
+		USplineComponent* S = NewObject<USplineComponent>(Owner, NAME_None, RF_Transient);
+		S->ComponentTags.Add(kPlanTag);
+		S->bIsEditorOnly = true;
+		if (USceneComponent* Root = Owner->GetRootComponent())
+		{
+			S->SetupAttachment(Root);
+		}
+		S->RegisterComponent();
+		S->ClearSplinePoints(false);
+
+		// Every Nth sample, LINEAR: the plan IS this polyline. Curve
+		// interpolation between plan knots would show geometry that is not in
+		// the plan — mangled-looking tangents where the road bends hard.
+		const int32 Step = FMath::Max(1, P.Num() / 100);
+		for (int32 i = 0; i < P.Num(); i += Step)
+		{
+			S->AddSplinePoint(P[i], ESplineCoordinateSpace::World, false);
+		}
+		if ((P.Num() - 1) % Step != 0)
+		{
+			S->AddSplinePoint(P.Last(), ESplineCoordinateSpace::World, false);
+		}
+		for (int32 i = 0; i < S->GetNumberOfSplinePoints(); ++i)
+		{
+			S->SetSplinePointType(i, ESplinePointType::Linear, false);
+		}
+#if WITH_EDITORONLY_DATA
+		S->EditorUnselectedSplineSegmentColor = FLinearColor(0.05f, 0.75f, 1.0f);   // plan blue
+		S->bShouldVisualizeScale = false;
+#endif
+		S->UpdateSpline();
+		++Made;
+	}
+
+	UE_LOG(LogRoadNet, Log,
+		TEXT("[RoadNet] PlanSplines: %d road centreline spline(s) mirrored onto %s — the latent plan, visible before any mesh exists."),
+		Made, *Owner->GetName());
+}
+
 void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& DirtyRegionWorld)
 {
 	const double T0 = FPlatformTime::Seconds();
@@ -4129,18 +4196,21 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 
 	// LATENT-ONLY stop (the street-plan order): the plan now exists — curves,
 	// reconciled alignment, deform corridors, surface plan, sidewalk edges. Snap
-	// the parcel splines to it, clean their rings, and return WITHOUT committing
-	// a single triangle. The stale conform soup is dropped so the landscape
-	// conform that follows reads the latent corridors, never yesterday's mesh.
-	// RebuildSerial is deliberately NOT bumped: nothing visible changed, and the
-	// editor mode's conform watch must not fire off a half-built state.
+	// the parcel splines to it, reconcile every spline against its neighbours,
+	// mirror the road centrelines as VISIBLE spline components, and return
+	// WITHOUT committing a single triangle. The stale conform soup is dropped so
+	// the landscape conform that follows reads the latent corridors, never
+	// yesterday's mesh. RebuildSerial is deliberately NOT bumped: nothing
+	// visible changed, and the editor mode's conform watch must not fire off a
+	// half-built state.
 	if (bLatentRebuild)
 	{
 		BindParcelsToStreet(Ctx);
+		RefreshPlanSplines(Ctx);
 		ConformVerts.Reset();
 		ConformTris.Reset();
 		UE_LOG(LogRoadNet, Log,
-			TEXT("[RoadNet] Rebuild (latent): %d road(s), %d curve(s), %d joint(s), %d corridor(s) — plan captured, parcels snapped, no meshes committed."),
+			TEXT("[RoadNet] Rebuild (latent): %d road(s), %d curve(s), %d joint(s), %d corridor(s) — plan captured, splines reconciled, no meshes committed."),
 			Roads.Num(), Ctx.Curves.Num(), Ctx.Joints.Num(), DeformCorridors.Num());
 		return;
 	}

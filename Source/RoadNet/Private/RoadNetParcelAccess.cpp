@@ -40,6 +40,17 @@
 #include "GameFramework/Actor.h"
 #include "HAL/IConsoleManager.h"   // RoadNet.ParcelAccessSelfCheck
 
+// Max slope (degrees) between NEARBY spline points of DIFFERENT elements —
+// free parcel knots against road centrelines, and against each other. Enforced
+// on the latent splines (BindParcelsToStreet's height-field pass) before the
+// terrain deform and before any mesh, so no two splines can pass close together
+// with a cliff of height difference between them.
+static TAutoConsoleVariable<float> CVarRoadNetSplineFieldMaxSlopeDeg(
+	TEXT("roadnet.SplineFieldMaxSlopeDeg"),
+	8.0f,
+	TEXT("Max slope (degrees) between nearby spline points of different elements (parcel vs road, parcel vs parcel), reconciled on the latent splines before terrain deform. Default 8."),
+	ECVF_Default);
+
 namespace
 {
 	using namespace UE::Geometry;
@@ -56,6 +67,7 @@ namespace
 		AActor*           Actor = nullptr;
 		USplineComponent* Spline = nullptr;   // the Footprint itself, for vertex re-seating
 		TArray<FVector2D> Pts;
+		TArray<double>    PtZ;                // per-vertex Z, kept in lockstep with Pts
 		FBox2D            Box = FBox2D(ForceInit);
 		FVector2D         Centroid = FVector2D::ZeroVector;
 	};
@@ -297,10 +309,12 @@ namespace
 			R.Actor = Actor;
 			R.Spline = Spline;
 			R.Pts.Reserve(N);
+			R.PtZ.Reserve(N);
 			for (int32 i = 0; i < N; ++i)
 			{
 				const FVector W = Spline->GetLocationAtSplinePoint(i, ESplineCoordinateSpace::World);
 				R.Pts.Emplace(W.X, W.Y);
+				R.PtZ.Add(W.Z);
 				R.Box += FVector2D(W.X, W.Y);
 			}
 			for (const FVector2D& P : R.Pts) { R.Centroid += P; }
@@ -358,25 +372,38 @@ void URoadNetwork::BindParcelsToStreet(FRoadNetRebuildContext& Ctx)
 	constexpr double kCollinearTolCm  = 5.0;    // cadastral noise on a straight edge
 	int32 Bound = 0, Reseated = 0, Orphaned = 0, Dropped = 0;
 
-	for (FParcelRing& Parcel : Parcels)
+	// Per-parcel state shared by ALL the passes below (snap, weld, height
+	// field): final bindings, and which parcels were touched. Nothing is written
+	// back to the splines until every pass has had its say — one write, one
+	// tangent fix, one tag re-stamp per parcel, at the very end.
+	TArray<TMap<int32, FVertexBinding>> LiveAll;
+	LiveAll.SetNum(Parcels.Num());
+	TArray<int32> ParsedCounts;
+	ParsedCounts.Init(0, Parcels.Num());
+	TBitArray<> Touched(false, Parcels.Num());   // Modify() already called
+	TBitArray<> Dirty(false, Parcels.Num());     // needs write-back + re-stamp
+	auto Touch = [&](int32 pi)
 	{
+		Dirty[pi] = true;
+		if (!Touched[pi])
+		{
+			Touched[pi] = true;
+			Parcels[pi].Actor->Modify();
+			Parcels[pi].Spline->Modify();
+		}
+	};
+
+	for (int32 pi = 0; pi < Parcels.Num(); ++pi)
+	{
+		FParcelRing& Parcel = Parcels[pi];
 		if (!Parcel.Actor || !Parcel.Spline) { continue; }
 
 		TMap<int32, FVertexBinding> Bindings;
 		ParseBindings(Parcel.Actor, Bindings);
-		TMap<int32, FVertexBinding> Live;   // final snapped bindings by vertex index
-		const int32 OldOrphans = Orphaned;
+		ParsedCounts[pi] = Bindings.Num();
+		TMap<int32, FVertexBinding>& Live = LiveAll[pi];   // final snapped bindings
 
-		bool bModified = false;
-		auto EnsureModify = [&]()
-		{
-			if (!bModified)
-			{
-				bModified = true;
-				Parcel.Actor->Modify();
-				Parcel.Spline->Modify();
-			}
-		};
+		auto EnsureModify = [&]() { Touch(pi); };
 
 		const int32 NumV = FMath::Min(Parcel.Pts.Num(), Parcel.Spline->GetNumberOfSplinePoints());
 		for (int32 i = 0; i < NumV; ++i)
@@ -400,9 +427,8 @@ void URoadNetwork::BindParcelsToStreet(FRoadNetRebuildContext& Ctx)
 				const FVector2D N(-Tan.Y, Tan.X);   // Cross2D(Tan, N) = +1, matches Offset's sign
 				const FVector NewW(Pos.X + N.X * Off, Pos.Y + N.Y * Off, BedZ + SidewalkTopLiftCm);
 				EnsureModify();
-				Parcel.Spline->SetLocationAtSplinePoint(i, NewW,
-					ESplineCoordinateSpace::World, /*bUpdateSpline*/false);
 				Parcel.Pts[i] = FVector2D(NewW.X, NewW.Y);
+				Parcel.PtZ[i] = NewW.Z;
 				Live.Add(i, { B->RoadId, B->StationCm, Off });
 				++Reseated;
 				continue;
@@ -448,9 +474,8 @@ void URoadNetwork::BindParcelsToStreet(FRoadNetRebuildContext& Ctx)
 			const double Off = Sign * BestBandOuter;
 			const FVector NewW(Pos.X + N.X * Off, Pos.Y + N.Y * Off, BedZ + SidewalkTopLiftCm);
 			EnsureModify();
-			Parcel.Spline->SetLocationAtSplinePoint(i, NewW,
-				ESplineCoordinateSpace::World, /*bUpdateSpline*/false);
 			Parcel.Pts[i] = FVector2D(NewW.X, NewW.Y);
+			Parcel.PtZ[i] = NewW.Z;
 			Live.Add(i, { Roads[BestR].Id, BestVPR.AlongDist, Off });
 			++Bound;
 		}
@@ -505,6 +530,7 @@ void URoadNetwork::BindParcelsToStreet(FRoadNetRebuildContext& Ctx)
 					EnsureModify();
 					Parcel.Spline->RemoveSplinePoint(i, /*bUpdateSpline*/false);
 					Parcel.Pts.RemoveAt(i);
+					Parcel.PtZ.RemoveAt(i);
 					Live.Remove(i);
 					TMap<int32, FVertexBinding> Shifted;
 					for (TPair<int32, FVertexBinding>& KV : Live)
@@ -519,33 +545,262 @@ void URoadNetwork::BindParcelsToStreet(FRoadNetRebuildContext& Ctx)
 			}
 		}
 
-		// ---- re-stamp the binding tags (indices are final only now) --------
-		if (bModified || Live.Num() != Bindings.Num() || Orphaned > OldOrphans)
+	}
+
+	// -----------------------------------------------------------------------
+	// Weld pass — SPLINES CONNECT. Two parcels that share a boundary must share
+	// the corner POINT, not merely pass near it: two knots 40 cm apart with
+	// independent heights are exactly the "too close, huge dZ" defect. Every
+	// cluster of corners within the weld radius collapses onto one position —
+	// a street-bound member wins (it sits on the sidewalk edge, which is law),
+	// otherwise the cluster averages. XY and Z both.
+	// -----------------------------------------------------------------------
+	int32 Welded = 0;
+	{
+		constexpr double kWeldCm   = 50.0;
+		constexpr double kWeldCell = 200.0;
+		struct FVRef { int32 P; int32 V; };
+		TMultiMap<FIntPoint, FVRef> VGrid;
+		auto CellOf = [kWeldCell](const FVector2D& P)
 		{
-			EnsureModify();
-			Parcel.Actor->Tags.RemoveAll([](const FName& T)
+			return FIntPoint((int32)FMath::FloorToInt(P.X / kWeldCell),
+			                 (int32)FMath::FloorToInt(P.Y / kWeldCell));
+		};
+		for (int32 pi = 0; pi < Parcels.Num(); ++pi)
+		{
+			if (!Parcels[pi].Actor || !Parcels[pi].Spline) { continue; }
+			for (int32 v = 0; v < Parcels[pi].Pts.Num(); ++v)
 			{
-				return T.ToString().StartsWith(TEXT("osm:bind="));
-			});
-			for (const TPair<int32, FVertexBinding>& KV : Live)
-			{
-				Parcel.Actor->Tags.Add(*FString::Printf(TEXT("osm:bind=%d,%s,%.0f,%.0f"),
-					KV.Key, *KV.Value.RoadId.ToString(EGuidFormats::DigitsWithHyphens),
-					KV.Value.StationCm, KV.Value.OffsetCm));
+				VGrid.Add(CellOf(Parcels[pi].Pts[v]), { pi, v });
 			}
-			Parcel.Spline->UpdateSpline();
-			Parcel.Box = FBox2D(ForceInit);
-			Parcel.Centroid = FVector2D::ZeroVector;
-			for (const FVector2D& P : Parcel.Pts) { Parcel.Box += P; Parcel.Centroid += P; }
-			Parcel.Centroid /= (double)FMath::Max(1, Parcel.Pts.Num());
+		}
+		TSet<uint64> Done;
+		TArray<FVRef> Bucket, Cluster;
+		for (int32 pi = 0; pi < Parcels.Num(); ++pi)
+		{
+			if (!Parcels[pi].Actor || !Parcels[pi].Spline) { continue; }
+			for (int32 v = 0; v < Parcels[pi].Pts.Num(); ++v)
+			{
+				const uint64 Key = ((uint64)pi << 32) | (uint32)v;
+				if (Done.Contains(Key)) { continue; }
+
+				const FVector2D P = Parcels[pi].Pts[v];
+				const FIntPoint C = CellOf(P);
+				Cluster.Reset();
+				for (int32 dx = -1; dx <= 1; ++dx)
+				{
+					for (int32 dy = -1; dy <= 1; ++dy)
+					{
+						Bucket.Reset();
+						VGrid.MultiFind(FIntPoint(C.X + dx, C.Y + dy), Bucket);
+						for (const FVRef& R : Bucket)
+						{
+							if (FVector2D::Distance(Parcels[R.P].Pts[R.V], P) <= kWeldCm)
+							{
+								Cluster.Add(R);
+							}
+						}
+					}
+				}
+				if (Cluster.Num() < 2)
+				{
+					Done.Add(Key);
+					continue;
+				}
+
+				// Target: the first street-bound member, else the average.
+				FVector2D TXY = FVector2D::ZeroVector;
+				double TZ = 0.0;
+				bool bBoundTarget = false;
+				for (const FVRef& R : Cluster)
+				{
+					if (LiveAll[R.P].Contains(R.V))
+					{
+						TXY = Parcels[R.P].Pts[R.V];
+						TZ  = Parcels[R.P].PtZ[R.V];
+						bBoundTarget = true;
+						break;
+					}
+				}
+				if (!bBoundTarget)
+				{
+					for (const FVRef& R : Cluster) { TXY += Parcels[R.P].Pts[R.V]; TZ += Parcels[R.P].PtZ[R.V]; }
+					TXY /= (double)Cluster.Num();
+					TZ  /= (double)Cluster.Num();
+				}
+				for (const FVRef& R : Cluster)
+				{
+					Done.Add(((uint64)R.P << 32) | (uint32)R.V);
+					if (LiveAll[R.P].Contains(R.V)) { continue; }   // bound knots do not move
+					if (!Parcels[R.P].Pts[R.V].Equals(TXY, 0.1)
+						|| !FMath::IsNearlyEqual(Parcels[R.P].PtZ[R.V], TZ, 0.1))
+					{
+						Touch(R.P);
+						Parcels[R.P].Pts[R.V] = TXY;
+						Parcels[R.P].PtZ[R.V] = TZ;
+						++Welded;
+					}
+				}
+			}
 		}
 	}
 
-	if (Bound + Reseated + Orphaned + Dropped > 0)
+	// -----------------------------------------------------------------------
+	// Height-field pass — NO TWO SPLINE POINTS NEAR EACH OTHER MAY DISAGREE IN
+	// HEIGHT faster than the field cap. The pinned truth is the street: every
+	// road centreline sample (at sidewalk-top height) and every street-bound
+	// parcel knot. Free parcel knots are pulled into the allowed wedge of every
+	// pinned and free neighbour around them — Gauss-Seidel, a few sweeps — so a
+	// back corner can no longer sit metres above the road beside it, and two
+	// abutting parcels cannot disagree across their shared boundary. This runs
+	// on SPLINES, before the terrain deform and before any mesh.
+	// -----------------------------------------------------------------------
+	int32 FieldMoves = 0;
+	{
+		const double TanCap = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(
+			(double)CVarRoadNetSplineFieldMaxSlopeDeg.GetValueOnAnyThread(), 0.5, 45.0)));
+		constexpr double kFieldCellCm = 1500.0;   // = the reconcile radius
+		auto CellOf = [](const FVector2D& P)
+		{
+			return FIntPoint((int32)FMath::FloorToInt(P.X / kFieldCellCm),
+			                 (int32)FMath::FloorToInt(P.Y / kFieldCellCm));
+		};
+
+		struct FPinned { FVector2D XY; double Z; };
+		TArray<FPinned> Pins;
+		TMultiMap<FIntPoint, int32> PinGrid;
+		for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+		{
+			const int32 r = KV.Key;
+			if (!Roads.IsValidIndex(r) || Roads[r].bBridge || Roads[r].bTunnel
+				|| Roads[r].Layer != 0)
+			{
+				continue;
+			}
+			for (const FVector& P : KV.Value.Sampled)
+			{
+				const int32 Idx = Pins.Add({ FVector2D(P.X, P.Y), P.Z + SidewalkTopLiftCm });
+				PinGrid.Add(CellOf(Pins[Idx].XY), Idx);
+			}
+		}
+		struct FFree { int32 P; int32 V; };
+		TArray<FFree> Frees;
+		TMultiMap<FIntPoint, int32> FreeGrid;
+		for (int32 pi = 0; pi < Parcels.Num(); ++pi)
+		{
+			if (!Parcels[pi].Actor || !Parcels[pi].Spline) { continue; }
+			for (int32 v = 0; v < Parcels[pi].Pts.Num(); ++v)
+			{
+				if (LiveAll[pi].Contains(v))
+				{
+					const int32 Idx = Pins.Add({ Parcels[pi].Pts[v], Parcels[pi].PtZ[v] });
+					PinGrid.Add(CellOf(Pins[Idx].XY), Idx);
+				}
+				else
+				{
+					const int32 Idx = Frees.Add({ pi, v });
+					FreeGrid.Add(CellOf(Parcels[pi].Pts[v]), Idx);
+				}
+			}
+		}
+
+		TArray<int32> Bucket;
+		constexpr int32 kSweeps = 4;
+		for (int32 Sweep = 0; Sweep < kSweeps; ++Sweep)
+		{
+			bool bAny = false;
+			for (int32 f = 0; f < Frees.Num(); ++f)
+			{
+				FParcelRing& Pr = Parcels[Frees[f].P];
+				const FVector2D XY = Pr.Pts[Frees[f].V];
+				double& Z = Pr.PtZ[Frees[f].V];
+				const FIntPoint C = CellOf(XY);
+				double Lo = -1.0e18, Hi = 1.0e18;
+				for (int32 dx = -1; dx <= 1; ++dx)
+				{
+					for (int32 dy = -1; dy <= 1; ++dy)
+					{
+						const FIntPoint Cell(C.X + dx, C.Y + dy);
+						Bucket.Reset();
+						PinGrid.MultiFind(Cell, Bucket);
+						for (const int32 Idx : Bucket)
+						{
+							const double D = FVector2D::Distance(Pins[Idx].XY, XY);
+							if (D > kFieldCellCm) { continue; }
+							const double Allow = TanCap * D + 2.0;
+							Lo = FMath::Max(Lo, Pins[Idx].Z - Allow);
+							Hi = FMath::Min(Hi, Pins[Idx].Z + Allow);
+						}
+						Bucket.Reset();
+						FreeGrid.MultiFind(Cell, Bucket);
+						for (const int32 Idx : Bucket)
+						{
+							if (Idx == f) { continue; }
+							const FParcelRing& Qr = Parcels[Frees[Idx].P];
+							const double D = FVector2D::Distance(Qr.Pts[Frees[Idx].V], XY);
+							if (D > kFieldCellCm) { continue; }
+							const double Allow = TanCap * D + 2.0;
+							Lo = FMath::Max(Lo, Qr.PtZ[Frees[Idx].V] - Allow);
+							Hi = FMath::Min(Hi, Qr.PtZ[Frees[Idx].V] + Allow);
+						}
+					}
+				}
+				const double NewZ = (Lo > Hi) ? 0.5 * (Lo + Hi) : FMath::Clamp(Z, Lo, Hi);
+				if (!FMath::IsNearlyEqual(NewZ, Z, 0.5))
+				{
+					Touch(Frees[f].P);
+					Z = NewZ;
+					++FieldMoves;
+					bAny = true;
+				}
+			}
+			if (!bAny) { break; }
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Write-back — once, at the very end: every touched parcel gets its points
+	// set from the reconciled (Pts, PtZ), ALL points forced to LINEAR (a
+	// cadastral ring is a polygon; curve tangents between snapped knots are the
+	// mangled loops in the viewport), tags re-stamped, spline updated.
+	// -----------------------------------------------------------------------
+	for (int32 pi = 0; pi < Parcels.Num(); ++pi)
+	{
+		FParcelRing& Parcel = Parcels[pi];
+		if (!Parcel.Actor || !Parcel.Spline) { continue; }
+		if (!Dirty[pi] && LiveAll[pi].Num() == ParsedCounts[pi]) { continue; }
+		Touch(pi);
+
+		const int32 N = FMath::Min(Parcel.Pts.Num(), Parcel.Spline->GetNumberOfSplinePoints());
+		for (int32 i = 0; i < N; ++i)
+		{
+			Parcel.Spline->SetLocationAtSplinePoint(i,
+				FVector(Parcel.Pts[i].X, Parcel.Pts[i].Y, Parcel.PtZ[i]),
+				ESplineCoordinateSpace::World, /*bUpdateSpline*/false);
+			Parcel.Spline->SetSplinePointType(i, ESplinePointType::Linear, /*bUpdateSpline*/false);
+		}
+		Parcel.Actor->Tags.RemoveAll([](const FName& T)
+		{
+			return T.ToString().StartsWith(TEXT("osm:bind="));
+		});
+		for (const TPair<int32, FVertexBinding>& KV : LiveAll[pi])
+		{
+			Parcel.Actor->Tags.Add(*FString::Printf(TEXT("osm:bind=%d,%s,%.0f,%.0f"),
+				KV.Key, *KV.Value.RoadId.ToString(EGuidFormats::DigitsWithHyphens),
+				KV.Value.StationCm, KV.Value.OffsetCm));
+		}
+		Parcel.Spline->UpdateSpline();
+		Parcel.Box = FBox2D(ForceInit);
+		Parcel.Centroid = FVector2D::ZeroVector;
+		for (const FVector2D& P : Parcel.Pts) { Parcel.Box += P; Parcel.Centroid += P; }
+		Parcel.Centroid /= (double)FMath::Max(1, Parcel.Pts.Num());
+	}
+
+	if (Bound + Reseated + Orphaned + Dropped + Welded + FieldMoves > 0)
 	{
 		UE_LOG(LogRoadNet, Log,
-			TEXT("[RoadNet] ParcelSnap: %d vertex(es) snapped to sidewalk edges (new), %d re-seated from bindings, %d orphaned (road deleted), %d packed/collinear knot(s) dropped."),
-			Bound, Reseated, Orphaned, Dropped);
+			TEXT("[RoadNet] SplineField: %d vertex(es) snapped to sidewalk edges (new), %d re-seated, %d orphaned, %d packed/collinear knot(s) dropped, %d corner(s) welded across parcels, %d height(s) reconciled against neighbouring splines."),
+			Bound, Reseated, Orphaned, Dropped, Welded, FieldMoves);
 	}
 }
 
