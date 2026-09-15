@@ -459,8 +459,25 @@ namespace RoadNetMesh
 			return FVector3f((float)N.X, (float)N.Y, (float)N.Z);
 		};
 
-		for (const FGeneralPolygon2d& GP : Polys)
+		// Ring hygiene BEFORE triangulation (the latent-space rule): a packed
+		// boundary cluster triangulates as a spike, a near-collinear vertex as a
+		// sliver. A 25 cm spacing floor and 1.5 cm line deviation are invisible
+		// at street scale but keep Delaunay's input clean. Winding is preserved.
+		auto CleanRing = [](const FPolygon2d& In) -> FPolygon2d
 		{
+			TArray<FVector2D> V(In.GetVertices());
+			RoadNetMath::CleanPolygonRing(V, /*MinSpacingCm*/25.0, /*CollinearTolCm*/1.5);
+			return FPolygon2d(V);
+		};
+
+		for (const FGeneralPolygon2d& GPSrc : Polys)
+		{
+			FGeneralPolygon2d GP(CleanRing(GPSrc.GetOuter()));
+			for (const FPolygon2d& Hole : GPSrc.GetHoles())
+			{
+				GP.AddHole(CleanRing(Hole), /*bCheckContainment*/false, /*bCheckOrientation*/false);
+			}
+
 			TArray<FVector2d> Verts2D;
 			const TArray<FIndex3i> Tris = ConstrainedDelaunayTriangulateWithVertices<double>(GP, Verts2D);
 			if (Tris.Num() == 0 || Verts2D.Num() < 3) { continue; }

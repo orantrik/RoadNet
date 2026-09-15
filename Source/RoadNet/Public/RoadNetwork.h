@@ -43,6 +43,33 @@ struct FRoadNetDeformCorridor
 	int32  Layer   = 0;        // grade-separation layer (only Layer 0 deforms terrain)
 };
 
+// ---- Street plan API (the latent-space seam) --------------------------------
+// Queryable facts of the LAST rebuild, refreshed by CaptureStreetPlan. This is
+// what "elements are aware of each other" means in practice: parcels, fences
+// and the landscape read these instead of re-deriving (or guessing) road
+// geometry. Everything is world cm; Z is already the reconciled alignment.
+
+// One sidewalk band ring with Z = the TOP of the pavement (bed + slab lift +
+// kerb lift), i.e. the height a fence base or parcel plate should meet.
+struct FRoadNetPlanEdge
+{
+	int32 Zone  = 0;
+	bool  bHole = false;         // inner ring of the band (faces the kerb)
+	TArray<FVector> Points;      // closed ring
+};
+
+// Where one parcel meets the street: which road fronts it, where along that
+// road, and the sidewalk-top height there. Mirrored onto the parcel actor as
+// the osm:frontage tag for modules that must not depend on RoadNet.
+struct FRoadNetParcelFrontage
+{
+	TWeakObjectPtr<AActor> Parcel;
+	FGuid  RoadId;               // FRoadDef::Id — survives index shifts
+	double StationCm   = 0.0;    // arc along the road's sampled centreline
+	double ArcCm       = 0.0;    // arc along the parcel ring (same as osm:access)
+	double FrontZTopCm = 0.0;    // sidewalk TOP at the landing point
+};
+
 // ---- Per-cell terrain-conform cache (§ tiling) -----------------------------
 // World-space ground triangle soup contributed by ONE grid cell. Cached so a
 // windowed rebuild can reassemble the WHOLE-network conform arrays (clean cells
@@ -1051,6 +1078,17 @@ public:
 	// merge). Returns INDEX_NONE if not present.
 	int32 FindRoadById(const FGuid& Id) const;
 
+	// ---- Street plan API (latent-space seam) -------------------------------
+	// Refreshed on every rebuild by CaptureStreetPlan / BuildParcelAccessPaths.
+	// Transient: derived facts, never saved — a rebuild is the source of truth.
+	TArray<FRoadNetPlanEdge>       PlanSidewalkEdges;
+	TArray<FRoadNetParcelFrontage> PlanParcelFrontages;
+
+	// Sidewalk TOP above the height-field bed: the slab lift the road mesh gets
+	// plus the kerb lift the sidewalk layer gets. Kept here so the plan API,
+	// the frontage stamp and CommitLayer can never disagree about it.
+	static constexpr double SidewalkTopLiftCm = 12.0 + 15.0;
+
 	// Ensure NetworkId is valid (lazily assigns one). Returns it.
 	const FGuid& EnsureNetworkId();
 
@@ -1075,6 +1113,15 @@ public:
 	// Rebuild; empty until the first rebuild. Not serialized.
 	const TArray<FVector>& GetConformVerts() const { return ConformVerts; }
 	const TArray<int32>&   GetConformTris()  const { return ConformTris;  }
+
+	// § street validation — walk the COMMITTED street (conform triangle soup,
+	// junction plates, plan sidewalk edges) and report every place the built
+	// geometry violates the plan's slope contract: lateral slope past
+	// roadnet.MaxSideSlopeDeg, tilted junction plates, and vertical steps along
+	// the sidewalk outer edge (kerb/skirt discontinuities). With the latent
+	// solver upstream this reports zero; it exists to catch regressions.
+	// Returns the number of violations. Console: RoadNet.StreetValidate.
+	int32 ValidateStreet() const;
 
 	// Bumped at the end of every Rebuild (full or windowed). The editor mode
 	// watches this so the terrain conform runs after ANY authoring edit --
@@ -1356,6 +1403,7 @@ private:
 	void BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const;
 	void BuildZones(FRoadNetRebuildContext& Ctx) const;          // §10.12 grade separation
 	void BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const;   // §10.9 per-zone union + §8.12 sidewalks
+	void CaptureStreetPlan(FRoadNetRebuildContext& Ctx);         // § street plan API (sidewalk edges w/ Z)
 	void BuildPerimeterLoops(FRoadNetRebuildContext& Ctx) const; // §10.11 loops for PCG export
 	void BuildLaneGraph(FRoadNetRebuildContext& Ctx) const;      // §12.2 lane connectivity
 	void BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const;    // §12.1 per-lane ribbon polys

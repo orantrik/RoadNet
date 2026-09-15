@@ -616,6 +616,68 @@ void URoadNetwork::BuildDividedPairs(FRoadNetRebuildContext& Ctx)
 		Pairs, Arms.Num());
 }
 
+// ---------------------------------------------------------------------------
+// § Street plan API — capture the sidewalk outer edges WITH Z while both the
+// band polygons and the reconciled curves are alive. Before this existed the
+// edge died inside the rebuild context and every downstream consumer (parcel
+// seating, fences) had to re-guess it from the landscape — which is exactly
+// how parcels and roads ended up disagreeing about shared ground.
+// ---------------------------------------------------------------------------
+void URoadNetwork::CaptureStreetPlan(FRoadNetRebuildContext& Ctx)
+{
+	PlanSidewalkEdges.Reset();
+
+	for (int32 z = 0; z < Ctx.ZoneSidewalkPolys.Num(); ++z)
+	{
+		if (Ctx.ZoneSidewalkPolys[z].Num() == 0) { continue; }
+
+		// Same height source the sidewalk mesh itself will sample, so the plan
+		// edge and the committed pavement can never disagree.
+		TArray<const TArray<FVector>*> CenterLines;
+		if (Ctx.Zones.IsValidIndex(z))
+		{
+			for (const int32 r : Ctx.Zones[z])
+			{
+				if (const FRoadCurves* C = Ctx.Curves.Find(r))
+				{
+					if (C->Sampled.Num() >= 2) { CenterLines.Add(&C->Sampled); }
+				}
+			}
+		}
+		if (CenterLines.Num() == 0) { continue; }
+
+		RoadNetMesh::FCenterlineHeightField Field;
+		Field.Build(CenterLines);
+		const double FallbackZ = Field.FirstZ();
+
+		auto CaptureRing = [&](const UE::Geometry::FPolygon2d& Ring, bool bHole)
+		{
+			if (Ring.VertexCount() < 3) { return; }
+			FRoadNetPlanEdge& Edge = PlanSidewalkEdges.AddDefaulted_GetRef();
+			Edge.Zone  = z;
+			Edge.bHole = bHole;
+			Edge.Points.Reserve(Ring.VertexCount());
+			for (const UE::Geometry::FVector2d& P : Ring.GetVertices())
+			{
+				Edge.Points.Emplace(P.X, P.Y,
+					Field.SampleHeight(P.X, P.Y, FallbackZ) + SidewalkTopLiftCm);
+			}
+		};
+
+		for (const UE::Geometry::FGeneralPolygon2d& GP : Ctx.ZoneSidewalkPolys[z])
+		{
+			CaptureRing(GP.GetOuter(), /*bHole*/false);
+			for (const UE::Geometry::FPolygon2d& Hole : GP.GetHoles())
+			{
+				CaptureRing(Hole, /*bHole*/true);
+			}
+		}
+	}
+
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] StreetPlan: captured %d sidewalk edge ring(s) with Z across %d zone(s)."),
+		PlanSidewalkEdges.Num(), Ctx.ZoneSidewalkPolys.Num());
+}
+
 void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 {
 	using namespace UE::Geometry;
@@ -2692,6 +2754,29 @@ void URoadNetwork::RunSelfCheck()
 		}
 	}
 
+	// Ring hygiene before triangulation: packed boundary clusters and collinear
+	// slivers are dropped; an honest ring is untouched.
+	{
+		TArray<FVector2D> Dirty = {
+			FVector2D(0.0, 0.0),
+			FVector2D(10.0, 0.5),        // packed against the corner (10 cm)
+			FVector2D(500.0, 0.5),       // collinear on the bottom edge (0.5 cm off)
+			FVector2D(1000.0, 0.0),
+			FVector2D(1000.0, 1000.0),
+			FVector2D(0.0, 1000.0)
+		};
+		const int32 Removed = RoadNetMath::CleanPolygonRing(Dirty, 25.0, 1.5);
+		Expect(Removed == 2 && Dirty.Num() == 4,
+			TEXT("a packed corner cluster and a collinear sliver vertex are dropped from the ring"));
+
+		TArray<FVector2D> Square = {
+			FVector2D(0.0, 0.0), FVector2D(1000.0, 0.0),
+			FVector2D(1000.0, 1000.0), FVector2D(0.0, 1000.0)
+		};
+		Expect(RoadNetMath::CleanPolygonRing(Square, 25.0, 1.5) == 0 && Square.Num() == 4,
+			TEXT("an honest square ring is left alone"));
+	}
+
 	UE_LOG(LogRoadNet, Display, TEXT("LaneSelfCheck: %s"), bOK ? TEXT("PASS") : TEXT("FAIL"));
 }
 
@@ -4032,6 +4117,7 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 	BuildZones(Ctx);              // §10.12 grade-separation layering
 	const double tZones = Now();   Trace(TEXT("zones"), tZones - tSnap);
 	BuildSurfaceUnion(Ctx);       // §10.9 Clipper2 boolean-union per zone
+	CaptureStreetPlan(Ctx);       // § street plan API: sidewalk edges with Z
 	const double tSurface = Now(); Trace(TEXT("surface"), tSurface - tZones);
 	BuildJunctionMarkings(Ctx);   // §2 junction paint (stop/crosswalk) + signals
 	BuildJunctionIslands(Ctx);    // § corner channelizing grass islands (per-junction)

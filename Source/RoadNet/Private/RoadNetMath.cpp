@@ -133,6 +133,67 @@ namespace RoadNetMath
 		return Dropped;
 	}
 
+	int32 CleanPolygonRing(TArray<FVector2D>& Ring, double MinSpacingCm, double CollinearTolCm)
+	{
+		const int32 N0 = Ring.Num();
+		if (N0 < 4)
+		{
+			return 0;   // a triangle has nothing safe to drop
+		}
+
+		// Pass 1 — spacing floor around the closed ring.
+		TArray<FVector2D> Out;
+		Out.Reserve(N0);
+		for (const FVector2D& V : Ring)
+		{
+			if (Out.Num() == 0 || FVector2D::Distance(Out.Last(), V) >= MinSpacingCm)
+			{
+				Out.Add(V);
+			}
+		}
+		while (Out.Num() > 3 && FVector2D::Distance(Out.Last(), Out[0]) < MinSpacingCm)
+		{
+			Out.Pop();   // the ring closes on itself: last must clear the first too
+		}
+
+		// Pass 2 — collinearity, repeated until stable (removing one vertex can
+		// expose the next as collinear).
+		bool bAny = true;
+		while (bAny && Out.Num() > 3)
+		{
+			bAny = false;
+			for (int32 i = 0; i < Out.Num() && Out.Num() > 3; )
+			{
+				const FVector2D& A = Out[(i + Out.Num() - 1) % Out.Num()];
+				const FVector2D& B = Out[i];
+				const FVector2D& C = Out[(i + 1) % Out.Num()];
+				const FVector2D AC = C - A;
+				const double L = AC.Size();
+				const double Dev = (L < 1e-6) ? 0.0 : FMath::Abs(Cross2D(AC / L, B - A));
+				if (Dev <= CollinearTolCm)
+				{
+					Out.RemoveAt(i);
+					bAny = true;
+				}
+				else
+				{
+					++i;
+				}
+			}
+		}
+
+		if (Out.Num() < 3)
+		{
+			return 0;   // degenerate result: keep the original ring
+		}
+		const int32 Removed = N0 - Out.Num();
+		if (Removed > 0)
+		{
+			Ring = MoveTemp(Out);
+		}
+		return Removed;
+	}
+
 	void ResampleByArcLength(const TArray<FVector>& In, double Spacing, TArray<FVector>& Out, double MaxTurnRad)
 	{
 		Out.Reset();

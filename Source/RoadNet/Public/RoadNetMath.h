@@ -73,6 +73,15 @@ namespace RoadNetMath
 	ROADNET_API int32 CollapsePackedSamples(TArray<FVector>& Poly, double MinXYCm, double MaxSlope,
 		const TBitArray<>* AlwaysKeep = nullptr, TArray<int32>* OutKept = nullptr);
 
+	// Clean one CLOSED polygon ring in place before it is triangulated: drop
+	// vertices packed tighter than MinSpacingCm (a packed cluster triangulates
+	// as a spike) and vertices within CollinearTolCm of the line through their
+	// neighbours (a sliver source; the ring reads identical without them).
+	// Winding is preserved; a ring that would fall under 3 vertices is left
+	// unchanged. Returns how many vertices were removed.
+	ROADNET_API int32 CleanPolygonRing(TArray<FVector2D>& Ring,
+		double MinSpacingCm, double CollinearTolCm);
+
 
 	// ---- §10.4 Offset ------------------------------------------------------
 	// Offset a polyline laterally by SignedOffset (cm, +right). Uses miter joins

@@ -12,9 +12,11 @@
 // snapshot, so the terrain conform and the mesh see the SAME reconciled Z.
 // ===========================================================================
 #include "RoadNetwork.h"
+#include "RoadNetActor.h"
 #include "RoadNetMath.h"
 #include "RoadNetStandards.h"
 #include "RoadNetLog.h"
+#include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
 
 // ---- tuning (mirrored on the OSM control panel) ---------------------------
@@ -42,6 +44,21 @@ static TAutoConsoleVariable<float> CVarRoadNetVerticalCurveKM(
 	TEXT("Vertical-curve rate: metres of grade transition per 1% of grade change at a junction, capped by osm.RoadJunctionLandingCm. Higher = longer, gentler crest/sag. Default 2."),
 	ECVF_Default);
 
+// Max SIDE slope between two road beds that share a corridor (dual
+// carriageways, junction aprons). Enforced HERE, on the latent profiles —
+// where a correction can raise AND lower and is then re-smoothed — never on
+// mesh vertices (mesh-space raising builds plateaus; see git history).
+static TAutoConsoleVariable<float> CVarRoadNetMaxSideSlopeDeg(
+	TEXT("roadnet.MaxSideSlopeDeg"),
+	2.0f,
+	TEXT("Max lateral slope (degrees) between nearby parallel road beds, enforced on the vertical alignment before meshing. Default 2."),
+	ECVF_Default);
+
+// Longitudinal grades past this are not roads any more (the user cap is
+// 2-15 degrees; 15 deg = tan 0.2679). osm.RoadGradeMaxSlope stays the working
+// cap; this is the ceiling it can never exceed.
+static constexpr double kMaxLongitudinalTan = 0.2679;
+
 namespace
 {
 	// Cross-module CVar read (the junction/grade knobs live in OSMRoadCore, and
@@ -59,6 +76,18 @@ namespace
 	{
 		return t * t * (3.0 - 2.0 * t);
 	}
+
+	// Residual slope defects of the LAST vertical alignment, for the
+	// RoadNet.SlopeSelfCheck console command. All zero is the latent solver's
+	// contract: no cliff and no >cap side slope ever reaches the mesh.
+	struct FRoadNetSlopeCheck
+	{
+		int32 UnfixableChords     = 0;
+		int32 LateralResiduals    = 0;
+		int32 RampsTooTight       = 0;
+		int32 OverGradedJunctions = 0;
+	};
+	FRoadNetSlopeCheck GSlopeCheck;
 }
 
 void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
@@ -74,7 +103,8 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	const double CurveKCm   = FMath::Max(0.0,   (double)CVarRoadNetVerticalCurveKM.GetValueOnAnyThread() * 100.0);
 	const double FlatCm     = FMath::Max(0.0,   ReadCVarFloat(TEXT("osm.RoadJunctionFlatCm"),    300.0));
 	const double LandingCm  = FMath::Max(1.0,   ReadCVarFloat(TEXT("osm.RoadJunctionLandingCm"), 800.0));
-	const double MaxSlope   = FMath::Max(0.005, ReadCVarFloat(TEXT("osm.RoadGradeMaxSlope"),     0.12));
+	const double MaxSlope   = FMath::Clamp(ReadCVarFloat(TEXT("osm.RoadGradeMaxSlope"), 0.12),
+		0.005, kMaxLongitudinalTan);
 
 	// -----------------------------------------------------------------------
 	// 1. Junction elevations (כרך 2 §8.5).
@@ -230,6 +260,70 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	}
 
 	// -----------------------------------------------------------------------
+	// 2b. Steep-chord negotiation — junctions give ground before the road does.
+	// -----------------------------------------------------------------------
+	// No profile beats a straight line between two FIXED junctions, so when the
+	// chord itself is steeper than the cap the self-check below used to just
+	// warn and the cliff sailed into the mesh. Fix the only thing that can be
+	// fixed: the junction levels. Pull the two ends toward each other until the
+	// chord is legal. This deliberately may exceed RelaxCm — a junction sitting
+	// further from its §8.5 base level is a blemish, a cliff is a defect.
+	int32 ChordViolations = 0, ChordUnfixable = 0;
+	if (Links.Num() > 0)
+	{
+		for (const FGradeLink& L : Links)
+		{
+			const double Len = 1.0 / FMath::Max(L.Weight, 1e-9);
+			if (FMath::Abs(JointZ[L.Jb] - JointZ[L.Ja]) > MaxSlope * Len + 1e-3)
+			{
+				++ChordViolations;
+			}
+		}
+		// Gauss-Seidel: each fix may steepen a neighbouring chord, so sweep until
+		// quiet. Moves shrink the total Z spread monotonically, so this converges.
+		constexpr int32 kNegotiateSweeps = 24;
+		for (int32 Sweep = 0; Sweep < kNegotiateSweeps && ChordViolations > 0; ++Sweep)
+		{
+			bool bAny = false;
+			for (const FGradeLink& L : Links)
+			{
+				const double Len   = 1.0 / FMath::Max(L.Weight, 1e-9);
+				const double MaxDz = MaxSlope * Len;
+				const double dZ    = JointZ[L.Jb] - JointZ[L.Ja];   // + when Jb is higher
+				if (FMath::Abs(dZ) <= MaxDz + 1e-3)
+				{
+					continue;
+				}
+				const bool bA = JointRelaxable[L.Ja];
+				const bool bB = JointRelaxable[L.Jb];
+				if (!bA && !bB)
+				{
+					continue;   // two pinned dead ends: reported as a steep chord below
+				}
+				const double Excess = FMath::Abs(dZ) - MaxDz;
+				const double Sign   = (dZ > 0.0) ? 1.0 : -1.0;
+				const double MoveA  = bA ? (bB ? 0.5 * Excess : Excess) : 0.0;
+				const double MoveB  = bB ? (bA ? 0.5 * Excess : Excess) : 0.0;
+				JointZ[L.Ja] += Sign * MoveA;
+				JointZ[L.Jb] -= Sign * MoveB;
+				bAny = true;
+			}
+			if (!bAny)
+			{
+				break;
+			}
+		}
+		for (const FGradeLink& L : Links)
+		{
+			const double Len = 1.0 / FMath::Max(L.Weight, 1e-9);
+			if (FMath::Abs(JointZ[L.Jb] - JointZ[L.Ja]) > MaxSlope * Len + 1e-3)
+			{
+				++ChordUnfixable;
+			}
+		}
+	}
+
+	// -----------------------------------------------------------------------
 	// 3. Interior anchors — mid-span crossings are junctions too.
 	// -----------------------------------------------------------------------
 	TMap<int32, TArray<TPair<double, double>>> Interior;   // road -> (arc cm, Z)
@@ -277,6 +371,12 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 			++RelaxEscapes;
 		}
 	}
+
+	// Per-road guards for the lateral cross-tie pass (4b): which samples are a
+	// junction plate / vertical curve / pinned anchor (untouchable), and the
+	// arc-length table so the tie can re-run the grade clamp afterwards.
+	TMap<int32, TBitArray<>>     TieProtected;
+	TMap<int32, TArray<double>>  TieArcS;
 
 	for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
 	{
@@ -548,6 +648,25 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 		if (C.RightEdge.Num() == N) { for (int32 i = 0; i < N; ++i) { C.RightEdge[i].Z = Z[i]; } }
 		++RoadsAligned;
 
+		// ---- record the untouchable stretch for the cross-tie pass -----------
+		{
+			TBitArray<> Prot(false, N);
+			for (int32 i = 0; i < N; ++i)
+			{
+				if (Pinned[i]) { Prot[i] = true; continue; }
+				for (int32 ai = 0; ai < Anchors.Num(); ++ai)
+				{
+					if (FMath::Abs(S[i] - Anchors[ai].Key) <= Reach[ai])
+					{
+						Prot[i] = true;
+						break;
+					}
+				}
+			}
+			TieProtected.Add(RoadIdx, MoveTemp(Prot));
+			TieArcS.Add(RoadIdx, S);
+		}
+
 		// ---- self-check: the profile must be its chord to within its budget ---
 		for (int32 ai = 0; ai + 1 < Anchors.Num(); ++ai)
 		{
@@ -582,6 +701,158 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 				UE_LOG(LogRoadNet, Warning,
 					TEXT("[RoadNet][GRADE] road %d span %.0f-%.0f m deviates %.0f cm from its chord; the budget for a %.0f m span is %.0f cm."),
 					RoadIdx, Sa / 100.0, Sb / 100.0, Worst, L / 100.0, Budget);
+			}
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// 4b. Lateral cross-tie: nearby beds may not disagree faster than 2°.
+	// -----------------------------------------------------------------------
+	// Two roads whose beds meet in one surface union (dual carriageways, the
+	// apron where two arms overlap) must not disagree in Z faster than the
+	// side-slope cap, or the union's Delaunay puts a wall between them — the
+	// 90° cliff of the screenshots. Solved on the PROFILES: corrections can
+	// raise and lower, are shared between the two roads, and are re-smoothed
+	// longitudinally afterwards. Junction plates and vertical-curve zones are
+	// protected — the plate levels were already negotiated above.
+	const double TanLat = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(
+		(double)CVarRoadNetMaxSideSlopeDeg.GetValueOnAnyThread(), 0.1, 45.0)));
+	int32 TieViolations = 0, TieRemaining = 0;
+	{
+		// ponytail: ties reach at most one grid cell (26 m); beds further apart
+		// than that are not a shared corridor. Upgrade path: derive the tie
+		// radius from the zone unions instead of a constant.
+		constexpr double kTieCellCm = 2600.0;
+		constexpr double kTieGapCm  = 800.0;   // median/verge gap still counted as shared
+
+		struct FTieEntry { int32 Road; int32 Idx; };
+		TMultiMap<FIntPoint, FTieEntry> Grid;
+		TMap<int32, double> HalfW;
+		for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+		{
+			const int32 r = KV.Key;
+			if (!Roads.IsValidIndex(r) || !Roads[r].IsValid()
+				|| Roads[r].bBridge || Roads[r].bTunnel)
+			{
+				continue;
+			}
+			HalfW.Add(r, FMath::Max(50.0, (double)Roads[r].Lanes.HalfWidthCm()));
+			const TArray<FVector>& P = KV.Value.Sampled;
+			for (int32 i = 0; i < P.Num(); ++i)
+			{
+				Grid.Add(FIntPoint(
+					(int32)FMath::FloorToInt(P[i].X / kTieCellCm),
+					(int32)FMath::FloorToInt(P[i].Y / kTieCellCm)), { r, i });
+			}
+		}
+
+		auto IsProtected = [&TieProtected](int32 Road, int32 Idx) -> bool
+		{
+			const TBitArray<>* B = TieProtected.Find(Road);
+			return B && B->IsValidIndex(Idx) && (*B)[Idx];
+		};
+
+		// One sweep: visit every close pair once (a < b by road index), pull the
+		// two beds inside the allowed lateral wedge. Returns violations seen.
+		TArray<FTieEntry> Bucket;
+		auto Sweep = [&](bool bCorrect) -> int32
+		{
+			int32 Seen = 0;
+			for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+			{
+				const int32 r = KV.Key;
+				const double* Hr = HalfW.Find(r);
+				if (!Hr) { continue; }
+				TArray<FVector>& P = KV.Value.Sampled;
+				const int32 LayerR = Roads[r].Layer;
+				for (int32 i = 0; i < P.Num(); ++i)
+				{
+					const int32 CX = (int32)FMath::FloorToInt(P[i].X / kTieCellCm);
+					const int32 CY = (int32)FMath::FloorToInt(P[i].Y / kTieCellCm);
+					for (int32 dx = -1; dx <= 1; ++dx)
+					{
+						for (int32 dy = -1; dy <= 1; ++dy)
+						{
+							Bucket.Reset();
+							Grid.MultiFind(FIntPoint(CX + dx, CY + dy), Bucket);
+							for (const FTieEntry& E : Bucket)
+							{
+								if (E.Road <= r) { continue; }   // each pair once
+								const double* He = HalfW.Find(E.Road);
+								if (!He || Roads[E.Road].Layer != LayerR) { continue; }
+								FRoadCurves& CE = Ctx.Curves.FindChecked(E.Road);
+								if (!CE.Sampled.IsValidIndex(E.Idx)) { continue; }
+								FVector& Q = CE.Sampled[E.Idx];
+								const double D = FVector::Dist2D(P[i], Q);
+								if (D < 1.0 || D > *Hr + *He + kTieGapCm) { continue; }
+								const double Allowed = TanLat * D + 1.0;
+								const double dZ = P[i].Z - Q.Z;
+								if (FMath::Abs(dZ) <= Allowed) { continue; }
+								++Seen;
+								if (!bCorrect) { continue; }
+								const bool bProtP = IsProtected(r, i);
+								const bool bProtQ = IsProtected(E.Road, E.Idx);
+								if (bProtP && bProtQ) { continue; }   // two plates: joint pass's turf
+								const double Excess = FMath::Abs(dZ) - Allowed;
+								const double Sign   = (dZ > 0.0) ? 1.0 : -1.0;
+								const double MoveP  = bProtP ? 0.0 : (bProtQ ? Excess : 0.5 * Excess);
+								const double MoveQ  = bProtQ ? 0.0 : (bProtP ? Excess : 0.5 * Excess);
+								P[i].Z -= Sign * MoveP;
+								Q.Z    += Sign * MoveQ;
+							}
+						}
+					}
+				}
+			}
+			return Seen;
+		};
+
+		// A tie correction can break the longitudinal cap locally; re-clamp with
+		// the protected stretch pinned, exactly like the main grade pass.
+		auto ReclampLongitudinal = [&]()
+		{
+			for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+			{
+				const TArray<double>* SPtr = TieArcS.Find(KV.Key);
+				const TBitArray<>* Prot = TieProtected.Find(KV.Key);
+				TArray<FVector>& P = KV.Value.Sampled;
+				const int32 N = P.Num();
+				if (!SPtr || !Prot || SPtr->Num() != N) { continue; }
+				const TArray<double>& S = *SPtr;
+				for (int32 i = 1; i < N; ++i)
+				{
+					if ((*Prot)[i]) { continue; }
+					const double dS = FMath::Max(1.0, S[i] - S[i - 1]);
+					P[i].Z = FMath::Clamp(P[i].Z, P[i - 1].Z - MaxSlope * dS, P[i - 1].Z + MaxSlope * dS);
+				}
+				for (int32 i = N - 2; i >= 0; --i)
+				{
+					if ((*Prot)[i]) { continue; }
+					const double dS = FMath::Max(1.0, S[i + 1] - S[i]);
+					P[i].Z = FMath::Clamp(P[i].Z, P[i + 1].Z - MaxSlope * dS, P[i + 1].Z + MaxSlope * dS);
+				}
+			}
+		};
+
+		TieViolations = Sweep(/*bCorrect*/true);
+		if (TieViolations > 0)
+		{
+			constexpr int32 kTieIterations = 4;
+			for (int32 It = 1; It < kTieIterations; ++It)
+			{
+				ReclampLongitudinal();
+				if (Sweep(/*bCorrect*/true) == 0) { break; }
+			}
+			ReclampLongitudinal();
+			TieRemaining = Sweep(/*bCorrect*/false);
+
+			// The edges are index-parallel to the centreline: re-sync their Z.
+			for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+			{
+				FRoadCurves& C = KV.Value;
+				const int32 N = C.Sampled.Num();
+				if (C.LeftEdge.Num()  == N) { for (int32 i = 0; i < N; ++i) { C.LeftEdge[i].Z  = C.Sampled[i].Z; } }
+				if (C.RightEdge.Num() == N) { for (int32 i = 0; i < N; ++i) { C.RightEdge[i].Z = C.Sampled[i].Z; } }
 			}
 		}
 	}
@@ -673,7 +944,257 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	}
 
 	UE_LOG(LogRoadNet, Log,
-		TEXT("[RoadNet][GRADE] aligned %d road(s) over %d junction(s) | straight span %.0f m, chord budget %.1f m, relax %.0f cm, curve %.1f m/%% | %d steep chord(s), %d budget break(s), %d relax escape(s), %d over-graded junction(s) | %d junction(s) sit clear of their road's ground and were ramped, %d of those too tight to ramp fully"),
+		TEXT("[RoadNet][GRADE] aligned %d road(s) over %d junction(s) | straight span %.0f m, chord budget %.1f m, relax %.0f cm, curve %.1f m/%% | %d steep chord(s), %d budget break(s), %d relax escape(s), %d over-graded junction(s) | %d junction(s) sit clear of their road's ground and were ramped, %d of those too tight to ramp fully | %d steep chord(s) negotiated (%d unfixable) | %d lateral tie(s) at %.1f%%, %d left after solve"),
 		RoadsAligned, NumJoints, StraightCm / 100.0, MaxDevCm / 100.0, RelaxCm, CurveKCm / 100.0,
-		SteepChords, BudgetBreaks, RelaxEscapes, SteepJunctions, StepsRamped, StepsTooTight);
+		SteepChords, BudgetBreaks, RelaxEscapes, SteepJunctions, StepsRamped, StepsTooTight,
+		ChordViolations, ChordUnfixable, TieViolations, TanLat * 100.0, TieRemaining);
+
+	// Snapshot for RoadNet.SlopeSelfCheck: the last rebuild's residual defects.
+	GSlopeCheck = { ChordUnfixable, TieRemaining, StepsTooTight, SteepJunctions };
+}
+
+// ---------------------------------------------------------------------------
+// RoadNet.SlopeSelfCheck — did the last vertical alignment leave any slope
+// defect that will reach the mesh? Zero on every counter is the contract the
+// latent solver makes: cliffs and >2° side slopes are fixed BEFORE meshing.
+// ---------------------------------------------------------------------------
+namespace
+{
+	FAutoConsoleCommand GSlopeSelfCheckCmd(
+		TEXT("RoadNet.SlopeSelfCheck"),
+		TEXT("Report the residual slope defects of the last RoadNet rebuild: steep chords the junction negotiation could not fix, lateral ties past the side-slope cap after the solve, junction ramps without room, and over-graded junction areas. All zero = PASS."),
+		FConsoleCommandDelegate::CreateLambda([]()
+		{
+			const FRoadNetSlopeCheck& C = GSlopeCheck;
+			const bool bOK = C.UnfixableChords == 0 && C.LateralResiduals == 0
+				&& C.RampsTooTight == 0 && C.OverGradedJunctions == 0;
+			UE_LOG(LogRoadNet, Display,
+				TEXT("SlopeSelfCheck: %s | %d unfixable steep chord(s), %d lateral residual(s), %d ramp(s) without room, %d over-graded junction(s). Details are in the [RoadNet][GRADE] warnings of the last rebuild."),
+				bOK ? TEXT("PASS") : TEXT("FAIL"),
+				C.UnfixableChords, C.LateralResiduals, C.RampsTooTight, C.OverGradedJunctions);
+		}));
+}
+
+// ---------------------------------------------------------------------------
+// § street validation — the acceptance pass of the unified street plan.
+// Validation, NOT mesh surgery: it walks what was actually committed and
+// reports, with world positions, every triangle and edge that violates the
+// contract the latent solver promised to enforce. With the solver healthy the
+// three counters are zero; a non-zero counter is a regression with an address.
+// ---------------------------------------------------------------------------
+int32 URoadNetwork::ValidateStreet() const
+{
+	const TArray<FVector>& Verts = GetConformVerts();
+	const TArray<int32>&   Tris  = GetConformTris();
+	const TArray<FRoadNetDeformCorridor>& Corridors = GetDeformCorridors();
+	if (Verts.Num() == 0 || Tris.Num() == 0 || Corridors.Num() == 0)
+	{
+		UE_LOG(LogRoadNet, Warning,
+			TEXT("[RoadNet][VALIDATE] nothing to validate — rebuild the network first (the conform soup is transient)."));
+		return 0;
+	}
+
+	const double LatTan = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(
+		(double)CVarRoadNetMaxSideSlopeDeg.GetValueOnAnyThread(), 0.1, 45.0)));
+	const double FlatCm = FMath::Max(0.0, ReadCVarFloat(TEXT("osm.RoadJunctionFlatCm"), 300.0));
+
+	// ---- centreline segments in a grid, for "which way does the road run
+	// here" — the lateral check needs a tangent to split the gradient against.
+	struct FSeg { FVector2D A; FVector2D B; FVector2D Tan; };
+	TArray<FSeg> Segs;
+	constexpr double kCellCm = 3000.0;
+	TMultiMap<FIntPoint, int32> Grid;
+	for (const FRoadNetDeformCorridor& C : Corridors)
+	{
+		if (C.bBridge || C.bTunnel || C.Layer != 0) { continue; }
+		for (int32 i = 0; i + 1 < C.Points.Num(); ++i)
+		{
+			const FVector2D A(C.Points[i].X, C.Points[i].Y);
+			const FVector2D B(C.Points[i + 1].X, C.Points[i + 1].Y);
+			const double L = FVector2D::Distance(A, B);
+			if (L < 1.0) { continue; }
+			const int32 Idx = Segs.Add({ A, B, (B - A) / L });
+			Grid.Add(FIntPoint(
+				(int32)FMath::FloorToInt(A.X / kCellCm),
+				(int32)FMath::FloorToInt(A.Y / kCellCm)), Idx);
+		}
+	}
+	TArray<int32> Bucket;
+	auto NearestTangent = [&](const FVector2D& P, FVector2D& OutTan) -> bool
+	{
+		const int32 CX = (int32)FMath::FloorToInt(P.X / kCellCm);
+		const int32 CY = (int32)FMath::FloorToInt(P.Y / kCellCm);
+		double Best = 1e18;
+		for (int32 dx = -1; dx <= 1; ++dx)
+		{
+			for (int32 dy = -1; dy <= 1; ++dy)
+			{
+				Bucket.Reset();
+				Grid.MultiFind(FIntPoint(CX + dx, CY + dy), Bucket);
+				for (const int32 Idx : Bucket)
+				{
+					const FSeg& S = Segs[Idx];
+					const FVector2D AB = S.B - S.A;
+					const double T = FMath::Clamp(
+						FVector2D::DotProduct(P - S.A, AB) / FMath::Max(AB.SizeSquared(), 1.0), 0.0, 1.0);
+					const double D = FVector2D::DistSquared(P, S.A + AB * T);
+					if (D < Best) { Best = D; OutTan = S.Tan; }
+				}
+			}
+		}
+		return Best < 1e17;
+	};
+
+	// ---- junction plate centres: corridor endpoints welded, 3+ arms.
+	// ponytail: O(n²) over endpoints — two per road, trivial counts.
+	struct FCluster { FVector2D P; int32 Count = 0; };
+	TArray<FCluster> Clusters;
+	constexpr double kWeldCm = 600.0;
+	for (const FRoadNetDeformCorridor& C : Corridors)
+	{
+		if (C.Points.Num() < 2 || C.Layer != 0) { continue; }
+		for (const FVector& EndW : { C.Points[0], C.Points.Last() })
+		{
+			const FVector2D E(EndW.X, EndW.Y);
+			bool bFound = false;
+			for (FCluster& K : Clusters)
+			{
+				if (FVector2D::Distance(K.P, E) < kWeldCm)
+				{
+					K.P = (K.P * K.Count + E) / (K.Count + 1);
+					++K.Count;
+					bFound = true;
+					break;
+				}
+			}
+			if (!bFound) { Clusters.Add({ E, 1 }); }
+		}
+	}
+	TArray<FVector2D> Plates;
+	for (const FCluster& K : Clusters)
+	{
+		if (K.Count >= 3) { Plates.Add(K.P); }
+	}
+
+	// ---- walk the committed triangles.
+	int32 LatBad = 0, PlateBad = 0, EdgeBad = 0, Reported = 0;
+	auto Report = [&Reported](const TCHAR* What, const FVector& At, double Val)
+	{
+		if (Reported++ < 12)
+		{
+			UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][VALIDATE] %s at (%.0f, %.0f, %.0f): %.1f%%"),
+				What, At.X, At.Y, At.Z, Val * 100.0);
+		}
+	};
+	// A little headroom over the exact caps: the conform soup is a decimated
+	// stand-in for the render mesh, so hairline overshoot is sampling, not sin.
+	const double LatLimit   = LatTan * 1.25 + 0.005;
+	const double PlateLimit = 0.02;   // a "flat" plate may carry 2% before it reads as tilted
+	for (int32 t = 0; t + 2 < Tris.Num(); t += 3)
+	{
+		const FVector& A = Verts[Tris[t]];
+		const FVector& B = Verts[Tris[t + 1]];
+		const FVector& C = Verts[Tris[t + 2]];
+		const FVector N = FVector::CrossProduct(B - A, C - A);
+		if (N.SizeSquared() < 1.0) { continue; }
+		const FVector Cen = (A + B + C) / 3.0;
+		if (FMath::Abs(N.Z) < 1e-6)
+		{
+			++LatBad;   // a vertical face in a driving surface is always a defect
+			Report(TEXT("vertical face"), Cen, 1.0);
+			continue;
+		}
+		// Gradient of the triangle's plane: z rises by |G| per cm travelled.
+		const FVector2D G(-N.X / N.Z, -N.Y / N.Z);
+		const double Slope = G.Size();
+		if (Slope < 0.0175) { continue; }   // < 1°: legal in every direction
+
+		bool bOnPlate = false;
+		for (const FVector2D& P : Plates)
+		{
+			if (FVector2D::Distance(P, FVector2D(Cen.X, Cen.Y)) < FlatCm + 200.0)
+			{
+				bOnPlate = true;
+				break;
+			}
+		}
+		if (bOnPlate)
+		{
+			if (Slope > PlateLimit)
+			{
+				++PlateBad;
+				Report(TEXT("tilted junction plate"), Cen, Slope);
+			}
+			continue;
+		}
+
+		FVector2D Tan;
+		if (!NearestTangent(FVector2D(Cen.X, Cen.Y), Tan)) { continue; }
+		const double Along = FVector2D::DotProduct(G, Tan);
+		const double Lat   = (G - Tan * Along).Size();
+		if (Lat > LatLimit)
+		{
+			++LatBad;
+			Report(TEXT("lateral slope"), Cen, Lat);
+		}
+	}
+
+	// ---- kerb / skirt continuity: the plan sidewalk edge is the line a fence
+	// or parcel meets; a vertical step along it is exactly the "skirt gap" the
+	// screenshots showed. Legal Z change = the longitudinal ceiling over the
+	// run, plus a kerb's worth of tolerance.
+	for (const FRoadNetPlanEdge& E : PlanSidewalkEdges)
+	{
+		const int32 N = E.Points.Num();
+		for (int32 i = 0; i < N; ++i)
+		{
+			const FVector& A = E.Points[i];
+			const FVector& B = E.Points[(i + 1) % N];
+			const double dXY = FMath::Max(1.0, FVector::Dist2D(A, B));
+			const double dZ  = FMath::Abs(B.Z - A.Z);
+			if (dZ > kMaxLongitudinalTan * dXY + 20.0)
+			{
+				++EdgeBad;
+				Report(TEXT("sidewalk edge step"), A, dZ / dXY);
+			}
+		}
+	}
+
+	const int32 Total = LatBad + PlateBad + EdgeBad;
+	UE_LOG(LogRoadNet, Display,
+		TEXT("StreetValidate: %s | %d triangle(s) over the %.1f%% lateral cap, %d tilted plate triangle(s), %d sidewalk edge step(s) — over %d committed triangle(s), %d plate(s), %d plan edge ring(s).%s"),
+		Total == 0 ? TEXT("PASS") : TEXT("FAIL"), LatBad, LatTan * 100.0, PlateBad, EdgeBad,
+		Tris.Num() / 3, Plates.Num(), PlanSidewalkEdges.Num(),
+		Reported > 12 ? TEXT(" (first 12 positions logged)") : TEXT(""));
+	return Total;
+}
+
+// ---------------------------------------------------------------------------
+// RoadNet.StreetValidate — run the street acceptance pass on every network in
+// the world. The knob-tuning loop on a hero junction is: rebuild, run this,
+// adjust osm.RoadJunctionFlatCm / LandingCm / roadnet.VerticalCurveKM /
+// HeightBlendTauCm, repeat until PASS and the junction reads right.
+// ---------------------------------------------------------------------------
+namespace
+{
+	FAutoConsoleCommandWithWorld GStreetValidateCmd(
+		TEXT("RoadNet.StreetValidate"),
+		TEXT("Walk the committed road surface and the plan sidewalk edges of every RoadNet network and report slope-contract violations (lateral > roadnet.MaxSideSlopeDeg, tilted junction plates, sidewalk edge steps) with world positions. Zero everywhere = PASS."),
+		FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World)
+		{
+			if (!World) { return; }
+			int32 Nets = 0;
+			for (TActorIterator<ARoadNetActor> It(World); It; ++It)
+			{
+				if (URoadNetwork* Net = It->GetNetwork())
+				{
+					Net->ValidateStreet();
+					++Nets;
+				}
+			}
+			if (Nets == 0)
+			{
+				UE_LOG(LogRoadNet, Warning, TEXT("StreetValidate: no RoadNet actor in this world."));
+			}
+		}));
 }
