@@ -37,6 +37,7 @@
 #include "Components/SplineComponent.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "GameFramework/Actor.h"
 #include "HAL/IConsoleManager.h"   // RoadNet.ParcelAccessSelfCheck
 
 namespace
@@ -52,6 +53,7 @@ namespace
 	/** One parcel, reduced to what an access path needs: its ring and where it sits. */
 	struct FParcelRing
 	{
+		AActor*           Actor = nullptr;
 		TArray<FVector2D> Pts;
 		FBox2D            Box = FBox2D(ForceInit);
 		FVector2D         Centroid = FVector2D::ZeroVector;
@@ -117,6 +119,25 @@ namespace
 			if (D2 < BestD2) { BestD2 = D2; Best = P; OutEdgeDir = AB / FMath::Sqrt(Len2); }
 		}
 		return Best;
+	}
+
+	double RingArcToPoint(const TArray<FVector2D>& Ring, const FVector2D& Q)
+	{
+		double Acc = 0.0, BestAcc = 0.0, BestD2 = TNumericLimits<double>::Max();
+		for (int32 i = 0, j = Ring.Num() - 1; i < Ring.Num(); j = i++)
+		{
+			const FVector2D A = Ring[j];
+			const FVector2D B = Ring[i];
+			const FVector2D AB = B - A;
+			const double Len2 = AB.SizeSquared();
+			if (Len2 < 1.0) { continue; }
+			const double Len = FMath::Sqrt(Len2);
+			const double T = FMath::Clamp(FVector2D::DotProduct(Q - A, AB) / Len2, 0.0, 1.0);
+			const double D2 = FVector2D::DistSquared(Q, A + AB * T);
+			if (D2 < BestD2) { BestD2 = D2; BestAcc = Acc + T * Len; }
+			Acc += Len;
+		}
+		return BestAcc;
 	}
 
 	/**
@@ -190,6 +211,7 @@ namespace
 			if (N < 3) { continue; }
 
 			FParcelRing R;
+			R.Actor = Actor;
 			R.Pts.Reserve(N);
 			for (int32 i = 0; i < N; ++i)
 			{
@@ -219,10 +241,10 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 	if (Parcels.Num() == 0) { return; } // no parcels in the level: this stage costs nothing
 
 	// The band's own tile buckets. Absent means BuildTilePartition emitted no sidewalk at all,
-	// in which case there is no pavement for a path to branch off and nothing to do.
+	// in which case there is no pavement for a path to branch off — but we still stamp
+	// osm:access so parcel fences can cut a gate on the road-facing edge.
 	TArray<TMap<FIntPoint, TArray<FGeneralPolygon2d>>>* WalkBuckets =
 		Ctx.ZoneTileLayers.Find(FName(TEXT("Sidewalks")));
-	if (!WalkBuckets) { return; }
 
 	// Which zone each road belongs to, so a spur is filed under the same zone as the road it
 	// leaves — zones are grade-separated, and a path must not join an overpass's pavement.
@@ -311,6 +333,19 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 		}
 
 		if (BestRoad == INDEX_NONE) { ++TooFar; continue; }
+
+		if (Parcel.Actor)
+		{
+			const double ArcCm = RingArcToPoint(Parcel.Pts, BestOnRing);
+			Parcel.Actor->Tags.RemoveAll([](const FName& T)
+			{
+				return T.ToString().StartsWith(TEXT("osm:access="));
+			});
+			Parcel.Actor->Tags.Add(*FString::Printf(TEXT("osm:access=%.0f,%.0f"),
+				ArcCm, (double)ParcelAccessWidthCm));
+		}
+
+		if (!WalkBuckets) { continue; }
 
 		// 2) Where the band's outer edge is on that side. The spur departs from there, not from
 		// the centreline, so it starts where the pavement actually ends.

@@ -87,6 +87,52 @@ namespace RoadNetMath
 		for (int32 i = 0; i < N; ++i) { Poly[i].Z = Out[i]; }
 	}
 
+	int32 CollapsePackedSamples(TArray<FVector>& Poly, double MinXYCm, double MaxSlope,
+		const TBitArray<>* AlwaysKeep, TArray<int32>* OutKept)
+	{
+		const int32 N = Poly.Num();
+		if (N < 3) { return 0; }
+		MinXYCm = FMath::Max(1.0, MinXYCm);
+		MaxSlope = FMath::Max(0.0, MaxSlope);
+
+		auto Forced = [N, AlwaysKeep](int32 i) -> bool
+		{
+			if (i <= 0 || i >= N - 1) { return true; }
+			return AlwaysKeep && i < AlwaysKeep->Num() && (*AlwaysKeep)[i];
+		};
+		auto Packed = [MinXYCm, MaxSlope](const FVector& A, const FVector& B) -> bool
+		{
+			const double D = FVector::Dist2D(A, B);
+			if (D < MinXYCm) { return true; }
+			return D < (2.0 * MinXYCm)
+				&& FMath::Abs(B.Z - A.Z) > MaxSlope * FMath::Max(D, 1.0);
+		};
+
+		TArray<int32> Keep;
+		Keep.Reserve(N);
+		Keep.Add(0);
+		for (int32 i = 1; i < N - 1; ++i)
+		{
+			if (Forced(i)) { Keep.Add(i); continue; }
+			if (Packed(Poly[Keep.Last()], Poly[i])) { continue; }
+			Keep.Add(i);
+		}
+		while (Keep.Num() > 1 && !Forced(Keep.Last()) && Packed(Poly[Keep.Last()], Poly.Last()))
+		{
+			Keep.Pop();
+		}
+		Keep.Add(N - 1);
+		if (OutKept) { *OutKept = Keep; }
+		if (Keep.Num() == N) { return 0; }
+
+		TArray<FVector> Out;
+		Out.Reserve(Keep.Num());
+		for (int32 i : Keep) { Out.Add(Poly[i]); }
+		const int32 Dropped = N - Out.Num();
+		Poly = MoveTemp(Out);
+		return Dropped;
+	}
+
 	void ResampleByArcLength(const TArray<FVector>& In, double Spacing, TArray<FVector>& Out, double MaxTurnRad)
 	{
 		Out.Reset();
@@ -460,6 +506,43 @@ namespace RoadNetMath
 		const double SinHalf = FMath::Sin(Phi * 0.5);
 		const double CenterDist = (SinHalf > KINDA_SMALL_NUMBER) ? (Radius / SinHalf) : Radius;
 		OutArcCenter = Apex + Bis * CenterDist;
+		return true;
+	}
+
+	bool FitCircle(TArrayView<const FVector2D> Points, FVector2D& OutCentre, double& OutRadius)
+	{
+		const int32 N = Points.Num();
+		if (N < 3) { return false; }
+
+		// Centre the cloud so world-cm coordinates don't blow the 3x3.
+		FVector2D Mean(0, 0);
+		for (const FVector2D& P : Points) { Mean += P; }
+		Mean /= (double)N;
+
+		double Suu = 0, Suv = 0, Svv = 0, Suuu = 0, Suvv = 0, Svuu = 0, Svvv = 0;
+		for (const FVector2D& P : Points)
+		{
+			const double U = P.X - Mean.X;
+			const double V = P.Y - Mean.Y;
+			const double UU = U * U, VV = V * V;
+			Suu += UU; Svv += VV; Suv += U * V;
+			Suuu += UU * U; Svvv += VV * V;
+			Suvv += U * VV; Svuu += V * UU;
+		}
+
+		// Kåsa: u² + v² + D u + E v + F = 0
+		// [Suu Suv ] [D] = [-(Suuu+Suvv)]
+		// [Suv Svv ] [E]   [-(Svvv+Svuu)]
+		const double Det = Suu * Svv - Suv * Suv;
+		if (FMath::Abs(Det) < 1.0) { return false; }
+		const double D = -(Svv * (Suuu + Suvv) - Suv * (Svvv + Svuu)) / Det;
+		const double E = -(Suu * (Svvv + Svuu) - Suv * (Suuu + Suvv)) / Det;
+		OutCentre = FVector2D(Mean.X - D * 0.5, Mean.Y - E * 0.5);
+		// R² = (D²+E²)/4 − F, and for a mean-centered cloud F = −(Suu+Svv)/N.
+		// Dropping F returns |C−centroid|, which is why a 1800 cm arc reported ~588.
+		const double R2 = (D * D + E * E) * 0.25 + (Suu + Svv) / (double)N;
+		if (R2 < 1.0) { return false; }
+		OutRadius = FMath::Sqrt(R2);
 		return true;
 	}
 

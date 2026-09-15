@@ -20,10 +20,16 @@ namespace RoadNetMarkings
 	//
 	// bDriveOnLeft decides both which side of the road each direction runs on
 	// and which colour the centre line takes.
+	// bJointAtStart / bJointAtEnd say whether that end of the road meets a junction.
+	// A crossing at a junction mouth must not stripe the direction that is LEAVING
+	// that junction — the junction's own approach paint already covers that traffic,
+	// and a second bar a few metres past the boundary reads as a double stop line.
 	ROADNET_API void BuildRoadMarkings(
 		const FRoadDef& Road,
 		const FRoadCurves& Curves,
 		bool bDriveOnLeft,
+		bool bJointAtStart,
+		bool bJointAtEnd,
 		TArray<UE::Geometry::FGeneralPolygon2d>& OutWhite,
 		TArray<UE::Geometry::FGeneralPolygon2d>& OutYellow);
 }

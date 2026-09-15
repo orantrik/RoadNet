@@ -44,6 +44,7 @@ IMPLEMENT_HIT_PROXY(HRoadNetPointProxy, HHitProxy);
 IMPLEMENT_HIT_PROXY(HRoadNetSegmentProxy, HHitProxy);
 IMPLEMENT_HIT_PROXY(HRoadNetLaneProxy, HHitProxy);
 IMPLEMENT_HIT_PROXY(HRoadNetEdgeProxy, HHitProxy);
+IMPLEMENT_HIT_PROXY(HRoadNetPlacedProxy, HHitProxy);
 
 namespace
 {
@@ -65,6 +66,7 @@ namespace
 	const FColor     kColorEditLine = FColor(90, 120, 160);
 	const FColor     kColorOsmLine = FColor(230, 150, 60);   // imported roads (selectable for lane edits)
 	const FColor     kColorOsmPt = FColor(255, 170, 70);     // imported road points (shown with "edit all points")
+	const FColor     kColorZoneGraph = FColor(190, 90, 255); // roads flagged for a ZoneGraph spline
 
 	const TCHAR* PresetName(ERoadNetJunctionPreset P)
 	{
@@ -135,7 +137,7 @@ ERoadNetDrawTool FEdModeRoadNet::ActiveTool() const
 {
 	static IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(TEXT("roadnet.DrawTool"));
 	const int32 V = CV ? CV->GetInt() : 0;
-	return (ERoadNetDrawTool)(uint8)FMath::Clamp(V, 0, 8);
+	return (ERoadNetDrawTool)(uint8)FMath::Clamp(V, 0, 9);
 }
 
 bool FEdModeRoadNet::PointsAreEditable(const FRoadDef& Rd) const
@@ -385,7 +387,8 @@ void FEdModeRoadNet::Tick(FEditorViewportClient* ViewportClient, float DeltaTime
 		{
 			static const TCHAR* Names[] = {
 				TEXT("Draw"), TEXT("Points"), TEXT("Lanes"), TEXT("Junctions"), TEXT("Edge"),
-				TEXT("Markings"), TEXT("Crosswalk"), TEXT("Island"), TEXT("Curb Brush") };
+				TEXT("Markings"), TEXT("Crosswalk"), TEXT("Island"), TEXT("Curb Brush"),
+				TEXT("Bike Crossing") };
 			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
 				FString::Printf(TEXT("RoadNet tool: %s"), Names[(int32)T]));
 		}
@@ -437,6 +440,8 @@ void FEdModeRoadNet::ClearSelection()
 	SelLane = INDEX_NONE;
 	SelLaneId.Invalidate();
 	SelEdgeKnot = INDEX_NONE;
+	SelPlacedKind = ERoadNetPlacedKind::None;
+	SelPlacedId.Invalidate();
 	SelPoints.Reset();
 	bDirtyDuringDrag = false;
 	bAutoReleasePending = false;
@@ -995,7 +1000,8 @@ bool FEdModeRoadNet::FindSnap(const FVector& Query, FVector& OutSnap) const
 	// click snap: an island's back edge still snaps to the median, but that
 	// happens at rebuild time in BuildJunctionIslands.
 	const ERoadNetDrawTool Tool = ActiveTool();
-	const bool bGesture = (Tool == ERoadNetDrawTool::Island || Tool == ERoadNetDrawTool::Crosswalk);
+	const bool bGesture = (Tool == ERoadNetDrawTool::Island || Tool == ERoadNetDrawTool::Crosswalk
+		|| Tool == ERoadNetDrawTool::BikeCrossing);
 	const double Radius = bGesture
 		? (double)CVarRoadNetGestureSnapCm.GetValueOnAnyThread() : kSnapCm;
 	if (Radius <= 0.0) { return false; }
@@ -1043,6 +1049,18 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 
 	if (Click.GetKey() == EKeys::LeftMouseButton)
 	{
+		if (DraftPoints.Num() == 0)
+		{
+			if (HRoadNetPlacedProxy* Pp = HitProxyCast<HRoadNetPlacedProxy>(HitProxy))
+			{
+				ClearSelection();
+				SelPlacedKind = Pp->Kind;
+				SelPlacedId = Pp->Id;
+				if (InViewportClient) { InViewportClient->Invalidate(); }
+				return true;
+			}
+		}
+
 		// DRAW tool: every left click drops a road point; double-click finalizes.
 		if (Tool == ERoadNetDrawTool::Draw)
 		{
@@ -1068,7 +1086,8 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 			return true;
 		}
 
-		if (Tool == ERoadNetDrawTool::Crosswalk || Tool == ERoadNetDrawTool::Island)
+		if (Tool == ERoadNetDrawTool::Crosswalk || Tool == ERoadNetDrawTool::Island
+			|| Tool == ERoadNetDrawTool::BikeCrossing)
 		{
 			if (Click.GetEvent() == IE_DoubleClick) { FinalizeDraft(); return true; }
 			FVector Hit;
@@ -1198,9 +1217,25 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 			Net->HeadingOfNearestRoad(Hit, kMarkAlignCm, Yaw);
 			if (Click.IsShiftDown()) { Yaw += 180.f; }
 
+			// The cursor trace lands on the LANDSCAPE, because the road slab is
+			// deliberately collision-free (OSMRoadKeepOut: the terrain-conform trace has
+			// to reach the ground). So the click only ever supplies XY — the arrow's
+			// height and lane come from the road model in AddPlacedMark. If the click
+			// found no road, say so rather than dropping an arrow in the grass, where
+			// it would sit at landscape height with nothing to line up against.
 			const FScopedTransaction Transaction(LOCTEXT("RoadNetPlaceMark", "Place RoadNet Mark"));
 			ModifyForEdit();
-			Net->AddPlacedMark(Hit, Yaw, (ERoadNetMarkKind)RoadNetMarkKind());
+			const int32 MarkIdx = Net->AddPlacedMark(Hit, Yaw, (ERoadNetMarkKind)RoadNetMarkKind());
+			if (Net->PlacedMarks.IsValidIndex(MarkIdx) && !Net->PlacedMarks[MarkIdx].IsBoundToRoad())
+			{
+				Net->PlacedMarks.RemoveAt(MarkIdx);
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Orange,
+						TEXT("RoadNet: no road under the cursor — arrows are placed on a road, not on the ground."));
+				}
+				return true;
+			}
 			const FVector2D Loc(Hit.X, Hit.Y);
 			TArray<int32> Near;
 			CollectRoadsNearPoint(Net, Loc, kMarkDirtyHalfCm, Near);
@@ -1293,7 +1328,8 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 	if (Click.GetKey() == EKeys::RightMouseButton)
 	{
 		if (Tool == ERoadNetDrawTool::Draw || Tool == ERoadNetDrawTool::Crosswalk
-			|| Tool == ERoadNetDrawTool::Island) { FinalizeDraft(); return true; }
+			|| Tool == ERoadNetDrawTool::Island
+			|| Tool == ERoadNetDrawTool::BikeCrossing) { FinalizeDraft(); return true; }
 		return false;   // let RMB drive the camera / context menu in the edit tools
 	}
 	return FEdMode::HandleClick(InViewportClient, HitProxy, Click);
@@ -1325,11 +1361,13 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 {
 	if (Event == IE_Pressed)
 	{
-		// Number keys 1-5 switch the active sub-tool (mirrors the OSM Roads panel
+		// Number keys switch the active sub-tool (mirrors the OSM Roads panel
 		// toggle). Kept global so you can flip tools without reaching for the panel.
+		// 1-9 are the first nine; 0 continues the run onto the tenth.
 		if (Key == EKeys::One || Key == EKeys::Two || Key == EKeys::Three ||
 			Key == EKeys::Four || Key == EKeys::Five ||
-			Key == EKeys::Six || Key == EKeys::Seven || Key == EKeys::Eight || Key == EKeys::Nine)
+			Key == EKeys::Six || Key == EKeys::Seven || Key == EKeys::Eight ||
+			Key == EKeys::Nine || Key == EKeys::Zero)
 		{
 			const ERoadNetDrawTool NewTool =
 				(Key == EKeys::One)   ? ERoadNetDrawTool::Draw :
@@ -1339,7 +1377,8 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				(Key == EKeys::Five)  ? ERoadNetDrawTool::Edge :
 				(Key == EKeys::Six)   ? ERoadNetDrawTool::Markings :
 				(Key == EKeys::Seven) ? ERoadNetDrawTool::Crosswalk :
-				(Key == EKeys::Eight) ? ERoadNetDrawTool::Island : ERoadNetDrawTool::CurbBrush;
+				(Key == EKeys::Eight) ? ERoadNetDrawTool::Island :
+				(Key == EKeys::Nine)  ? ERoadNetDrawTool::CurbBrush : ERoadNetDrawTool::BikeCrossing;
 			SetActiveTool(NewTool);
 			if (ViewportClient) { ViewportClient->Invalidate(); }
 			return true;
@@ -1363,6 +1402,27 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 			if (DraftPoints.Num() > 0)
 			{
 				DraftPoints.Pop();
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
+			if (SelPlacedId.IsValid() && SelPlacedKind != ERoadNetPlacedKind::None)
+			{
+				if (URoadNetwork* Net = GetNetwork())
+				{
+					const FScopedTransaction Transaction(LOCTEXT("RoadNetRemovePlaced", "Remove RoadNet Placed Element"));
+					ModifyForEdit();
+					if (Net->RemovePlacedById(SelPlacedKind, SelPlacedId))
+					{
+						Net->Rebuild();
+						if (GEngine)
+						{
+							GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+								TEXT("RoadNet: placed element removed"));
+						}
+					}
+					SelPlacedKind = ERoadNetPlacedKind::None;
+					SelPlacedId.Invalidate();
+				}
 				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
 			}
@@ -1604,34 +1664,13 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 			// on 2+ roads (marquee / Shift+click), then press U.
 			if (Tool == ERoadNetDrawTool::Points && Key == EKeys::U)
 			{
-				TArray<int32> RoadIdx;
-				for (const FIntPoint& S : SelPoints) { RoadIdx.AddUnique(S.X); }
-				// A whole-road selection (segment click) contributes its road too.
-				if (SelRoad != INDEX_NONE && SelPoint == INDEX_NONE) { RoadIdx.AddUnique(SelRoad); }
-
-				if (RoadIdx.Num() < 2)
+				FString Msg;
+				const bool bOk = MergeSelectedRoads(Msg);
+				if (GEngine)
 				{
-					if (GEngine)
-					{
-						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
-							TEXT("RoadNet: select control points on 2+ roads (marquee / Shift+click), then U to force-merge"));
-					}
-					return true;
+					GEngine->AddOnScreenDebugMessage(-1, 3.0f,
+						bOk ? FColor::Cyan : FColor::Orange, Msg);
 				}
-				if (URoadNetwork* Net = GetNetwork())
-				{
-					const FScopedTransaction Transaction(LOCTEXT("RoadNetMergeRoads", "Merge RoadNet Roads"));
-					ModifyForEdit();
-					const bool bOk = Net->MergeRoads(RoadIdx);
-					if (bOk) { Net->Rebuild(); }
-					if (GEngine)
-					{
-						GEngine->AddOnScreenDebugMessage(-1, 3.0f, bOk ? FColor::Cyan : FColor::Orange,
-							bOk ? FString::Printf(TEXT("RoadNet: merged %d roads into one multi-lane road"), RoadIdx.Num())
-							    : TEXT("RoadNet: merge failed (need 2+ valid roads)"));
-					}
-				}
-				ClearSelection();
 				if (ViewportClient) { ViewportClient->Invalidate(); }
 				return true;
 			}
@@ -1912,10 +1951,15 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				}
 				else
 				{
-					Net->AddStandardParkingBay(Target, ERoadNetSide::Left,  Layout, CenterArc);
-					Net->AddStandardParkingBay(Target, ERoadNetSide::Right, Layout, CenterArc);
-					Msg = FString::Printf(TEXT("RoadNet: added %s parking bays left+right on road %d at arc %.0f cm"),
-						LayoutName, Target, CenterArc);
+					// The bay goes on the kerb whose edge point was selected. It used
+					// to go on both, which put a bay on a side the user never picked.
+					const ERoadNetSide Side = bSelEdgeRight ? ERoadNetSide::Right : ERoadNetSide::Left;
+					const int32 Bay = Net->AddStandardParkingBay(Target, Side, Layout, CenterArc);
+					Msg = (Bay != INDEX_NONE)
+						? FString::Printf(TEXT("RoadNet: added a %s parking bay on the %s of road %d at arc %.0f cm"),
+							LayoutName, bSelEdgeRight ? TEXT("right") : TEXT("left"), Target, CenterArc)
+						: FString::Printf(TEXT("RoadNet: road %d is too short for a %s bay clear of its junctions"),
+							Target, LayoutName);
 				}
 
 				{ const int32 M = Target; Net->Rebuild(MakeArrayView(&M, 1)); }
@@ -2390,6 +2434,20 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 					PDI->SetHitProxy(nullptr);
 				}
 
+				// ZoneGraph membership is a serialized per-road flag with no other
+				// visual, so without this you cannot tell which segments carry it
+				// — a violet rail beside the centreline, in the foreground so it
+				// reads over the road surface.
+				if (Road.bZoneGraph)
+				{
+					const FVector Lift(0, 0, 40);
+					for (int32 i = 0; i + 1 < Road.Ref.Num(); ++i)
+					{
+						PDI->DrawLine(Road.Ref[i] + Lift, Road.Ref[i + 1] + Lift,
+							kColorZoneGraph, SDPG_Foreground, 2.f);
+					}
+				}
+
 				// Per-point handles (Points tool only): hand-drawn roads always,
 				// imported roads only while "edit all points" (P) is on. Imported
 				// handles use a warmer tint so it's clear which points came from OSM.
@@ -2442,6 +2500,67 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 				{
 					const FColor Col = PresetColor(V.Preset);
 					PDI->DrawPoint(V.Location + FVector(0, 0, 30.f), Col, 22.f, SDPG_Foreground);
+				}
+				for (const FRoadNetRoundaboutConfig& Rb : Net->GetRoundaboutConfigs())
+				{
+					const FVector C(Rb.Location.X, Rb.Location.Y, 30.f);
+					PDI->DrawPoint(C, FColor(255, 180, 40), 26.f, SDPG_Foreground);
+					TArray<FVector> Ring;
+					RoadNetMath::SampleCircle(Rb.Location, Rb.InscribedRadiusCm, C.Z, 32, Ring);
+					for (int32 i = 0; i + 1 < Ring.Num(); ++i)
+					{
+						PDI->DrawLine(Ring[i], Ring[i + 1], FColor(255, 180, 40), SDPG_Foreground, 2.f);
+					}
+				}
+			}
+
+			{
+				const FVector Lift(0, 0, 28.f);
+				auto Stroke = [&](const TArray<FVector>& Poly, bool bClosed, const FColor& Col, float Thick)
+				{
+					const int32 N = Poly.Num();
+					if (N < 2) { return; }
+					const int32 Last = bClosed ? N : N - 1;
+					for (int32 i = 0; i < Last; ++i)
+					{
+						const int32 j = (i + 1) % N;
+						PDI->DrawLine(Poly[i] + Lift, Poly[j] + Lift, Col, SDPG_Foreground, Thick);
+					}
+				};
+
+				for (const FRoadNetIsland& Isl : Net->PlacedIslands)
+				{
+					if (!Isl.Id.IsValid() || Isl.Ring.Num() < 3) { continue; }
+					const bool bSel = (SelPlacedKind == ERoadNetPlacedKind::Island && SelPlacedId == Isl.Id);
+					PDI->SetHitProxy(new HRoadNetPlacedProxy(ERoadNetPlacedKind::Island, Isl.Id));
+					Stroke(Isl.Ring, true, bSel ? FColor(255, 220, 40) : FColor(90, 200, 90), bSel ? 6.f : 3.f);
+					PDI->SetHitProxy(nullptr);
+				}
+				for (const FRoadNetBikeCrossing& X : Net->BikeCrossings)
+				{
+					if (!X.Id.IsValid() || X.Path.Num() < 2) { continue; }
+					const bool bSel = (SelPlacedKind == ERoadNetPlacedKind::BikeCrossing && SelPlacedId == X.Id);
+					PDI->SetHitProxy(new HRoadNetPlacedProxy(ERoadNetPlacedKind::BikeCrossing, X.Id));
+					Stroke(X.Path, false, bSel ? FColor(255, 220, 40) : FColor(40, 180, 255), bSel ? 6.f : 3.f);
+					PDI->SetHitProxy(nullptr);
+				}
+				for (const FRoadNetPlacedMark& Mk : Net->PlacedMarks)
+				{
+					if (!Mk.Id.IsValid()) { continue; }
+					FVector At; float Yaw = 0.f;
+					if (!Net->ResolvePlacedMark(Mk, At, Yaw)) { At = Mk.Location; }
+					const bool bSel = (SelPlacedKind == ERoadNetPlacedKind::Mark && SelPlacedId == Mk.Id);
+					PDI->SetHitProxy(new HRoadNetPlacedProxy(ERoadNetPlacedKind::Mark, Mk.Id));
+					PDI->DrawPoint(At + Lift, bSel ? FColor(255, 220, 40) : FColor(255, 90, 60), bSel ? 22.f : 14.f, SDPG_Foreground);
+					PDI->SetHitProxy(nullptr);
+				}
+				for (const FRoadNetCurbPaint& P : Net->CurbPaints)
+				{
+					if (!P.Id.IsValid()) { continue; }
+					const bool bSel = (SelPlacedKind == ERoadNetPlacedKind::CurbPaint && SelPlacedId == P.Id);
+					PDI->SetHitProxy(new HRoadNetPlacedProxy(ERoadNetPlacedKind::CurbPaint, P.Id));
+					PDI->DrawPoint(P.World + Lift, bSel ? FColor(255, 220, 40) : FColor(180, 180, 40), bSel ? 18.f : 10.f, SDPG_Foreground);
+					PDI->SetHitProxy(nullptr);
 				}
 			}
 
@@ -2568,7 +2687,8 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 
 	// Anchor dots so placed clicks stay visible over the ghost.
 	const ERoadNetDrawTool ToolNow = ActiveTool();
-	const bool bGesture = (ToolNow == ERoadNetDrawTool::Crosswalk || ToolNow == ERoadNetDrawTool::Island);
+	const bool bGesture = (ToolNow == ERoadNetDrawTool::Crosswalk || ToolNow == ERoadNetDrawTool::Island
+		|| ToolNow == ERoadNetDrawTool::BikeCrossing);
 	if (bGesture)
 	{
 		TArray<FVector> G = DraftPoints;
@@ -2792,6 +2912,13 @@ void FEdModeRoadNet::DrawHUD(FEditorViewportClient* ViewportClient, FViewport* V
 				GEngine->GetSmallFont(), FLinearColor(0.5f, 1.f, 0.8f));
 			Y += 16.f;
 		}
+		else if (Ti == (int32)ERoadNetDrawTool::BikeCrossing)
+		{
+			Canvas->DrawShadowedString(12.f, Y,
+				TEXT("Click 2+ points along the cycleway  ·  finish to paint elephant's footprints down both edges"),
+				GEngine->GetSmallFont(), FLinearColor(0.5f, 1.f, 0.8f));
+			Y += 16.f;
+		}
 		else if (Ti == (int32)ERoadNetDrawTool::Markings)
 		{
 			// Two modes on one tool, chosen by the panel's Road Mark dropdown.
@@ -2882,6 +3009,7 @@ void FEdModeRoadNet::FinalizeDraft()
 {
 	if (ActiveTool() == ERoadNetDrawTool::Crosswalk) { FinalizeCrosswalk(); return; }
 	if (ActiveTool() == ERoadNetDrawTool::Island) { FinalizeIsland(); return; }
+	if (ActiveTool() == ERoadNetDrawTool::BikeCrossing) { FinalizeBikeCrossing(); return; }
 
 	if (DraftPoints.Num() < 2)
 	{
@@ -2948,6 +3076,13 @@ void FEdModeRoadNet::FinalizeDraft()
 	L.SidewalkWidth    = FMath::Max(50.f, Actor->DraftSidewalkWidthCm);
 
 	const int32 NewRoad = Net->AddRoad(R);
+	if (Shape == ERoadNetDrawShape::Roundabout && NewRoad != INDEX_NONE && DraftPoints.Num() >= 2)
+	{
+		const FVector2D C(DraftPoints[0].X, DraftPoints[0].Y);
+		Net->UpsertRoundaboutAt(C,
+			(float)FVector2D::Distance(C, FVector2D(DraftPoints[1].X, DraftPoints[1].Y)),
+			R.Lanes.HalfWidthCm() * 2.f);
+	}
 	// Windowed: a freshly drawn road only dirties its own footprint (its window
 	// picks up any roads it connects to at a junction). Falls back to full if the
 	// index is somehow invalid.
@@ -3005,6 +3140,49 @@ void FEdModeRoadNet::FinalizeCrosswalk()
 	}
 }
 
+void FEdModeRoadNet::FinalizeBikeCrossing()
+{
+	if (DraftPoints.Num() < 2)
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+				TEXT("RoadNet: a cycle crossing needs 2+ points"));
+		}
+		DraftPoints.Reset();
+		return;
+	}
+
+	URoadNetwork* Net = GetNetwork();
+	if (!Net)
+	{
+		if (ARoadNetActor* Actor = GetOrSpawnNetActor()) { Net = Actor->GetNetwork(); }
+	}
+	if (!Net) { DraftPoints.Reset(); return; }
+
+	const float WidthCm = Net->BikeCrossingWidthCm;
+
+	const FScopedTransaction Transaction(LOCTEXT("RoadNetBikeCrossing", "Add RoadNet Cycle Crossing"));
+	ModifyForEdit();
+	const int32 Idx = Net->AddBikeCrossing(DraftPoints, WidthCm);
+	DraftPoints.Reset();
+	if (Idx == INDEX_NONE)
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+				TEXT("RoadNet: that path is too short to paint a cycle crossing"));
+		}
+		return;
+	}
+	Net->Rebuild();
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+			FString::Printf(TEXT("RoadNet: cycle crossing %d (%.0f cm wide)"), Idx, WidthCm));
+	}
+}
+
 void FEdModeRoadNet::FinalizeIsland()
 {
 	if (DraftPoints.Num() < 3)
@@ -3046,6 +3224,71 @@ void FEdModeRoadNet::FinalizeIsland()
 	}
 }
 
+bool FEdModeRoadNet::MergeSelectedRoads(FString& OutMsg)
+{
+	URoadNetwork* Net = GetNetwork();
+	if (!Net)
+	{
+		if (ARoadNetActor* Actor = GetOrSpawnNetActor()) { Net = Actor->GetNetwork(); }
+	}
+	if (!Net)
+	{
+		OutMsg = TEXT("No RoadNet network in the level — import or draw a road first.");
+		return false;
+	}
+
+	TArray<int32> RoadIdx;
+	GetSelectedRoadsForPanel(RoadIdx);
+
+	if (RoadIdx.Num() < 2)
+	{
+		OutMsg = TEXT("Select control points on 2+ roads (marquee / Shift+click), then merge.");
+		return false;
+	}
+
+	const FScopedTransaction Transaction(LOCTEXT("RoadNetMergeRoads", "Merge RoadNet Roads"));
+	ModifyForEdit();
+	const bool bOk = Net->MergeRoads(RoadIdx);
+	if (bOk) { Net->Rebuild(); }
+	ClearSelection();
+	OutMsg = bOk
+		? FString::Printf(TEXT("RoadNet: merged %d roads into one multi-lane road"), RoadIdx.Num())
+		: TEXT("RoadNet: merge failed (need 2+ valid roads)");
+	return bOk;
+}
+
+bool FEdModeRoadNet::CleanSelectedRoundabout(FString& OutMsg)
+{
+	URoadNetwork* Net = GetNetwork();
+	if (!Net)
+	{
+		if (ARoadNetActor* Actor = GetOrSpawnNetActor()) { Net = Actor->GetNetwork(); }
+	}
+	if (!Net)
+	{
+		OutMsg = TEXT("No RoadNet network in the level — import or draw a road first.");
+		return false;
+	}
+
+	TArray<int32> RoadIdx;
+	GetSelectedRoadsForPanel(RoadIdx);
+	if (RoadIdx.Num() < 1)
+	{
+		OutMsg = TEXT("Select the roundabout's roads (or their points), then Clean Roundabouts.");
+		return false;
+	}
+
+	const FScopedTransaction Transaction(LOCTEXT("RoadNetCleanRoundabout", "Clean RoadNet Roundabout"));
+	ModifyForEdit();
+	const bool bOk = Net->CleanRoundabout(RoadIdx);
+	if (bOk) { Net->Rebuild(); }
+	ClearSelection();
+	OutMsg = bOk
+		? FString::Printf(TEXT("RoadNet: cleaned roundabout from %d road(s)"), RoadIdx.Num())
+		: TEXT("RoadNet: clean roundabout failed (need 3+ non-collinear points)");
+	return bOk;
+}
+
 bool FEdModeRoadNet::AddParkingBayToActiveSelection(uint8 LayoutInt, FString& OutMsg)
 {
 	URoadNetwork* Net = GetNetwork();
@@ -3066,7 +3309,7 @@ bool FEdModeRoadNet::AddParkingBayToActiveSelection(uint8 LayoutInt, FString& Ou
 	}
 	if (SelRoad == INDEX_NONE || SelEdgeKnot == INDEX_NONE)
 	{
-		OutMsg = TEXT("Select an Edge-tool point first — the bay is centred on that point, left and right.");
+		OutMsg = TEXT("Select an Edge-tool point first — the bay goes on that point's kerb, centred on it.");
 		return false;
 	}
 
@@ -3089,13 +3332,73 @@ bool FEdModeRoadNet::AddParkingBayToActiveSelection(uint8 LayoutInt, FString& Ou
 	// Validate first, THEN open the transaction so Ctrl+Z only undoes a real add.
 	const FScopedTransaction Transaction(LOCTEXT("RoadNetParkingBayPanel", "Add RoadNet Parking Bay"));
 	ModifyForEdit();
-	// One bay on each kerb, both centred on the selected edge point.
-	Net->AddStandardParkingBay(SelRoad, ERoadNetSide::Left,  Layout, CenterArc);
-	Net->AddStandardParkingBay(SelRoad, ERoadNetSide::Right, Layout, CenterArc);
+	// One bay, on the kerb the selected edge point belongs to. It used to add one
+	// on each kerb, which put a bay on a side the user never picked.
+	const ERoadNetSide Side = bSelEdgeRight ? ERoadNetSide::Right : ERoadNetSide::Left;
+	const TCHAR* SideName = bSelEdgeRight ? TEXT("right") : TEXT("left");
+	if (Net->AddStandardParkingBay(SelRoad, Side, Layout, CenterArc) == INDEX_NONE)
+	{
+		OutMsg = FString::Printf(
+			TEXT("Road %d is too short for a %s bay that clears its junctions — shorten the bay length "
+			     "or the junction setback in Assets|Parking."), SelRoad, LayoutName);
+		return false;
+	}
 	{ const int32 M = SelRoad; Net->Rebuild(MakeArrayView(&M, 1)); }   // windowed
 
-	OutMsg = FString::Printf(TEXT("Added %s parking bays left+right on road %d at arc %.0f cm."),
-		LayoutName, SelRoad, CenterArc);
+	OutMsg = FString::Printf(TEXT("Added a %s parking bay on the %s of road %d at arc %.0f cm."),
+		LayoutName, SideName, SelRoad, CenterArc);
+	return true;
+}
+
+void FEdModeRoadNet::GetSelectedRoadsForPanel(TArray<int32>& OutRoads) const
+{
+	OutRoads.Reset();
+	// A point marquee sets SelPoints and mirrors its primary into SelRoad, so
+	// walking SelPoints first and then adding SelRoad covers both selection
+	// shapes without double-counting.
+	for (const FIntPoint& P : SelPoints) { OutRoads.AddUnique(P.X); }
+	if (SelRoad != INDEX_NONE) { OutRoads.AddUnique(SelRoad); }
+}
+
+bool FEdModeRoadNet::SetZoneGraphOnActiveSelection(bool bOn, FString& OutMsg)
+{
+	URoadNetwork* Net = GetNetwork();
+	if (!Net)
+	{
+		if (ARoadNetActor* Actor = GetOrSpawnNetActor()) { Net = Actor->GetNetwork(); }
+	}
+	if (!Net)
+	{
+		OutMsg = TEXT("No RoadNet network in the level — import or draw a road first.");
+		return false;
+	}
+
+	TArray<int32> Sel;
+	GetSelectedRoadsForPanel(Sel);
+	if (Sel.Num() == 0)
+	{
+		OutMsg = TEXT("Select one or more road segments first (Points tool: click a road, or "
+					  "marquee across several).");
+		return false;
+	}
+
+	// Validate first, THEN open the transaction, so Ctrl+Z only undoes a real change.
+	const FScopedTransaction Transaction(LOCTEXT("RoadNetZoneGraphSel", "Set RoadNet ZoneGraph"));
+	ModifyForEdit();
+	const int32 Changed = Net->SetZoneGraphOnRoads(Sel, bOn);
+	if (Changed == 0)
+	{
+		OutMsg = FString::Printf(TEXT("All %d selected segment(s) already had ZoneGraph %s."),
+			Sel.Num(), bOn ? TEXT("on") : TEXT("off"));
+		return false;
+	}
+	Net->Rebuild(Sel);   // windowed: only the flagged roads republish their runs
+
+	OutMsg = FString::Printf(TEXT("ZoneGraph %s on %d of %d selected segment(s)%s."),
+		bOn ? TEXT("added to") : TEXT("removed from"), Changed, Sel.Num(),
+		(bOn && !Net->bBuildZoneGraph)
+			? TEXT(" — but the master gate 'Build Zone Graph' is OFF, so no shapes are built")
+			: TEXT(""));
 	return true;
 }
 
@@ -3120,6 +3423,39 @@ bool RoadNetEditorBridge::AddParkingBayToActiveSelection(uint8 LayoutInt, FStrin
 		return false;
 	}
 	return Mode->AddParkingBayToActiveSelection(LayoutInt, OutMsg);
+}
+
+bool RoadNetEditorBridge::MergeSelectedRoads(FString& OutMsg)
+{
+	FEdModeRoadNet* Mode = ActiveRoadNetMode();
+	if (!Mode)
+	{
+		OutMsg = TEXT("Activate the RoadNet edit mode and select 2+ roads first.");
+		return false;
+	}
+	return Mode->MergeSelectedRoads(OutMsg);
+}
+
+bool RoadNetEditorBridge::CleanSelectedRoundabout(FString& OutMsg)
+{
+	FEdModeRoadNet* Mode = ActiveRoadNetMode();
+	if (!Mode)
+	{
+		OutMsg = TEXT("Activate the RoadNet edit mode and select the roundabout roads first.");
+		return false;
+	}
+	return Mode->CleanSelectedRoundabout(OutMsg);
+}
+
+bool RoadNetEditorBridge::SetZoneGraphOnActiveSelection(bool bOn, FString& OutMsg)
+{
+	FEdModeRoadNet* Mode = ActiveRoadNetMode();
+	if (!Mode)
+	{
+		OutMsg = TEXT("Activate the RoadNet edit mode and select road segments first.");
+		return false;
+	}
+	return Mode->SetZoneGraphOnActiveSelection(bOn, OutMsg);
 }
 
 URoadNetwork* RoadNetEditorBridge::GetActiveNetwork()

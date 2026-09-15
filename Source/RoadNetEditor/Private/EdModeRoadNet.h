@@ -72,6 +72,16 @@ struct HRoadNetEdgeProxy : public HHitProxy
 	int32 KnotIndex;
 };
 
+struct HRoadNetPlacedProxy : public HHitProxy
+{
+	DECLARE_HIT_PROXY();
+	HRoadNetPlacedProxy(ERoadNetPlacedKind InKind, FGuid InId)
+		: HHitProxy(HPP_UI), Kind(InKind), Id(InId) {}
+	virtual EMouseCursor::Type GetMouseCursor() override { return EMouseCursor::Crosshairs; }
+	ERoadNetPlacedKind Kind = ERoadNetPlacedKind::None;
+	FGuid Id;
+};
+
 class FEdModeRoadNet : public FEdMode
 {
 public:
@@ -108,6 +118,25 @@ public:
 	// lane's side (defaults to the right side when no lane is picked). Returns
 	// true on success; OutMsg carries a status / error message for the panel.
 	bool AddParkingBayToActiveSelection(uint8 LayoutInt, FString& OutMsg);
+
+	// Panel / hotkey 'U': merge the roads owning the current selection into one
+	// multi-lane road. Returns true on success; OutMsg is a toast string.
+	bool MergeSelectedRoads(FString& OutMsg);
+
+	// Panel / Clean Roundabouts: fit a circle to the selected roads, replace
+	// them with one ring, retrim approaches. Returns true on success.
+	bool CleanSelectedRoundabout(FString& OutMsg);
+
+	// Panel bridge: turn FRoadDef::bZoneGraph on/off for every road in the
+	// current selection (a whole-road pick, or the distinct roads a marquee of
+	// points touched). Returns true when something changed; OutMsg carries a
+	// status / error message for the panel.
+	bool SetZoneGraphOnActiveSelection(bool bOn, FString& OutMsg);
+
+	// Every road the selection covers, de-duplicated. Empty when nothing is
+	// picked. GetSelectedRoadForPanel only reports the primary, which would make
+	// a marquee across several segments act on one of them.
+	void GetSelectedRoadsForPanel(TArray<int32>& OutRoads) const;
 
 	// ---- cross-section panel surface (see RoadNetEditorBridge) ------------
 	// The panel polls these every tick rather than being pushed to, so it can
@@ -146,6 +175,7 @@ private:
 	bool PointsAreEditable(const FRoadDef& Rd) const;
 	void FinalizeCrosswalk();
 	void FinalizeIsland();
+	void FinalizeBikeCrossing();
 	// Snap Query to the nearest existing road vertex / draft point within radius.
 	// Returns true and writes OutSnap when a candidate is found.
 	bool FindSnap(const FVector& Query, FVector& OutSnap) const;
@@ -235,6 +265,8 @@ private:
 	// picked. bSelEdgeRight chooses the +offset (true) or −offset (false) side.
 	int32 SelEdgeKnot = INDEX_NONE;
 	bool  bSelEdgeRight = true;
+	ERoadNetPlacedKind SelPlacedKind = ERoadNetPlacedKind::None;
+	FGuid SelPlacedId;
 	bool bDirtyDuringDrag = false;
 
 	// Multi-point selection: (RoadIndex, PointIndex) pairs. Move/delete act on all.

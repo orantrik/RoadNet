@@ -1,9 +1,10 @@
-// RoadNetSurface.cpp — Clipper2 boolean-union junction surface (§10.9).
+﻿// RoadNetSurface.cpp — Clipper2 boolean-union junction surface (§10.9).
 #include "RoadNetSurface.h"
 #include "RoadNetwork.h"
 #include "RoadNetMath.h"
 #include "RoadNetLog.h"
 #include "Polygon2.h"
+#include "CompGeom/ConvexHull2.h"
 #include "Curve/PolygonIntersectionUtils.h"
 #include "Curve/PolygonOffsetUtils.h"
 
@@ -46,6 +47,33 @@ namespace RoadNetSurface
 		FPolygon2d Poly(Ring);
 		if (Poly.IsClockwise()) { Poly.Reverse(); }
 		Out.SetOuter(Poly);
+	}
+
+	bool MakeHull(const TArray<FVector2D>& Pts, FGeneralPolygon2d& Out)
+	{
+		if (Pts.Num() < 3) { return false; }
+
+		FConvexHull2d Hull;
+		if (!Hull.Solve(Pts.Num(),
+				[&Pts](int32 i) { return FVector2d(Pts[i].X, Pts[i].Y); },
+				[](int32) { return true; }))
+		{
+			return false;   // collinear or degenerate
+		}
+
+		const TArray<int32>& Idx = Hull.GetPolygonIndices();
+		if (Idx.Num() < 3) { return false; }
+
+		TArray<FVector2d> Ring;
+		Ring.Reserve(Idx.Num());
+		for (int32 i : Idx) { Ring.Emplace(Pts[i].X, Pts[i].Y); }
+
+		FPolygon2d Poly(Ring);
+		if (Poly.VertexCount() < 3 || FMath::Abs(Poly.SignedArea()) < 1.0) { return false; }
+		if (Poly.IsClockwise()) { Poly.Reverse(); }
+
+		Out.SetOuter(Poly);
+		return true;
 	}
 
 	// Morphological close (dilate +e then erode -e): rounds concave corners and
@@ -115,7 +143,7 @@ namespace RoadNetSurface
 		if (ExtraPolys) { Outlines.Append(*ExtraPolys); }
 		if (Outlines.Num() == 0) { return true; }
 
-		// Boolean union of all arm outlines → filled, seamless junctions (§10.9).
+		// Boolean union of all arm outlines -> filled, seamless junctions (§10.9).
 		if (!PolygonsUnion(Outlines, OutMerged, /*bCopyInputOnFailure*/true))
 		{
 			UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet] Surface union failed; using unmerged outlines."));
@@ -134,7 +162,7 @@ namespace RoadNetSurface
 		// ---- per-junction smoothing -----------------------------------------
 		// Weld the whole surface with only a hairline epsilon (so abutting arms
 		// still connect), then round EACH junction locally with its own radius.
-		// A junction's rounding is computed on the local surface patch (surface ∩
+		// A junction's rounding is computed on the local surface patch (surface âˆ©
 		// disc) and unioned back, so junctions carry independent smoothing while
 		// straight road runs are untouched.
 		// The weld is NOT a rounding radius: it exists only to close the hairline
@@ -199,7 +227,7 @@ namespace RoadNetSurface
 			}
 			else
 			{
-				OutMerged = MoveTemp(All); // union failed → keep base + patches
+				OutMerged = MoveTemp(All); // union failed â†’ keep base + patches
 			}
 		}
 		return true;

@@ -98,6 +98,36 @@ struct ROADNET_API FRoadNetJunctionConfig
 	float SmoothingCm = -1.f;
 };
 
+// Persistent per-roundabout override, keyed by world location the same way as
+// FRoadNetJunctionConfig. Matched by proximity (within max(kJunctionMatchCm,
+// InscribedRadiusCm)) so a rebuild that re-smooths the ring does not orphan it.
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetRoundaboutConfig
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FVector2D Location = FVector2D::ZeroVector;
+
+	// Centreline radius of the circulating road (cm).
+	UPROPERTY()
+	float InscribedRadiusCm = 1500.f;
+
+	// Circulating carriageway width (cm). Applied to the ring road on rebuild.
+	UPROPERTY()
+	float CirculatoryWidthCm = 700.f;
+
+	// Truck apron inside the inner kerb (cm). 0 = island meets the kerb.
+	UPROPERTY()
+	float ApronWidthCm = 200.f;
+
+	UPROPERTY()
+	bool bSplitterIslands = true;
+
+	UPROPERTY()
+	bool EntryGiveWay = true;
+};
+
 // Active RoadNet Draw sub-tool. Exactly ONE is active at a time, so a click /
 // hotkey has a single unambiguous meaning (no Alt/Ctrl guessing). Driven by the
 // roadnet.DrawTool CVar, toggled from the OSM Roads panel segmented control and
@@ -114,7 +144,8 @@ enum class ERoadNetDrawTool : uint8
 	Markings   = 5,  // lane-mark pick + turn-role cycle
 	Crosswalk  = 6,  // draw a spline gesture; projects to a centreline zebra
 	Island     = 7,  // draw a closed loop for a placed pedestrian island
-	CurbBrush  = 8   // paint existing kerb stones (no road-mesh rebuild)
+	CurbBrush  = 8,  // paint existing kerb stones (no road-mesh rebuild)
+	BikeCrossing = 9 // draw a path; paints an elephant's-footprint cycle crossing
 };
 
 // Shape drawn by the Draw sub-tool. Freehand is the classic click-per-point
@@ -144,7 +175,8 @@ enum class ERoadNetLaneType : uint8
 	Shoulder,    // shoulder
 	CenterTurn,  // center two-way turn lane
 	Median,      // median (non-drivable divider)
-	Bicycle      // dedicated bicycle path
+	Bicycle,     // dedicated bicycle path
+	Sidewalk     // footway outside the carriageway
 };
 
 // Authored turn intent on one lane. Auto = paint whatever the rebuild's
@@ -291,6 +323,8 @@ struct ROADNET_API FRoadNetLane
 		    || Type == ERoadNetLaneType::CenterTurn;
 	}
 
+	bool bOutboard() const { return Type == ERoadNetLaneType::Sidewalk; }
+
 	// Does traffic on this lane run start→end along the reference line?
 	//
 	// bDriveOnLeft only reaches the FromSide fallback: an explicit Direction
@@ -395,8 +429,53 @@ struct ROADNET_API FRoadNetLaneSpec
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Median")
 	ERoadNetMedianEdge MedianEdge = ERoadNetMedianEdge::Plantable;
 
-	// Half the median gap (cm), or 0 when there is no median.
-	float MedianHalfCm() const { return bMedian ? 0.5f * FMath::Max(30.f, MedianWidth) : 0.f; }
+	// Half the median gap (cm), or 0 when there is no median. Prefers a Median
+	// lane in the stack; falls back to the legacy bMedian/MedianWidth flags.
+	float MedianHalfCm() const
+	{
+		for (const FRoadNetLane& Ln : DetailedLanes)
+		{
+			if (Ln.Type == ERoadNetLaneType::Median)
+			{
+				return 0.5f * FMath::Max(30.f, Ln.Width);
+			}
+		}
+		return bMedian ? 0.5f * FMath::Max(30.f, MedianWidth) : 0.f;
+	}
+
+	// Stack lanes left→right and pin the carriageway (everything that is not a
+	// sidewalk) on the reference line. Median and sidewalk are slots in this
+	// stack, not a separate gap.
+	static void RelayoutStack(TArray<FRoadNetLane>& Lanes)
+	{
+		auto WidthOf = [](const FRoadNetLane& Ln) { return (double)FMath::Max(1.f, Ln.Width); };
+		double Cursor = 0.0;
+		for (FRoadNetLane& Ln : Lanes)
+		{
+			const double W = WidthOf(Ln);
+			Ln.CenterOffset = Cursor + 0.5 * W;
+			Cursor += W;
+		}
+		double Lo = TNumericLimits<double>::Max(), Hi = TNumericLimits<double>::Lowest();
+		bool bAny = false;
+		for (const FRoadNetLane& Ln : Lanes)
+		{
+			if (Ln.bOutboard()) { continue; }
+			bAny = true;
+			Lo = FMath::Min(Lo, Ln.CenterOffset - 0.5 * WidthOf(Ln));
+			Hi = FMath::Max(Hi, Ln.CenterOffset + 0.5 * WidthOf(Ln));
+		}
+		if (!bAny) { Lo = 0.0; Hi = Cursor; }
+		const double Mid = 0.5 * (Lo + Hi);
+		for (FRoadNetLane& Ln : Lanes)
+		{
+			Ln.CenterOffset -= Mid;
+			Ln.Side = (Ln.Type == ERoadNetLaneType::Median) ? ERoadNetSide::Center
+				: (Ln.CenterOffset < 0.0) ? ERoadNetSide::Left : ERoadNetSide::Right;
+		}
+	}
+
+	void RelayoutDetailed() { RelayoutStack(DetailedLanes); }
 
 	// Authored per-lane entities (RoadBLD-style). When non-empty these OVERRIDE
 	// the count model above; when empty, ResolveLanes() synthesizes lanes from
@@ -415,6 +494,7 @@ struct ROADNET_API FRoadNetLaneSpec
 			double Lo = 0.0, Hi = 0.0;
 			for (const FRoadNetLane& L : DetailedLanes)
 			{
+				if (L.bOutboard()) { continue; }
 				Lo = FMath::Min(Lo, L.CenterOffset - 0.5 * L.Width);
 				Hi = FMath::Max(Hi, L.CenterOffset + 0.5 * L.Width);
 			}
@@ -469,19 +549,10 @@ struct ROADNET_API FRoadNetLaneSpec
 		};
 
 		TArray<FRoadNetLane> Out;
-		Out.Reserve(Fwd + Bwd);
+		Out.Reserve(Fwd + Bwd + (bMedian ? 1 : 0) + (bSidewalkLeft ? 1 : 0) + (bSidewalkRight ? 1 : 0));
 		int32 GlobalIdx = 0;
 
-		// A central median opens a gap of MedianHalf on each side of the
-		// reference line, so the innermost lanes start beyond the median.
-		const double MedianHalf = (double)MedianHalfCm();
-
-		// Each direction stacks from the centerline (or median edge) outward on
-		// its own side. Widths stay indexed forward-lanes-first either way, so a
-		// road's LaneWidths array does not have to be rewritten to change side.
-		double FwdEdge = MedianHalf, BwdEdge = MedianHalf;
-
-		auto Emit = [&](int32 Count, double& Edge, bool bLeftSide, ERoadNetLaneDirection Dir)
+		auto Emit = [&](int32 Count, bool bLeftSide, ERoadNetLaneDirection Dir)
 		{
 			for (int32 i = 0; i < Count; ++i)
 			{
@@ -492,14 +563,36 @@ struct ROADNET_API FRoadNetLaneSpec
 				L.Side = bLeftSide ? ERoadNetSide::Left : ERoadNetSide::Right;
 				L.Direction = Dir;
 				L.Width = LW;
-				L.CenterOffset = (bLeftSide ? -1.0 : 1.0) * (Edge + 0.5 * LW);
-				Edge += LW;
 				Out.Add(L);
 			}
 		};
 
-		Emit(Fwd, FwdEdge, /*bLeftSide*/ bDriveOnLeft,  ERoadNetLaneDirection::Forward);
-		Emit(Bwd, BwdEdge, /*bLeftSide*/ !bDriveOnLeft, ERoadNetLaneDirection::Backward);
+		auto MakeSlot = [](ERoadNetLaneType Type, float Width) -> FRoadNetLane
+		{
+			FRoadNetLane L;
+			L.LaneId = FGuid::NewGuid();
+			L.Type = Type;
+			L.Direction = ERoadNetLaneDirection::None;
+			L.Width = FMath::Max(30.f, Width);
+			L.Side = (Type == ERoadNetLaneType::Median) ? ERoadNetSide::Center : ERoadNetSide::Right;
+			return L;
+		};
+
+		if (bSidewalkLeft) { Out.Add(MakeSlot(ERoadNetLaneType::Sidewalk, SidewalkWidth)); }
+		if (bDriveOnLeft)
+		{
+			Emit(Fwd, /*bLeftSide*/ true,  ERoadNetLaneDirection::Forward);
+			if (bMedian) { Out.Add(MakeSlot(ERoadNetLaneType::Median, MedianWidth)); }
+			Emit(Bwd, /*bLeftSide*/ false, ERoadNetLaneDirection::Backward);
+		}
+		else
+		{
+			Emit(Bwd, /*bLeftSide*/ true,  ERoadNetLaneDirection::Backward);
+			if (bMedian) { Out.Add(MakeSlot(ERoadNetLaneType::Median, MedianWidth)); }
+			Emit(Fwd, /*bLeftSide*/ false, ERoadNetLaneDirection::Forward);
+		}
+		if (bSidewalkRight) { Out.Add(MakeSlot(ERoadNetLaneType::Sidewalk, SidewalkWidth)); }
+		RelayoutStack(Out);
 		return Out;
 	}
 };
@@ -625,12 +718,30 @@ struct ROADNET_API FRoadNetIslandPath
 	float WidthCm = 250.f;
 };
 
-// Authored pedestrian island (closed ring in world XY cm). Meshed each rebuild
-// (extrude + kerb ring, or a seated static mesh when IslandMesh is set).
+UENUM(BlueprintType)
+enum class ERoadNetPlacedKind : uint8
+{
+	None,
+	Mark,
+	Island,
+	BikeCrossing,
+	CurbPaint
+};
+
+// Authored pedestrian island (closed ring in world XY cm). Rebuilt every pass as
+// a real body — the ring folds into the median layer, so it gets that layer's
+// grass surface and the kerb wrap that already runs around every median.
+//
+// There is no mesh override: an island is the shape that was drawn. A prefab
+// seated at the ring's centroid is a different shape, in a different place, and
+// leaves the drawn ring as a bare outline around it.
 USTRUCT(BlueprintType)
 struct ROADNET_API FRoadNetIsland
 {
 	GENERATED_BODY()
+
+	UPROPERTY()
+	FGuid Id;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Islands")
 	TArray<FVector> Ring;
@@ -641,12 +752,30 @@ struct ROADNET_API FRoadNetIsland
 
 	UPROPERTY()
 	TArray<FRoadNetIslandPath> Paths;
+};
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Islands")
-	TObjectPtr<class UStaticMesh> MeshOverride = nullptr;
+// Authored cycle crossing (an "elephant's footprints" crossing): a drawn path in
+// world XY cm, painted each rebuild as two rows of square blocks flanking the
+// path, optionally with a bicycle stencil at its centre.
+//
+// Deliberately NOT an ERoadNetMarkKind. A mark kind is one stamp placed at one
+// point on one lane; a crossing is a run whose length the user draws, and whose
+// blocks have to be laid out along that run.
+USTRUCT(BlueprintType)
+struct ROADNET_API FRoadNetBikeCrossing
+{
+	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Islands")
-	TObjectPtr<class UMaterialInterface> MaterialOverride = nullptr;
+	UPROPERTY()
+	FGuid Id;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Markings")
+	TArray<FVector> Path;
+
+	// Distance between the two rows of blocks (the cycleway's width).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Markings",
+		meta=(ClampMin="100.0", UIMin="150.0", UIMax="500.0"))
+	float WidthCm = 200.f;
 };
 
 // Which arrow a road mark paints. The order IS the mesh/material slot order on
@@ -672,16 +801,57 @@ struct ROADNET_API FRoadNetPlacedMark
 {
 	GENERATED_BODY()
 
-	// World cm, on the road surface. The commit lifts it clear of the paint tier.
+	UPROPERTY()
+	FGuid Id;
+
+	// World cm, where the mark was clicked. Kept as the fallback for a mark that
+	// resolves to no road, and as the migration source for saves written before
+	// the road binding below existed.
 	UPROPERTY()
 	FVector Location = FVector::ZeroVector;
 
-	// Direction of TRAVEL the arrow points along, degrees.
+	// Direction of TRAVEL the arrow points along, degrees. Fallback only once the
+	// mark is bound — a bound mark yaws from LaneYawDeg + the road's tangent.
 	UPROPERTY()
 	float YawDeg = 0.f;
 
 	UPROPERTY()
 	ERoadNetMarkKind Kind = ERoadNetMarkKind::Through;
+
+	// ---- road binding (the FRoadNetCurbPaint pattern) ----------------------
+	// A world point cannot follow the road it was painted on. Opening a median
+	// restacks every lane outward, and a world-anchored arrow stays put — which
+	// leaves it under the new median instead of in its lane. Binding the mark to
+	// road + arc + LANE means the restack moves it for free, and the same is true
+	// of any other edit that reshapes the road.
+	//
+	// Road == INDEX_NONE means "not resolved yet" (an old save) or "resolved to
+	// nothing" (clicked off-road); both fall back to Location.
+	UPROPERTY()
+	int32 Road = INDEX_NONE;
+
+	// Arc length along that road's reference line (cm).
+	UPROPERTY()
+	float DistanceCm = 0.f;
+
+	// The lane, left→right, the mark sits in, and its offset from that lane's
+	// centre. Indexed rather than keyed by FGuid because a count-model road
+	// synthesizes new LaneIds on every ResolveLanes, so a GUID would only be
+	// stable on authored roads. Index survives a median change (which never adds
+	// or removes lanes); inserting a lane shifts the mark by one, which is
+	// visible and fixable, unlike an arrow silently left behind.
+	UPROPERTY()
+	int32 LaneIndex = INDEX_NONE;
+
+	UPROPERTY()
+	float LaneOffsetCm = 0.f;
+
+	// Travel yaw relative to the road's tangent at DistanceCm (deg), so a mark
+	// re-yaws when the road is reshaped instead of pointing at the old heading.
+	UPROPERTY()
+	float LaneYawDeg = 0.f;
+
+	bool IsBoundToRoad() const { return Road != INDEX_NONE; }
 };
 
 // Persistent curb-brush sample. Keyed by road + side + arc distance so it
@@ -690,6 +860,9 @@ USTRUCT(BlueprintType)
 struct ROADNET_API FRoadNetCurbPaint
 {
 	GENERATED_BODY()
+
+	UPROPERTY()
+	FGuid Id;
 
 	UPROPERTY()
 	int32 Road = INDEX_NONE;
@@ -897,7 +1070,53 @@ struct ROADNET_API FRoadDef
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet")
 	FString Name;
 
+	// Emit a ZoneGraph spline for this segment (traffic AI groundwork).
+	//
+	// Opt-in PER ROAD, and stored on the road rather than derived from the
+	// viewport selection: the selection is transient and long gone by the next
+	// rebuild, so a selection-driven design would emit shapes once and lose them.
+	// URoadNetwork::bBuildZoneGraph is the master gate over the top of this.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	bool bZoneGraph = false;
+
 	bool IsValid() const { return Ref.Num() >= 2; }
+};
+
+// One road's ZoneGraph spline, published by the rebuild for an external builder.
+//
+// RoadNet does NOT depend on the ZoneGraph plugin (its independence mandate
+// forbids the coupling), so the rebuild — the only place that knows where the
+// junctions are — publishes the trimmed centreline and the lane facts, and
+// OSMRoadCore turns them into AZoneShape actors. Serialized, so a project that
+// opens without rebuilding still has its shapes.
+USTRUCT(BlueprintType)
+struct FRoadNetZoneRun
+{
+	GENERATED_BODY()
+
+	// Stable road id, so a run survives the index churn of a split or a merge.
+	UPROPERTY(BlueprintReadOnly, Category="RoadNet|Graph")
+	FGuid RoadId;
+
+	// Centreline in world space, already trimmed short of the junction at any
+	// end that has one. Empty when the road is entirely inside its junctions.
+	UPROPERTY(BlueprintReadOnly, Category="RoadNet|Graph")
+	TArray<FVector> Points;
+
+	// Drivable lanes in each direction, and the widest lane width (cm), which is
+	// all a ZoneGraph lane profile can express.
+	UPROPERTY(BlueprintReadOnly, Category="RoadNet|Graph")
+	int32 LanesForward = 1;
+
+	UPROPERTY(BlueprintReadOnly, Category="RoadNet|Graph")
+	int32 LanesBackward = 1;
+
+	UPROPERTY(BlueprintReadOnly, Category="RoadNet|Graph")
+	float LaneWidthCm = 350.f;
+
+	// A bicycle lane on either side, which is a separate profile in ZoneGraph.
+	UPROPERTY(BlueprintReadOnly, Category="RoadNet|Graph")
+	bool bHasBikeLane = false;
 };
 
 // ---------------------------------------------------------------------------

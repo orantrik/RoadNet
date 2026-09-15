@@ -192,6 +192,79 @@ void URoadNetwork::CommitFurniture(FRoadNetRebuildContext& Ctx)
 	UWorld* World = WorldPtr.Get();
 	if (!World) { return; }
 
+	// Parked cars ride the same tile HISMs as the furniture, but they are not
+	// furniture and must not be gated by bBuildFurniture — a bay the user asked for
+	// should be occupied whether or not benches are switched on.
+	if (Ctx.ParkedCars.Num() > 0)
+	{
+		TMap<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>> CarBatches;
+		TArray<UStaticMesh*> CarMeshes;
+		CarMeshes.Reserve(ParkingCarMeshes.Num());
+		for (const TSoftObjectPtr<UStaticMesh>& M : ParkingCarMeshes)
+		{
+			CarMeshes.Add(M.IsNull() ? nullptr : M.LoadSynchronous());
+		}
+		for (const TPair<int32, FTransform>& Car : Ctx.ParkedCars)
+		{
+			if (!CarMeshes.IsValidIndex(Car.Key) || !CarMeshes[Car.Key]) { continue; }
+			const FIntPoint Coord = TopoKeyOf(Car.Value.GetLocation(), Ctx);
+			if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
+			ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
+			if (!Tile) { continue; }
+			const FName Key(*FString::Printf(TEXT("ParkedCar_%d"), Car.Key));
+			if (UHierarchicalInstancedStaticMeshComponent* H = Tile->GetOrCreateHISM(Key, CarMeshes[Car.Key]))
+			{
+				// Set dressing only: a few hundred colliding cars parked along the
+				// kerb is an obstacle course for anything driving or walking past.
+				H->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				// A car standing in a bay must not have the bay's stall lines
+				// projected up its doors.
+				H->SetReceivesDecals(false);
+				CarBatches.FindOrAdd(H).Add(Car.Value);
+			}
+		}
+		int32 Cars = 0;
+		for (TPair<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>>& KV : CarBatches)
+		{
+			Cars += KV.Value.Num();
+			KV.Key->AddInstances(KV.Value, /*bShouldReturnIndices*/false, /*bWorldSpace*/true);
+		}
+		UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitFurniture: %d parked cars in %d HISMs."),
+			Cars, CarBatches.Num());
+	}
+
+	// Bicycle glyphs at the middle of each drawn cycle crossing. Same reasoning as
+	// the cars: authored content, not furniture, so not gated by bBuildFurniture.
+	if (Ctx.BikeStencils.Num() > 0)
+	{
+		if (UStaticMesh* Glyph = BicycleStencilMesh.LoadSynchronous())
+		{
+			UMaterialInterface* Mat = BicycleStencilMaterial.IsNull()
+				? MarkingWhiteMaterial.Get() : BicycleStencilMaterial.LoadSynchronous();
+			TMap<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>> Batches;
+			for (const TPair<FVector, float>& S : Ctx.BikeStencils)
+			{
+				const FIntPoint Coord = TopoKeyOf(S.Key, Ctx);
+				if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
+				ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
+				if (!Tile) { continue; }
+				if (UHierarchicalInstancedStaticMeshComponent* H =
+					Tile->GetOrCreateHISM(FName(TEXT("BikeStencil")), Glyph, Mat))
+				{
+					// Same tier as the rest of the paint (slab lift 12 + paint lift 1)
+					// so the glyph sits in the crossing, not above or under it.
+					constexpr double kStencilLiftCm = 13.0;
+					Batches.FindOrAdd(H).Add(FTransform(FRotator(0.f, S.Value, 0.f),
+						S.Key + FVector(0.0, 0.0, kStencilLiftCm)));
+				}
+			}
+			for (TPair<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>>& KV : Batches)
+			{
+				KV.Key->AddInstances(KV.Value, /*bShouldReturnIndices*/false, /*bWorldSpace*/true);
+			}
+		}
+	}
+
 	// (Tiles were cleared in PrepareTilesForCommit; nothing to do on empty input.)
 	if (!bBuildFurniture || Ctx.FurnitureBuckets.Num() == 0) { return; }
 

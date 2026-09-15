@@ -210,6 +210,12 @@ struct FRoadNetRebuildContext
 	// § street-furniture placements for this rebuild (one bucket per enabled
 	// FurnitureTypes entry). Committed as HISMs / spawned actors.
 	TArray<FRoadNetFurnitureBucket> FurnitureBuckets;
+	// § parked cars sitting in standard parking bays. Key = index into
+	// URoadNetwork::ParkingCarMeshes, Value = world transform of the stall.
+	// Committed as HISMs alongside the furniture.
+	TArray<TPair<int32, FTransform>> ParkedCars;
+	// § bicycle glyphs at the middle of each drawn cycle crossing (location, yawDeg).
+	TArray<TPair<FVector, float>> BikeStencils;
 	// Flattened unions (for logging/QA only).
 	TArray<UE::Geometry::FGeneralPolygon2d> SurfacePolys;
 	TArray<UE::Geometry::FGeneralPolygon2d> SidewalkPolys;
@@ -331,6 +337,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Materials")
 	TObjectPtr<UMaterialInterface> MarkingYellowMaterial;
 
+	// Draw every painted mark as a projected decal instead of a meshed ribbon.
+	// Decals conform to whatever they land on — a resurfaced or resculpted road
+	// keeps its paint glued down, where a ribbon meshed at a fixed lift can float
+	// or sink. Requires the two decal materials below; without them the meshed
+	// ribbons are used, because a marking layer with no material is invisible.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Materials")
+	bool bMarkingsAsDecals = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Materials",
+		meta = (EditCondition = "bMarkingsAsDecals"))
+	TSoftObjectPtr<UMaterialInterface> MarkingWhiteDecal;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Materials",
+		meta = (EditCondition = "bMarkingsAsDecals"))
+	TSoftObjectPtr<UMaterialInterface> MarkingYellowDecal;
+
 	// ---- sidewalk (§8.12) -------------------------------------------------
 	// Default sidewalk width (cm) used for newly-drawn roads and by the panel's
 	// "Apply Sidewalk Width" action (which also pushes it onto existing roads).
@@ -419,6 +441,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
 	bool bDriveOnLeft = false;
 
+	// Flip the whole network's handedness. Assigning bDriveOnLeft directly is NOT
+	// enough on a road that carries authored DetailedLanes: ResolveLanes returns
+	// those verbatim (it only mirrors the count model), so the stored per-lane
+	// Direction keeps the old country's traffic until it is rewritten here.
+	// Returns true when the value actually changed, so callers can skip a rebuild.
+	UFUNCTION(BlueprintCallable, Category = "RoadNet|Lanes")
+	bool SetDriveOnLeft(bool bNewDriveOnLeft);
+
 	// ---- lanes (§12.1) ----------------------------------------------------
 	// Render each resolved lane as its own ribbon strip (alternating shades)
 	// layered above the carriageway. Reflects lane add/remove + authored widths.
@@ -442,6 +472,32 @@ public:
 	// PCG / traffic. Disable to skip the graph stages on large imports.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
 	bool bBuildLaneGraph = true;
+
+	// MASTER GATE for the ZoneGraph export. Off publishes nothing regardless of
+	// the per-road FRoadDef::bZoneGraph flags, so the whole feature can be parked
+	// without clearing the per-road choices you made in the viewport.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Lanes")
+	bool bBuildZoneGraph = false;
+
+	// The ZoneGraph splines this network published on its last rebuild, one per
+	// road with bZoneGraph, trimmed short of its junctions. RoadNet does not
+	// depend on the ZoneGraph plugin; OSMRoadCore reads this and spawns the
+	// AZoneShape actors. See FRoadNetZoneRun.
+	UPROPERTY()
+	TArray<FRoadNetZoneRun> ZoneGraphRuns;
+
+	// Which ends of a road meet another road, by the same spatial endpoint weld
+	// BuildEndpointJoints uses. For callers that run OUTSIDE a rebuild, where the
+	// joint topology (FRoadNetRebuildContext::Joints) does not exist yet.
+	void GetJunctionEnds(int32 RoadIdx, bool& bOutAtStart, bool& bOutAtEnd) const;
+
+	// Set FRoadDef::bZoneGraph on a set of roads. Returns how many changed, so a
+	// caller can tell "already on" from "did something". Does NOT rebuild.
+	int32 SetZoneGraphOnRoads(TArrayView<const int32> RoadIndices, bool bOn);
+
+	// Refill ZoneGraphRuns for the roads in this commit window. Per-road, keyed on
+	// the road's stable id, so a windowed rebuild cannot drop the rest.
+	void PublishZoneGraphRuns(FRoadNetRebuildContext& Ctx);
 
 	// Channelize junctions to the Israeli standard (כרך 2): carry surplus
 	// through lanes out of the junction and taper them away past it (§5.2.4,
@@ -562,13 +618,33 @@ public:
 		meta = (ClampMin = "400.0", UIMin = "800.0", UIMax = "4000.0"))
 	float ArrowSetbackCm = 1800.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Islands")
-	TObjectPtr<UStaticMesh> IslandMesh;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Islands")
-	TObjectPtr<UMaterialInterface> IslandMaterial;
-
+	// (There is deliberately no IslandMesh slot. An island is the shape the user
+	// drew, built as kerb + grass on the median layer; a prefab dropped at the
+	// ring's centroid is a different shape in a different place.)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Islands")
 	TArray<FRoadNetIsland> PlacedIslands;
+
+	// Authored cycle crossings (elephant's footprints). Painted into the white
+	// marking bank each rebuild, so they reshape with the road like any paint.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TArray<FRoadNetBikeCrossing> BikeCrossings;
+
+	// Optional bicycle glyph stamped at each crossing's midpoint. Without it the
+	// crossing is just the two rows of blocks, which is already a legal marking.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TSoftObjectPtr<UStaticMesh> BicycleStencilMesh;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings")
+	TSoftObjectPtr<UMaterialInterface> BicycleStencilMaterial;
+
+	// Width of a newly drawn cycle crossing (the gap between the two block rows).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Markings",
+		meta = (ClampMin = "100.0", UIMin = "150.0", UIMax = "500.0"))
+	float BikeCrossingWidthCm = 200.f;
+
+	// Add a drawn cycle crossing. Returns its index in BikeCrossings, or
+	// INDEX_NONE when the path is too short to paint.
+	int32 AddBikeCrossing(const TArray<FVector>& Path, float WidthCm);
 
 	// Hand-placed road marks. Authored, so unlike the automatic arrows these are
 	// not re-derived on rebuild and survive any change to the lane graph.
@@ -669,6 +745,22 @@ public:
 		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "2000.0"))
 	float ParkingBayTaperCm = 0.f; // 0 = constant-depth rectangular pocket
 
+	// Cars parked in the bays. Empty = none, which is why there is no separate
+	// on/off flag: clearing the array turns the feature off.
+	//
+	// One mesh per stall, chosen by hashing the stall's position so the same bay
+	// keeps the same cars across rebuilds — a random pick would reshuffle the whole
+	// street every time any road changed. Instanced with no collision: they are set
+	// dressing, and giving a few hundred of them collision is a traffic hazard for
+	// anything pathing down the road.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parking")
+	TArray<TSoftObjectPtr<UStaticMesh>> ParkingCarMeshes;
+
+	// Fraction of stalls that get a car. 1 = a full bay, 0.6 = a realistic street.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Parking",
+		meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
+	float ParkingCarFill = 0.7f;
+
 	// Nudge JunctionSmoothingCm by DeltaCm (clamped ≥ 0). Returns the new value.
 	// Caller triggers Rebuild(). Wired to the [ / ] hotkeys.
 	double AdjustJunctionSmoothing(double DeltaCm);
@@ -747,10 +839,24 @@ public:
 	// index that was removed, or INDEX_NONE if nothing was close enough.
 	int32 RemovePlacedMarkNear(const FVector& WorldLoc, double RadiusCm);
 
+	// Delete a placed element by kind + id. Returns true when something went.
+	bool RemovePlacedById(ERoadNetPlacedKind Kind, FGuid Id);
+
 	// Heading of travel (degrees) of the road nearest WorldLoc, so a placed arrow
 	// lines up with the lane instead of the camera. Returns false when no road is
 	// within RadiusCm and the caller should pick its own yaw.
 	bool HeadingOfNearestRoad(const FVector& WorldLoc, double RadiusCm, float& OutYawDeg) const;
+
+	// Bind a mark to the road under it (road + arc + lane + relative yaw), reading
+	// Mk.Location / Mk.YawDeg. Returns false and leaves the mark world-anchored when
+	// no road is within RadiusCm. See FRoadNetPlacedMark for why the binding exists.
+	bool BindPlacedMarkToRoad(FRoadNetPlacedMark& Mk, double RadiusCm) const;
+
+	// Where a mark actually goes this rebuild. Bound marks are derived from the
+	// road, so a median restack or a reshaped centreline carries them along; an
+	// unbound mark falls back to the world point it was clicked at. OutZ is the
+	// slab top, resolved from the road model rather than a collision trace.
+	bool ResolvePlacedMark(const FRoadNetPlacedMark& Mk, FVector& OutLoc, float& OutYawDeg) const;
 
 	// Cut a pedestrian path through any island the gesture crosses.
 	void TryCutIslandPaths(const TArray<FVector>& Gesture);
@@ -868,6 +974,11 @@ public:
 	// Within RadiusCm of a protected point, drop unprotected points that sit
 	// closer than MinSpacingCm to the previous kept point. Returns roads changed.
 	int32 DeclusterNearJunctions(double RadiusCm = 1500.0, double MinSpacingCm = 400.0);
+
+	// Whole-road packed-knot collapse (XY and Z), keeping junction welds.
+	// SmoothG2Spline passes through every Ref point, so a 2 cm cluster with a
+	// leftover drape spike becomes a facet across the lane. Returns roads changed.
+	int32 DeclusterPackedAlongRoads();
 
 	// Cosine-blend the first LengthCm of each protected point's approach onto the
 	// straight tangent leaving it, so a road enters a junction square instead of
@@ -1010,6 +1121,18 @@ public:
 	// fewer than two valid distinct roads were given. Caller triggers Rebuild().
 	bool MergeRoads(TArrayView<const int32> RoadIndices);
 
+	// Replace the selected roads with one closed circular ring (Kåsa fit of
+	// their points), delete the sources, and retrim nearby approach endpoints
+	// onto the ring along each approach's own bearing. Upserts a
+	// FRoadNetRoundaboutConfig at the fitted centre. Caller triggers Rebuild().
+	bool CleanRoundabout(TArrayView<const int32> RoadIndices);
+
+	// Find the roundabout override nearest Loc, or nullptr.
+	const FRoadNetRoundaboutConfig* FindRoundaboutNear(const FVector2D& Loc) const;
+
+	// Create or re-anchor a roundabout override at Loc. Returns its index.
+	int32 UpsertRoundaboutAt(const FVector2D& Loc, float InscribedRadiusCm, float CirculatoryWidthCm);
+
 	// ---- junction marking authoring (§2 junctions) ------------------------
 	// A junction as surfaced to the editor tool after a rebuild: its world
 	// centre, arm count and the currently-resolved preset.
@@ -1020,6 +1143,7 @@ public:
 		int32 ArmCount = 0;
 	};
 	const TArray<FRoadNetJunctionView>& GetJunctionViews() const { return JunctionViews; }
+	const TArray<FRoadNetRoundaboutConfig>& GetRoundaboutConfigs() const { return RoundaboutConfigs; }
 
 	// Resolve the stored preset for the junction nearest Loc (within tolerance);
 	// ERoadNetJunctionPreset::None if no override exists there.
@@ -1185,6 +1309,9 @@ private:
 	UPROPERTY()
 	TArray<FRoadNetJunctionConfig> JunctionConfigs;
 
+	UPROPERTY()
+	TArray<FRoadNetRoundaboutConfig> RoundaboutConfigs;
+
 	// Transient snapshot of the last rebuild's junctions (>=3 arms) for the
 	// editor tool to render + hit-test. Not serialized.
 	TArray<FRoadNetJunctionView> JunctionViews;
@@ -1235,15 +1362,19 @@ private:
 	void BuildJunctionMarkings(FRoadNetRebuildContext& Ctx);     // §2 junction paint + signals
 	void BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const;// § corner channelizing grass islands
 	void BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const; // § standard stalls → park overlay + white lines
+	void BuildBikeCrossings(FRoadNetRebuildContext& Ctx) const;       // § elephant's-footprint cycle crossings
 	void BuildFurniture(FRoadNetRebuildContext& Ctx) const;      // § street-furniture placement sampling
 	void CommitGeometry(FRoadNetRebuildContext& Ctx);            // §10.15 mesh + spawn
 	void CommitCurbs(FRoadNetRebuildContext& Ctx);               // §8.12 kerb-line HISM
+	// Same polygon banks as CommitLayer, drawn as projected decals instead of
+	// meshed ribbons. Returns how many decals were placed.
+	int32 CommitMarkingDecals(FName LayerName,
+		const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
+		UMaterialInterface* DecalMaterial, FRoadNetRebuildContext& Ctx);
 	void CommitFurniture(FRoadNetRebuildContext& Ctx);           // § street-furniture HISM / actors
 	void CommitJunctionSignals(FRoadNetRebuildContext& Ctx);     // § signal placeholder HISM
 	void CommitLaneMarks(FRoadNetRebuildContext& Ctx);           // turn arrows from the lane graph
 	void CommitPlacedMarks(FRoadNetRebuildContext& Ctx);         // hand-placed road marks
-	void CommitPlacedIslands(FRoadNetRebuildContext& Ctx);       // authored pedestrian islands
-
 	// Mesh + material for one arrow kind, honouring bUseOSMStencils. OutKey is
 	// the HISM bucket name. Cache spans one commit so a missing stencil warns
 	// once instead of once per arrow. Returns null when the slot is empty.

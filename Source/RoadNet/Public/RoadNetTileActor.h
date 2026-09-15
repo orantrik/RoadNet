@@ -3,6 +3,7 @@
 #include "GameFramework/Actor.h"
 #include "RoadNetTileActor.generated.h"
 
+class UDecalComponent;
 class UDynamicMeshComponent;
 class UHierarchicalInstancedStaticMeshComponent;
 class USplineComponent;
@@ -68,6 +69,13 @@ public:
 	// caller sets points + ComponentTags. Recreated every rebuild.
 	USplineComponent* AddSpline();
 
+	// Add a fresh deferred decal projecting straight down onto the carriageway.
+	// HalfSize is (depth, half-width, half-length) in the decal's own frame, so
+	// the painted rectangle is 2*Y by 2*Z with YawDeg pointing along its length.
+	// Recreated every rebuild, like splines. Returns null past the per-tile cap.
+	UDecalComponent* AddRoadDecal(UMaterialInterface* Material, const FVector& Location,
+		float YawDeg, const FVector& HalfSize);
+
 	// Register a spawned child actor (Blueprint furniture) so ClearForRebuild
 	// destroys it on the next rebuild of this tile.
 	void TrackChildActor(AActor* Child);
@@ -90,6 +98,17 @@ private:
 
 	UPROPERTY()
 	TArray<TObjectPtr<USplineComponent>> Splines;
+
+	// One component per painted mark when markings are drawn as decals. Capped:
+	// a city's worth of dashes is tens of thousands of primitives, and each decal
+	// is a separate draw the deferred pass has to sort.
+	// ponytail: a flat cap silently drops marks past the limit on a very dense
+	// tile. Upgrade path is one merged decal per continuous run rather than per
+	// polygon, which needs run identity the polygon banks do not carry.
+	static constexpr int32 kMaxDecalsPerTile = 4096;
+
+	UPROPERTY()
+	TArray<TObjectPtr<UDecalComponent>> Decals;
 
 	UPROPERTY()
 	TArray<TWeakObjectPtr<AActor>> ChildActors;

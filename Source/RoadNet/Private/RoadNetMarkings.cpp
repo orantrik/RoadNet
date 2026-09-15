@@ -106,6 +106,7 @@ namespace
 namespace RoadNetMarkings
 {
 	void BuildRoadMarkings(const FRoadDef& Road, const FRoadCurves& C, bool bDriveOnLeft,
+		bool bJointAtStart, bool bJointAtEnd,
 		TArray<FGeneralPolygon2d>& OutWhite, TArray<FGeneralPolygon2d>& OutYellow)
 	{
 		if (C.Sampled.Num() < 2) { return; }
@@ -151,17 +152,19 @@ namespace RoadNetMarkings
 			}
 		};
 
-		if (Road.Lanes.bMedian)
+		if (Road.Lanes.bMedian || Road.Lanes.MedianHalfCm() > 0.f)
 		{
-			// Divided road: the raised median replaces the centre line. A solid
-			// white line sits just outside the slab on each side so it stays on
-			// the carriageway rather than hiding under the median top.
-			const double MedianHalf = (double)Road.Lanes.MedianHalfCm();
+			// Divided road: a solid white line on each median lane edge, so the
+			// paint stays on the carriageway rather than under the raised strip.
 			constexpr double kMedianEdgeLineInsetCm = 14.0;
-			const double InnerW = Lanes.Num() > 0 ? (double)Lanes[0].Width
-			                                      : (double)Road.Lanes.LaneWidthDefault;
-			EmitSolid(+(MedianHalf + kMedianEdgeLineInsetCm), SolidHalfFor(InnerW), OutWhite);
-			EmitSolid(-(MedianHalf + kMedianEdgeLineInsetCm), SolidHalfFor(InnerW), OutWhite);
+			for (const FRoadNetLane& Ln : Lanes)
+			{
+				if (Ln.Type != ERoadNetLaneType::Median) { continue; }
+				const double Half = 0.5 * (double)Ln.Width;
+				const double InnerW = (double)FMath::Max(Ln.Width, 200.f);
+				EmitSolid(Ln.CenterOffset + Half + kMedianEdgeLineInsetCm, SolidHalfFor(InnerW), OutWhite);
+				EmitSolid(Ln.CenterOffset - Half - kMedianEdgeLineInsetCm, SolidHalfFor(InnerW), OutWhite);
+			}
 		}
 
 		// Walk adjacent lane pairs left to right and paint the boundary between
@@ -171,12 +174,11 @@ namespace RoadNetMarkings
 		{
 			const FRoadNetLane& A = Lanes[i];
 			const FRoadNetLane& B = Lanes[i + 1];
+			if (A.Type == ERoadNetLaneType::Median || B.Type == ERoadNetLaneType::Median) { continue; }
+			if (A.bOutboard() || B.bOutboard()) { continue; }
 
 			const double EdgeA = A.CenterOffset + 0.5 * (double)A.Width;
 			const double EdgeB = B.CenterOffset - 0.5 * (double)B.Width;
-
-			// A gap between two lanes is a physical divider (the median), and a
-			// divider carries no paint down its middle.
 			if (EdgeB - EdgeA > 1.0) { continue; }
 
 			const double Boundary = 0.5 * (EdgeA + EdgeB);
@@ -222,14 +224,56 @@ namespace RoadNetMarkings
 
 				if (X.bStopBar)
 				{
-					// One bar per direction, each on the half its traffic enters
-					// on, set back from the band by half its depth plus a margin.
-					const FVector2D Lateral(T.Y, -T.X);
+					// A bar belongs to a DIRECTION OF TRAVEL, so it needs lanes going
+					// that way. The old code emitted both unconditionally, which put a
+					// bar facing no traffic at all on every one-way road.
+					const FVector2D Lateral(T.Y, -T.X);   // +right of forward travel
 					const double Back = 0.5 * (double)X.DepthCm + 60.0;
-					const FVector2D EnterFwd = bDriveOnLeft ? FVector2D(-Lateral.X, -Lateral.Y) : Lateral;
-					RoadNetJunctionMarks::EmitStopBar(P - T * Back, T, EnterFwd, Half, OutWhite);
-					RoadNetJunctionMarks::EmitStopBar(P + T * Back, FVector2D(-T.X, -T.Y),
-						FVector2D(-EnterFwd.X, -EnterFwd.Y), Half, OutWhite);
+
+					bool bAnyFwd = false, bAnyBwd = false;
+					double FwdLo = 0.0, FwdHi = 0.0, BwdLo = 0.0, BwdHi = 0.0;
+					for (const FRoadNetLane& L : Lanes)
+					{
+						if (!L.bDrivable()) { continue; }
+						const double E0 = L.CenterOffset - 0.5 * (double)L.Width;
+						const double E1 = L.CenterOffset + 0.5 * (double)L.Width;
+						if (L.bTravelsForward(bDriveOnLeft))
+						{
+							FwdLo = bAnyFwd ? FMath::Min(FwdLo, E0) : E0;
+							FwdHi = bAnyFwd ? FMath::Max(FwdHi, E1) : E1;
+							bAnyFwd = true;
+						}
+						if (L.bTravelsBackward(bDriveOnLeft))
+						{
+							BwdLo = bAnyBwd ? FMath::Min(BwdLo, E0) : E0;
+							BwdHi = bAnyBwd ? FMath::Max(BwdHi, E1) : E1;
+							bAnyBwd = true;
+						}
+					}
+
+					// At a junction mouth the arm's own approach bar already stops the
+					// traffic coming IN. Traffic going OUT of that joint has just been
+					// released by it, so a second bar a few metres later is a double
+					// stop line. Skip the outgoing direction on the junction end only —
+					// the far side of the crossing keeps its bar.
+					constexpr double kJunctionMouthCm = 1500.0;   // 15 m
+					const bool bNearStart = bJointAtStart && (double)X.DistanceCm < kJunctionMouthCm;
+					const bool bNearEnd   = bJointAtEnd   && (Total - (double)X.DistanceCm) < kJunctionMouthCm;
+					// Leaving the joint at the START means travelling forward.
+					if (bNearStart) { bAnyFwd = false; }
+					// Leaving the joint at the END means travelling backward.
+					if (bNearEnd)   { bAnyBwd = false; }
+
+					// Travel only sets the bar's thin axis, which is symmetric, so both
+					// bars can be measured in the forward lane frame.
+					if (bAnyFwd)
+					{
+						RoadNetJunctionMarks::EmitStopBar(P - T * Back, T, Lateral, FwdLo, FwdHi, OutWhite);
+					}
+					if (bAnyBwd)
+					{
+						RoadNetJunctionMarks::EmitStopBar(P + T * Back, T, Lateral, BwdLo, BwdHi, OutWhite);
+					}
 				}
 			}
 		}

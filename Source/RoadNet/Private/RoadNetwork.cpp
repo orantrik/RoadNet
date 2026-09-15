@@ -53,6 +53,35 @@ namespace
 	// §2.6 PolylineDensity is now a per-network property (URoadNetwork::PolylineDensityCm).
 	constexpr double kAdaptiveTurnRad   = 0.0873;  // ~5° knot-preserve threshold
 	constexpr double kRoadZLiftCm       = 12.0;    // lift above landscape (anti z-fight)
+	constexpr double kJunctionMatchCm   = 600.0;   // persistent junction/roundabout match radius
+
+	// How far painted markings sit above the asphalt. The paint and the slab are
+	// draped off the same centrelines but triangulate differently, so they cannot
+	// share a Z — but 4 cm (the old value) is a visible step at human height, and
+	// the paint casting a shadow onto the road made it read as a floating sheet.
+	// 1 cm reads flat and still clears the slab on a crowned or graded span.
+	// ponytail: a constant, not a per-road figure. A road with an extreme crown
+	// could still z-fight; the fix then is to drape the paint off the slab's own
+	// surface rather than off the centreline, which needs the slab mesh first.
+	constexpr double kMarkingLiftCm     = 1.0;
+
+	// Typed-lane tint (bike green / parking amber). Must stay strictly BELOW the
+	// paint: a parking bay's stall dividers live in the white bank, so an overlay
+	// drawn over them turns the bay into a blank slab.
+	constexpr double kLaneOverlayLiftCm = 0.5;
+
+	// Paint and tint are decoration on the asphalt, not occluders. A sheet lifted
+	// clear of the road that also casts its own shadow onto the road reads as
+	// floating however small the gap — which is very likely what the "markings
+	// float a few cm above the road" complaint actually is.
+	bool LayerIsPaint(FName LayerName)
+	{
+		static const FName kWhite(TEXT("MarkingsWhite")), kYellow(TEXT("MarkingsYellow"));
+		static const FName kBike(TEXT("LanesBike")),      kPark(TEXT("LanesParking"));
+		return LayerName == kWhite || LayerName == kYellow
+		    || LayerName == kBike  || LayerName == kPark;
+	}
+
 	constexpr double kMaxZGapCm         = 350.0;   // §10.12 at-grade crossing threshold
 	constexpr double kEndpointWeldCm    = 400.0;   // §10.7 spatial endpoint weld radius
 
@@ -1058,20 +1087,24 @@ bool URoadNetwork::MergeRoads(TArrayView<const int32> RoadIndices)
 	}
 
 	// Lane count = sum of members' effective lanes; sidewalks = OR (widest wins).
+	// ZoneGraph is ORed too: the merged road covers every member's ground, so
+	// dropping the flag would silently lose a choice made before the merge.
 	int32 TotalLanes = 0;
-	bool  bSwL = false, bSwR = false;
+	bool  bSwL = false, bSwR = false, bZone = false;
 	float SwW = 0.f;
 	for (int32 r : Idx)
 	{
 		TotalLanes += FMath::Max(1, Roads[r].Lanes.EffectiveLaneCount());
 		bSwL |= Roads[r].Lanes.bSidewalkLeft;
 		bSwR |= Roads[r].Lanes.bSidewalkRight;
+		bZone |= Roads[r].bZoneGraph;
 		SwW = FMath::Max(SwW, Roads[r].Lanes.SidewalkWidth);
 	}
 
 	FRoadDef Merged = Roads[Primary];   // inherit class / source / name / grade
 	Merged.Id = FGuid::NewGuid();
 	Merged.Ref = MoveTemp(Mid);
+	Merged.bZoneGraph = bZone;
 	Merged.Elev.Reset();
 	Merged.NodeIds.Reset();             // synthetic midline shares no OSM node
 	Merged.StartLinks.Reset();
@@ -1099,6 +1132,160 @@ bool URoadNetwork::MergeRoads(TArrayView<const int32> RoadIndices)
 	return true;
 }
 
+namespace
+{
+	bool RayCircleHit(const FVector2D& Origin, const FVector2D& Dir, const FVector2D& C,
+		double R, FVector2D& Out)
+	{
+		const FVector2D D = Dir.GetSafeNormal();
+		if (D.IsNearlyZero() || R < 1.0) { return false; }
+		const FVector2D F = Origin - C;
+		const double B = 2.0 * FVector2D::DotProduct(D, F);
+		const double Cd = FVector2D::DotProduct(F, F) - R * R;
+		const double Disc = B * B - 4.0 * Cd;
+		if (Disc < 0.0) { return false; }
+		const double S = FMath::Sqrt(Disc);
+		const double T0 = (-B - S) * 0.5;
+		const double T1 = (-B + S) * 0.5;
+		double T = -1.0;
+		if (T0 > 1.0) { T = T0; }
+		if (T1 > 1.0 && (T < 0.0 || T1 < T)) { T = T1; }
+		if (T < 0.0)
+		{
+			if (T0 >= 0.0) { T = T0; }
+			else if (T1 >= 0.0) { T = T1; }
+		}
+		if (T < 0.0) { return false; }
+		Out = Origin + D * T;
+		return true;
+	}
+
+	bool RoadLooksClosed(const TArray<FVector>& Ref)
+	{
+		return Ref.Num() >= 3 && FVector::DistSquaredXY(Ref[0], Ref.Last()) < FMath::Square(80.0);
+	}
+}
+
+bool URoadNetwork::CleanRoundabout(TArrayView<const int32> RoadIndices)
+{
+	TArray<int32> Idx;
+	for (int32 i : RoadIndices) { if (Roads.IsValidIndex(i)) { Idx.AddUnique(i); } }
+	if (Idx.Num() < 1) { return false; }
+
+	TArray<FVector2D> Pts;
+	double SumZ = 0.0;
+	int32 ZN = 0;
+	for (int32 r : Idx)
+	{
+		for (const FVector& P : Roads[r].Ref)
+		{
+			Pts.Emplace(P.X, P.Y);
+			SumZ += P.Z; ++ZN;
+		}
+	}
+	FVector2D Centre;
+	double Radius = 0.0;
+	if (!RoadNetMath::FitCircle(Pts, Centre, Radius) || Radius < 200.0) { return false; }
+
+	auto ArcLen = [&](int32 r) { return RoadNetMath::TotalLength(Roads[r].Ref); };
+	Idx.Sort([&](const int32& A, const int32& B) { return ArcLen(A) > ArcLen(B); });
+	const int32 Primary = Idx[0];
+
+	const int32 Segs = FMath::Clamp(FMath::RoundToInt(Radius / 100.0), 16, 96);
+	TArray<FVector> Ring;
+	RoadNetMath::SampleCircle(Centre, Radius, ZN > 0 ? SumZ / (double)ZN : 0.0, Segs, Ring);
+
+	FRoadDef Circ = Roads[Primary];
+	Circ.Id = FGuid::NewGuid();
+	Circ.Ref = MoveTemp(Ring);
+	Circ.Elev.Reset();
+	Circ.NodeIds.Reset();
+	Circ.StartLinks.Reset();
+	Circ.EndLinks.Reset();
+	Circ.OuterEdgeLeft.Reset();
+	Circ.OuterEdgeRight.Reset();
+	Circ.ParkingBays.Reset();
+	Circ.Crossings.Reset();
+
+	const float CircW = FMath::Max(350.f, Circ.Lanes.HalfWidthCm() * 2.f);
+
+	TArray<int32> ToRemove = Idx;
+	ToRemove.Sort([](const int32& A, const int32& B) { return A > B; });
+	for (int32 r : ToRemove) { Roads.RemoveAt(r); }
+	const int32 RingIdx = AddRoad(Circ);
+
+	const double Snap = FMath::Max(800.0, Radius * 0.35);
+	for (int32 r = 0; r < Roads.Num(); ++r)
+	{
+		if (r == RingIdx) { continue; }
+		FRoadDef& R = Roads[r];
+		if (R.Ref.Num() < 2) { continue; }
+
+		auto RetrimEnd = [&](bool bStart)
+		{
+			const int32 EndI = bStart ? 0 : (R.Ref.Num() - 1);
+			const int32 InI  = bStart ? 1 : (R.Ref.Num() - 2);
+			const FVector2D P(R.Ref[EndI].X, R.Ref[EndI].Y);
+			const double Dist = FVector2D::Distance(P, Centre);
+			if (FMath::Abs(Dist - Radius) > Snap) { return; }
+			const FVector2D Interior(R.Ref[InI].X, R.Ref[InI].Y);
+			FVector2D Dir = P - Interior;
+			if (Dir.IsNearlyZero()) { Dir = P - Centre; }
+			FVector2D Hit;
+			if (!RayCircleHit(Interior, Dir, Centre, Radius, Hit))
+			{
+				const FVector2D Rad = (P - Centre).GetSafeNormal();
+				if (Rad.IsNearlyZero()) { return; }
+				Hit = Centre + Rad * Radius;
+			}
+			R.Ref[EndI].X = Hit.X;
+			R.Ref[EndI].Y = Hit.Y;
+		};
+		RetrimEnd(true);
+		RetrimEnd(false);
+	}
+
+	UpsertRoundaboutAt(Centre, (float)Radius, CircW);
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CleanRoundabout: %d roads -> ring R=%.0f cm"),
+		Idx.Num(), Radius);
+	return true;
+}
+
+const FRoadNetRoundaboutConfig* URoadNetwork::FindRoundaboutNear(const FVector2D& Loc) const
+{
+	const FRoadNetRoundaboutConfig* Best = nullptr;
+	double BestD2 = TNumericLimits<double>::Max();
+	for (const FRoadNetRoundaboutConfig& Cfg : RoundaboutConfigs)
+	{
+		const double Lim = FMath::Max(kJunctionMatchCm, (double)Cfg.InscribedRadiusCm);
+		const double D2 = FVector2D::DistSquared(Cfg.Location, Loc);
+		if (D2 < Lim * Lim && D2 < BestD2) { BestD2 = D2; Best = &Cfg; }
+	}
+	return Best;
+}
+
+int32 URoadNetwork::UpsertRoundaboutAt(const FVector2D& Loc, float InscribedRadiusCm, float CirculatoryWidthCm)
+{
+	Modify();
+	int32 BestIdx = INDEX_NONE;
+	double BestD2 = FMath::Square(FMath::Max(kJunctionMatchCm, (double)InscribedRadiusCm));
+	for (int32 i = 0; i < RoundaboutConfigs.Num(); ++i)
+	{
+		const double D2 = FVector2D::DistSquared(RoundaboutConfigs[i].Location, Loc);
+		if (D2 < BestD2) { BestD2 = D2; BestIdx = i; }
+	}
+	if (BestIdx == INDEX_NONE)
+	{
+		FRoadNetRoundaboutConfig Cfg;
+		BestIdx = RoundaboutConfigs.Add(Cfg);
+	}
+	FRoadNetRoundaboutConfig& C = RoundaboutConfigs[BestIdx];
+	C.Location = Loc;
+	C.InscribedRadiusCm = FMath::Max(200.f, InscribedRadiusCm);
+	if (CirculatoryWidthCm > 0.f) { C.CirculatoryWidthCm = CirculatoryWidthCm; }
+	return BestIdx;
+}
+
 bool URoadNetwork::InsertRoadPoint(int32 RoadIdx, int32 AfterIdx, const FVector& Pos)
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return false; }
@@ -1120,81 +1307,83 @@ namespace
 	{
 		switch (Type)
 		{
-			case ERoadNetLaneType::Bicycle: return 150.0; // 1.5 m
-			case ERoadNetLaneType::Parking: return 250.0; // 2.5 m
-			default:                        return 350.0; // 3.5 m driving lane
+			case ERoadNetLaneType::Bicycle:  return 150.0; // 1.5 m
+			case ERoadNetLaneType::Parking:  return 250.0; // 2.5 m
+			case ERoadNetLaneType::Sidewalk: return 200.0; // 2 m
+			case ERoadNetLaneType::Median:   return 300.0; // 3 m
+			default:                         return 350.0; // 3.5 m driving lane
 		}
 	}
 
 	// Recompute every authored lane's CenterOffset + Side by stacking widths
 	// left→right, centred on the reference line. A central median (MedianHalf>0)
 	// opens a gap in the middle. Lanes are assumed already ordered left→right.
-	void RelayoutLanes(TArray<FRoadNetLane>& Lanes, double MedianHalfCm)
+	void RelayoutLanes(TArray<FRoadNetLane>& Lanes, double /*MedianHalfCm*/)
 	{
-		auto WidthOf = [](const FRoadNetLane& Ln) { return (double)FMath::Max(1.f, Ln.Width); };
+		FRoadNetLaneSpec::RelayoutStack(Lanes);
+	}
 
-		double Sum = 0.0;
-		for (const FRoadNetLane& Ln : Lanes) { Sum += WidthOf(Ln); }
-
-		// No median: the stack is simply centred on the reference line.
-		// A median also needs a lane on each side to divide, so a single-lane
-		// road takes this path too.
-		if (MedianHalfCm <= 0.0 || Lanes.Num() < 2)
+	void SyncFlagsFromLanes(FRoadNetLaneSpec& L)
+	{
+		if (!L.HasDetailedLanes()) { return; }
+		L.bMedian = false;
+		L.bSidewalkLeft = false;
+		L.bSidewalkRight = false;
+		for (const FRoadNetLane& Ln : L.DetailedLanes)
 		{
-			double Cursor = -0.5 * Sum;
-			for (FRoadNetLane& Ln : Lanes)
+			if (Ln.Type == ERoadNetLaneType::Median)
 			{
-				const double W = WidthOf(Ln);
-				Ln.CenterOffset = Cursor + 0.5 * W;
-				Ln.Side = (Ln.CenterOffset < 0.0) ? ERoadNetSide::Left : ERoadNetSide::Right;
-				Cursor += W;
+				L.bMedian = true;
+				L.MedianWidth = Ln.Width;
 			}
-			return;
+			else if (Ln.Type == ERoadNetLaneType::Sidewalk)
+			{
+				if (Ln.CenterOffset < 0.0) { L.bSidewalkLeft = true; }
+				else { L.bSidewalkRight = true; }
+				L.SidewalkWidth = Ln.Width;
+			}
 		}
+	}
 
-		// The gap is PINNED to [-MedianHalf, +MedianHalf]. It has to be: the 3-D
-		// strip is a ribbon of exactly that half-width about the same reference
-		// line (see the median block in BuildZones), and ResolveLanes stacks the
-		// count model outward from those same edges. Anywhere else and the strip
-		// and the gap disagree, which is the median sitting on top of a lane.
-		//
-		// The old rule instead walked a cursor and opened the gap before the
-		// first lane whose CENTRE crossed the reference line. When the median was
-		// wider than the lanes beside it, no centre ever reached zero and the gap
-		// was silently never opened at all — the lanes stayed shoulder to
-		// shoulder and the strip was drawn straight over the carriageway.
-		//
-		// Which boundary splits the two carriageways: the one leaving them
-		// closest to equal width, so the road stays as centred as its lanes
-		// allow. ponytail: recomputed every edit rather than remembered, so a
-		// drag that makes the stack very lopsided can hop the median one boundary
-		// over. Store the split on the road if that ever becomes annoying.
-		int32 Split = 1;
-		double Run = WidthOf(Lanes[0]);
-		double Best = TNumericLimits<double>::Max();
-		for (int32 i = 1; i < Lanes.Num(); ++i)
+	void MigrateFlagsToLanes(FRoadNetLaneSpec& L)
+	{
+		auto HasType = [&L](ERoadNetLaneType T) -> bool
 		{
-			const double D = FMath::Abs(Run - 0.5 * Sum);
-			if (D < Best) { Best = D; Split = i; }
-			Run += WidthOf(Lanes[i]);
+			for (const FRoadNetLane& Ln : L.DetailedLanes)
+			{
+				if (Ln.Type == T) { return true; }
+			}
+			return false;
+		};
+		auto MakeSlot = [](ERoadNetLaneType T, float W) -> FRoadNetLane
+		{
+			FRoadNetLane Ln;
+			Ln.LaneId = FGuid::NewGuid();
+			Ln.Type = T;
+			Ln.Direction = ERoadNetLaneDirection::None;
+			Ln.Width = FMath::Max(30.f, W);
+			Ln.Side = (T == ERoadNetLaneType::Median) ? ERoadNetSide::Center : ERoadNetSide::Right;
+			return Ln;
+		};
+		if (L.bMedian && !HasType(ERoadNetLaneType::Median) && L.DetailedLanes.Num() >= 1)
+		{
+			int32 Mid = 0;
+			for (int32 i = 0; i < L.DetailedLanes.Num(); ++i)
+			{
+				if (L.DetailedLanes[i].Type != ERoadNetLaneType::Sidewalk) { Mid = i + 1; }
+			}
+			Mid = FMath::Clamp(Mid / 2, 0, L.DetailedLanes.Num());
+			L.DetailedLanes.Insert(MakeSlot(ERoadNetLaneType::Median, L.MedianWidth), Mid);
 		}
-
-		// Each carriageway grows outward from its own edge of the gap.
-		double Cursor = -MedianHalfCm;
-		for (int32 i = Split - 1; i >= 0; --i)
+		if (L.bSidewalkLeft && L.SidewalkWidth > 0.f
+			&& (L.DetailedLanes.Num() == 0 || L.DetailedLanes[0].Type != ERoadNetLaneType::Sidewalk))
 		{
-			const double W = WidthOf(Lanes[i]);
-			Lanes[i].CenterOffset = Cursor - 0.5 * W;
-			Lanes[i].Side = ERoadNetSide::Left;
-			Cursor -= W;
+			L.DetailedLanes.Insert(MakeSlot(ERoadNetLaneType::Sidewalk, L.SidewalkWidth), 0);
 		}
-		Cursor = MedianHalfCm;
-		for (int32 i = Split; i < Lanes.Num(); ++i)
+		if (L.bSidewalkRight && L.SidewalkWidth > 0.f
+			&& (L.DetailedLanes.Num() == 0 || L.DetailedLanes.Last().Type != ERoadNetLaneType::Sidewalk))
 		{
-			const double W = WidthOf(Lanes[i]);
-			Lanes[i].CenterOffset = Cursor + 0.5 * W;
-			Lanes[i].Side = ERoadNetSide::Right;
-			Cursor += W;
+			L.DetailedLanes.Add(MakeSlot(ERoadNetLaneType::Sidewalk, L.SidewalkWidth));
 		}
 	}
 
@@ -1205,17 +1394,22 @@ namespace
 	// the median or leaves a hole beside it.
 	void RestackForMedian(FRoadNetLaneSpec& L)
 	{
-		if (L.HasDetailedLanes()) { RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm()); }
+		if (L.HasDetailedLanes())
+		{
+			MigrateFlagsToLanes(L);
+			RelayoutLanes(L.DetailedLanes, 0.0);
+			SyncFlagsFromLanes(L);
+		}
 	}
 
-	// Materialise a road's lanes as authored DetailedLanes ordered left→right,
-	// so per-lane edits (insert/type) have concrete entities to act on. Idempotent
-	// once authored.
 	void EnsureDetailedLanes(FRoadNetLaneSpec& L, bool bDriveOnLeft)
 	{
 		if (!L.HasDetailedLanes()) { L.DetailedLanes = L.ResolveLanes(bDriveOnLeft); }
 		L.DetailedLanes.Sort([](const FRoadNetLane& A, const FRoadNetLane& B)
 			{ return A.CenterOffset < B.CenterOffset; });
+		MigrateFlagsToLanes(L);
+		RelayoutLanes(L.DetailedLanes, 0.0);
+		SyncFlagsFromLanes(L);
 	}
 }
 
@@ -1233,7 +1427,8 @@ bool URoadNetwork::AddLane(int32 RoadIdx, ERoadNetSide Side)
 		NL.Width  = (float)LaneTypeDefaultWidthCm(ERoadNetLaneType::Normal);
 		if (Side == ERoadNetSide::Left) { L.DetailedLanes.Insert(NL, 0); }
 		else                            { L.DetailedLanes.Add(NL); }
-		RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+		RelayoutLanes(L.DetailedLanes, 0.0);
+		SyncFlagsFromLanes(L);
 		return true;
 	}
 
@@ -1260,7 +1455,8 @@ bool URoadNetwork::RemoveLane(int32 RoadIdx, ERoadNetSide Side)
 		if (L.DetailedLanes.Num() <= 1) { return false; }
 		if (Side == ERoadNetSide::Left) { L.DetailedLanes.RemoveAt(0); }
 		else                            { L.DetailedLanes.RemoveAt(L.DetailedLanes.Num() - 1); }
-		RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+		RelayoutLanes(L.DetailedLanes, 0.0);
+		SyncFlagsFromLanes(L);
 		return true;
 	}
 
@@ -1327,7 +1523,8 @@ int32 URoadNetwork::InsertLaneRelative(int32 RoadIdx, int32 LaneLtoR, bool bRigh
 
 	const int32 Pos = bRightSide ? (LaneLtoR + 1) : LaneLtoR;
 	L.DetailedLanes.Insert(NL, Pos);
-	RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+	RelayoutLanes(L.DetailedLanes, 0.0);
+	SyncFlagsFromLanes(L);
 
 	// New left→right index of the originally selected lane (so the caller keeps
 	// its highlight): unchanged when we inserted to its right, +1 to its left.
@@ -1352,7 +1549,8 @@ ERoadNetLaneType URoadNetwork::CycleLaneType(int32 RoadIdx, int32 LaneLtoR, int3
 	const int32 Next = ((Cur + (Dir >= 0 ? 1 : -1)) % N + N) % N;
 	Ln.Type  = kCycle[Next];
 	Ln.Width = (float)LaneTypeDefaultWidthCm(Ln.Type);
-	RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+	RelayoutLanes(L.DetailedLanes, 0.0);
+	SyncFlagsFromLanes(L);
 	return Ln.Type;
 }
 
@@ -1383,7 +1581,8 @@ bool URoadNetwork::SetLaneWidth(int32 RoadIdx, int32 LaneLtoR, double WidthCm)
 	if (!Ln) { return false; }
 
 	Ln->Width = (float)FMath::Clamp(WidthCm, kMinLaneWidthCm, kMaxLaneWidthCm);
-	RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+	RelayoutLanes(L.DetailedLanes, 0.0);
+	SyncFlagsFromLanes(L);
 	return true;
 }
 
@@ -1395,29 +1594,10 @@ bool URoadNetwork::SetLaneType(int32 RoadIdx, int32 LaneLtoR, ERoadNetLaneType T
 	FRoadNetLane* Ln = LaneAt(L, LaneLtoR);
 	if (!Ln) { return false; }
 
-	// "Median" is not a lane the stack can carry. A road holds ONE central median
-	// (bMedian/MedianWidth) that RelayoutLanes opens as a GAP between the lanes,
-	// and only that gap grows geometry in BuildZones. Tagging a lane Median used
-	// to write metadata nothing downstream reads, so the palette button looked
-	// inert. Convert the lane into the road's median instead: its width becomes
-	// the median width and it leaves the stack, because the gap now stands where
-	// it did. Refuse the last lane, matching RemoveLaneAt — a road with no
-	// carriageway is not a road.
-	if (Type == ERoadNetLaneType::Median)
-	{
-		if (L.DetailedLanes.Num() <= 1) { return false; }
-		const float WidthCm = Ln->Width;
-		L.DetailedLanes.RemoveAt(LaneLtoR);
-		L.bMedian = true;
-		SetMedianWidth(RoadIdx, WidthCm); // clamps, then restacks the survivors
-		return true;
-	}
-
 	Ln->Type = Type;
-	// A shoulder nobody drives on should stop claiming a direction, or the
-	// centre-line rule counts it as traffic and paints a line for it.
 	if (Type == ERoadNetLaneType::Shoulder
-		|| Type == ERoadNetLaneType::Border || Type == ERoadNetLaneType::Parking)
+		|| Type == ERoadNetLaneType::Border || Type == ERoadNetLaneType::Parking
+		|| Type == ERoadNetLaneType::Median || Type == ERoadNetLaneType::Sidewalk)
 	{
 		Ln->Direction = ERoadNetLaneDirection::None;
 	}
@@ -1426,7 +1606,8 @@ bool URoadNetwork::SetLaneType(int32 RoadIdx, int32 LaneLtoR, ERoadNetLaneType T
 		Ln->Direction = (Type == ERoadNetLaneType::CenterTurn)
 			? ERoadNetLaneDirection::Both : ERoadNetLaneDirection::FromSide;
 	}
-	RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+	RelayoutLanes(L.DetailedLanes, 0.0);
+	SyncFlagsFromLanes(L);
 	return true;
 }
 
@@ -1575,6 +1756,7 @@ int32 URoadNetwork::AddPlacedIsland(const TArray<FVector>& Ring)
 	if (Ring.Num() < 3) { return INDEX_NONE; }
 	if (RingAreaCm2(Ring) < RoadNetStandards::MinIslandAreaCm2()) { return INDEX_NONE; }
 	FRoadNetIsland Isl;
+	Isl.Id = FGuid::NewGuid();
 	Isl.Ring = Ring;
 	Isl.SmoothCm = 150.f;
 	return PlacedIslands.Add(Isl);
@@ -1722,6 +1904,7 @@ int32 URoadNetwork::AddCurbPaintNear(const FVector& WorldHit, ERoadNetCurbPaintT
 	if (BestInstD2 >= FMath::Square(600.0) && P.Road == INDEX_NONE) { return 0; }
 
 	FRoadNetCurbPaint Sample;
+	Sample.Id = FGuid::NewGuid();
 	Sample.Road = P.Road;
 	Sample.Side = (P.SignedOff >= 0.0) ? ERoadNetSide::Right : ERoadNetSide::Left;
 	Sample.DistanceCm = (float)P.Arc;
@@ -1882,7 +2065,8 @@ bool URoadNetwork::RemoveLaneAt(int32 RoadIdx, int32 LaneLtoR)
 	if (!L.DetailedLanes.IsValidIndex(LaneLtoR) || L.DetailedLanes.Num() <= 1) { return false; }
 
 	L.DetailedLanes.RemoveAt(LaneLtoR);
-	RelayoutLanes(L.DetailedLanes, (double)L.MedianHalfCm());
+	RelayoutLanes(L.DetailedLanes, 0.0);
+	SyncFlagsFromLanes(L);
 	return true;
 }
 
@@ -1947,51 +2131,56 @@ void URoadNetwork::RunSelfCheck()
 		Expect(!Net->SetLaneWidth(Idx, 99, 350.0), TEXT("a bad lane index is refused"));
 		Expect(!Net->SetLaneWidth(999, 0, 350.0), TEXT("a bad road index is refused"));
 
-		// Typing a lane "Median" converts it into the road's central median. The
-		// road-level flag is what grows geometry, so the lane hands its width over
-		// and leaves the stack instead of sitting in it as a label nothing reads.
-		// No Contiguous() here on purpose: a median is precisely a gap.
+		// Typing a lane Median keeps it in the stack as a real slot. The whole
+		// carriageway restacks around it, which is what keeps markings on their
+		// lane boundaries instead of sliding relative to a centre-pinned gap.
 		const int32 LanesBefore = Net->GetLanesLeftToRight(Idx).Num();
 		const float TakenWidth = Net->GetLanesLeftToRight(Idx)[1].Width;
+		const double OffBefore0 = Net->GetLanesLeftToRight(Idx)[0].CenterOffset;
+		const double OffBeforeLast = Net->GetLanesLeftToRight(Idx).Last().CenterOffset;
 		Expect(Net->SetLaneType(Idx, 1, ERoadNetLaneType::Median), TEXT("SetLaneType accepts a median"));
 		Expect(Net->IsMedian(Idx), TEXT("typing a lane Median turns the road's median on"));
 		Expect(FMath::IsNearlyEqual(Net->GetMedianWidth(Idx), TakenWidth, 0.5f),
 			TEXT("the median inherits the width of the lane it replaced"));
-		Expect(Net->GetLanesLeftToRight(Idx).Num() == LanesBefore - 1,
-			TEXT("the lane leaves the stack, because the median gap now stands there"));
+		Expect(Net->GetLanesLeftToRight(Idx).Num() == LanesBefore,
+			TEXT("the median stays in the stack as a lane slot"));
+		Expect(Net->GetLanesLeftToRight(Idx)[1].Type == ERoadNetLaneType::Median,
+			TEXT("lane 1 is the median slot"));
+		Expect(Net->GetLanesLeftToRight(Idx)[0].CenterOffset < OffBefore0,
+			TEXT("the left carriageway moves out when a median is typed"));
+		Expect(Net->GetLanesLeftToRight(Idx).Last().CenterOffset > OffBeforeLast,
+			TEXT("the right carriageway moves out when a median is typed"));
 
-		// The gap must straddle the reference line at exactly the median's width:
-		// the 3-D strip is a ribbon of MedianHalf about that same line, so any
-		// other placement draws the median on top of a lane. Regression: a median
-		// WIDER than its neighbouring lanes used to open no gap whatsoever,
-		// because the layout waited for a lane centre to cross the reference line
-		// and a wide lane never got there.
-		auto WidestGap = [Net, Idx](double& OutLo, double& OutHi)
+		auto MedianLane = [Net, Idx]() -> FRoadNetLane
 		{
-			const TArray<FRoadNetLane> Ls = Net->GetLanesLeftToRight(Idx);
-			double Best = 0.0;
-			for (int32 i = 1; i < Ls.Num(); ++i)
+			for (const FRoadNetLane& Ln : Net->GetLanesLeftToRight(Idx))
 			{
-				const double A = Ls[i - 1].CenterOffset + 0.5 * Ls[i - 1].Width;
-				const double B = Ls[i].CenterOffset - 0.5 * Ls[i].Width;
-				if (B - A > Best) { Best = B - A; OutLo = A; OutHi = B; }
+				if (Ln.Type == ERoadNetLaneType::Median) { return Ln; }
 			}
-			return Best;
+			return FRoadNetLane();
 		};
 
 		const int32 NumLanes = Net->GetLanesLeftToRight(Idx).Num();
-		for (int32 i = 0; i < NumLanes; ++i) { Net->SetLaneWidth(Idx, i, 350.0); }
-		Net->SetMedianWidth(Idx, 800.f);   // wider than every lane beside it
-		double GapLo = 0.0, GapHi = 0.0;
-		const double GapCm = WidestGap(GapLo, GapHi);
-		Expect(FMath::IsNearlyEqual(GapCm, 800.0, 1.0),
-			TEXT("a median wider than its lanes still opens a gap of its own width"));
-		Expect(FMath::IsNearlyEqual(GapLo, -400.0, 1.0) && FMath::IsNearlyEqual(GapHi, 400.0, 1.0),
-			TEXT("the median gap straddles the reference line, where the 3-D strip is built"));
+		for (int32 i = 0; i < NumLanes; ++i)
+		{
+			if (Net->GetLanesLeftToRight(Idx)[i].Type != ERoadNetLaneType::Median)
+			{
+				Net->SetLaneWidth(Idx, i, 350.0);
+			}
+		}
+		Net->SetMedianWidth(Idx, 800.f);
+		{
+			const FRoadNetLane M = MedianLane();
+			Expect(M.Type == ERoadNetLaneType::Median, TEXT("a median lane exists after SetMedianWidth"));
+			Expect(FMath::IsNearlyEqual(M.Width, 800.f, 1.f),
+				TEXT("a median wider than its lanes still occupies its own width in the stack"));
+			Expect(FMath::IsNearlyEqual(M.CenterOffset, 0.0, 1.0),
+				TEXT("the median slot straddles the reference line, where the 3-D strip is built"));
+		}
 
 		Net->SetMedianWidth(Idx, 300.f);
-		Expect(FMath::IsNearlyEqual(WidestGap(GapLo, GapHi), 300.0, 1.0),
-			TEXT("the gap tracks the median width"));
+		Expect(FMath::IsNearlyEqual(MedianLane().Width, 300.f, 1.f),
+			TEXT("the median slot tracks the median width"));
 
 		// The count model and the authored model must report the same half-width
 		// for one road, or its sidewalk masks and terrain corridor shift the
@@ -2004,7 +2193,7 @@ void URoadNetwork::RunSelfCheck()
 			Spec.MedianWidth = 800.f;
 			const float CountHalf = Spec.HalfWidthCm();
 			EnsureDetailedLanes(Spec, /*bDriveOnLeft*/false);
-			RelayoutLanes(Spec.DetailedLanes, (double)Spec.MedianHalfCm());
+			RelayoutLanes(Spec.DetailedLanes, 0.0);
 			Expect(FMath::IsNearlyEqual(CountHalf, Spec.HalfWidthCm(), 1.f),
 				TEXT("both lane models report the same half-width for one road"));
 		}
@@ -2023,6 +2212,251 @@ void URoadNetwork::RunSelfCheck()
 		Expect(Net->GetLanesLeftToRight(Idx).Num() == 1, TEXT("lanes can be removed down to one"));
 		Expect(!Net->RemoveLaneAt(Idx, 0), TEXT("the last lane is refused"));
 		Expect(Net->GetLanesLeftToRight(Idx).Num() == 1, TEXT("the refused removal changed nothing"));
+	}
+
+	// ---- part 1a2: a 2+2 separator stays coherent when a median is inserted ---
+	{
+		URoadNetwork* Net = NewObject<URoadNetwork>(GetTransientPackage());
+		FRoadDef R;
+		R.Ref = { FVector::ZeroVector, FVector(10000.0, 0.0, 0.0) };
+		R.Lanes.Total = 4;
+		R.Lanes.LaneWidthDefault = 350.f;
+		const int32 Idx = Net->AddRoad(R);
+		Net->SetLaneWidth(Idx, 0, 350.0);
+
+		TArray<double> EdgeBefore;
+		int32 DrivenBefore = 0;
+		for (const FRoadNetLane& Ln : Net->GetLanesLeftToRight(Idx))
+		{
+			if (!Ln.bDrivable()) { continue; }
+			++DrivenBefore;
+			EdgeBefore.Add(Ln.CenterOffset - 0.5 * Ln.Width);
+			EdgeBefore.Add(Ln.CenterOffset + 0.5 * Ln.Width);
+		}
+		Expect(DrivenBefore == 4, TEXT("a 2+2 starts as four driven lanes"));
+
+		Expect(Net->ToggleMedian(Idx), TEXT("ToggleMedian inserts a median slot"));
+		Net->SetMedianWidth(Idx, 300.f);
+
+		TArray<double> EdgeAfter;
+		int32 DrivenAfter = 0;
+		bool bHasMedian = false;
+		for (const FRoadNetLane& Ln : Net->GetLanesLeftToRight(Idx))
+		{
+			if (Ln.Type == ERoadNetLaneType::Median)
+			{
+				bHasMedian = true;
+				Expect(FMath::IsNearlyEqual(Ln.Width, 300.f, 1.f), TEXT("the median slot is 3 m"));
+				continue;
+			}
+			if (!Ln.bDrivable()) { continue; }
+			++DrivenAfter;
+			EdgeAfter.Add(Ln.CenterOffset - 0.5 * Ln.Width);
+			EdgeAfter.Add(Ln.CenterOffset + 0.5 * Ln.Width);
+		}
+		Expect(bHasMedian, TEXT("the stack carries a median lane"));
+		Expect(DrivenAfter == DrivenBefore, TEXT("driven lane count is unchanged"));
+		Expect(EdgeAfter.Num() == EdgeBefore.Num(), TEXT("every driven edge still exists"));
+		const double Shift = 150.0;
+		for (int32 i = 0; i < EdgeBefore.Num(); ++i)
+		{
+			const double Expected = (EdgeBefore[i] < 0.0) ? (EdgeBefore[i] - Shift) : (EdgeBefore[i] + Shift);
+			Expect(FMath::IsNearlyEqual(EdgeAfter[i], Expected, 1.5),
+				TEXT("every driven edge moved by half the median, and stayed on its lane"));
+		}
+	}
+
+	// ---- part 1b: the UK / drive-on-left flip -------------------------------
+	// Regression: assigning bDriveOnLeft used to BE the flip, which does nothing at all
+	// on a road with authored lanes, because ResolveLanes hands DetailedLanes back
+	// untouched. Assert the flip reaches the stored lanes and leaves the stack intact.
+	{
+		URoadNetwork* Net = NewObject<URoadNetwork>(GetTransientPackage());
+		FRoadDef R;
+		R.Ref = { FVector::ZeroVector, FVector(10000.0, 0.0, 0.0) };
+		R.Lanes.Total = 4;
+		const int32 Idx = Net->AddRoad(R);
+		Net->SetLaneWidth(Idx, 0, 350.0);   // any lane edit materialises DetailedLanes
+
+		// Where forward traffic sits, summed. Sign says which side of the reference line.
+		auto ForwardSide = [Net, Idx]()
+		{
+			double Sum = 0.0;
+			for (const FRoadNetLane& L : Net->GetLanesLeftToRight(Idx))
+			{
+				if (L.Direction == ERoadNetLaneDirection::Forward) { Sum += L.CenterOffset; }
+			}
+			return Sum;
+		};
+
+		// The constructor seeds handedness from roadnet.DriveOnLeft, so pin it first
+		// rather than assuming a fresh network drives on the right.
+		Net->SetDriveOnLeft(false);
+		const double RightHand = ForwardSide();
+		Expect(Net->SetDriveOnLeft(true), TEXT("a real handedness change reports true"));
+		const double LeftHand = ForwardSide();
+		Expect(RightHand * LeftHand < 0.0,
+			TEXT("a UK flip moves forward traffic to the other side of the reference line"));
+		Expect(!Net->SetDriveOnLeft(true), TEXT("flipping to the handedness already set is a no-op"));
+
+		const TArray<FRoadNetLane> Flipped = Net->GetLanesLeftToRight(Idx);
+		bool bContiguous = Flipped.Num() == 4;
+		for (int32 i = 1; i < Flipped.Num(); ++i)
+		{
+			const double PrevHi = Flipped[i - 1].CenterOffset + 0.5 * Flipped[i - 1].Width;
+			const double ThisLo = Flipped[i].CenterOffset - 0.5 * Flipped[i].Width;
+			if (FMath::Abs(PrevHi - ThisLo) > 0.5) { bContiguous = false; }
+		}
+		Expect(bContiguous, TEXT("lanes stay contiguous after a UK flip"));
+	}
+
+	// ---- part 1d: a parking bay stays out of the junction, and on one kerb ---
+	{
+		URoadNetwork* Net = NewObject<URoadNetwork>(GetTransientPackage());
+		Net->ParkingBayJunctionSetbackCm = 1200.f;
+		Net->ParkingStallWidthCm = 250.f;
+		Net->ParkingBayLengthCm  = 0.f;   // as long as the road allows
+
+		// Cross streets meeting the main road at x = 0 and x = 2000, so both of its
+		// ends are real junctions rather than free ends. GetJunctionEnds finds them
+		// by the same endpoint weld the rebuild uses, which is what lets a bay
+		// added from the panel — with no rebuild in between — know they are there.
+		auto AddCross = [&Net](double X)
+		{
+			FRoadDef C;
+			C.Ref = { FVector(X, 0.0, 0.0), FVector(X, 5000.0, 0.0) };
+			C.Lanes.Total = 2;
+			Net->AddRoad(C);
+		};
+		AddCross(0.0);
+		AddCross(2000.0);
+
+		// 20 m of road between two junctions: 12 m of setback at each end leaves
+		// nothing. This used to fall back to a full-length bay with no setback at
+		// all, parking cars in the junction it was supposed to avoid.
+		FRoadDef Short;
+		Short.Ref = { FVector::ZeroVector, FVector(2000.0, 0.0, 0.0) };
+		Short.Lanes.Total = 2;
+		const int32 ShortIdx = Net->AddRoad(Short);
+		{
+			bool bS = false, bE = false;
+			Net->GetJunctionEnds(ShortIdx, bS, bE);
+			Expect(bS && bE, TEXT("both ends of the short road are seen as junctions"));
+		}
+		Expect(Net->AddStandardParkingBay(ShortIdx, ERoadNetSide::Right,
+			ERoadNetParkingLayout::Perpendicular, -1.0) == INDEX_NONE,
+			TEXT("a road too short to clear its junctions gets no parking bay"));
+		Expect(Net->GetRoads()[ShortIdx].ParkingBays.Num() == 0,
+			TEXT("a refused parking bay leaves the road untouched"));
+
+		// 100 m of road from the junction at x = 0 to a free end: a bay fits, on
+		// the requested kerb only, set back from the junction but not from the end.
+		FRoadDef Long;
+		Long.Ref = { FVector::ZeroVector, FVector(10000.0, 0.0, 0.0) };
+		Long.Lanes.Total = 2;
+		const int32 LongIdx = Net->AddRoad(Long);
+		const int32 BayIdx = Net->AddStandardParkingBay(LongIdx, ERoadNetSide::Right,
+			ERoadNetParkingLayout::Perpendicular, -1.0);
+		Expect(BayIdx != INDEX_NONE, TEXT("a long enough road accepts a parking bay"));
+		Expect(Net->GetRoads()[LongIdx].ParkingBays.Num() == 1,
+			TEXT("asking for one parking bay adds one, not one per kerb"));
+		if (Net->GetRoads()[LongIdx].ParkingBays.Num() == 1)
+		{
+			const FRoadNetParkingBay& B = Net->GetRoads()[LongIdx].ParkingBays[0];
+			Expect(B.Side == ERoadNetSide::Right, TEXT("the bay lands on the requested kerb"));
+			Expect(B.StartArcCm >= 1200.f - 1.f,
+				TEXT("the bay stays clear of the junction at the road's start"));
+			Expect(B.StartArcCm + B.LengthCm <= 10000.f + 1.f,
+				TEXT("the bay stays on the road"));
+		}
+	}
+
+	// ---- part 1c: stop bars follow traffic, not arm geometry ----------------
+	// Regression: BuildJoint striped EVERY arm, because FApproach carried no
+	// direction data at all — so a one-way exit arm, which no traffic enters, got a
+	// full stop bar facing nothing.
+	{
+		using namespace RoadNetJunctionMarks;
+		TArray<UE::Geometry::FGeneralPolygon2d> White;
+		TArray<FSignal> Signals;
+
+		FApproach Ap;
+		Ap.StopPos = FVector2D::ZeroVector;
+		Ap.Outward = FVector2D(1, 0);      // so Rin (the lateral axis) is +Y
+		Ap.HalfWidthCm = 700.0;
+
+		TArray<FApproach> Arms;
+		Arms.Add(Ap);
+		Arms[0].bHasEnteringTraffic = false;
+		BuildJoint(FVector2D::ZeroVector, 0.0, Arms, ERoadNetJunctionPreset::StopLine,
+			/*bDriveOnLeft*/false, White, Signals);
+		Expect(White.Num() == 0, TEXT("a one-way exit arm emits no stop bar"));
+		Expect(Signals.Num() == 0, TEXT("a one-way exit arm gets no signal head"));
+
+		// A divided two-way arm: the bar covers the entering lanes only, starting at
+		// the median edge. Measured from the reference line it would begin inside the
+		// median, which is the "bar crosses the median" half of the same bug.
+		White.Reset(); Signals.Reset();
+		Arms[0].bHasEnteringTraffic = true;
+		Arms[0].EnterLoCm = 150.0;   // median edge
+		Arms[0].EnterHiCm = 850.0;   // kerb
+		BuildJoint(FVector2D::ZeroVector, 0.0, Arms, ERoadNetJunctionPreset::StopLine,
+			/*bDriveOnLeft*/false, White, Signals);
+		Expect(White.Num() == 1, TEXT("a two-way arm emits exactly one stop bar"));
+		if (White.Num() == 1)
+		{
+			double Lo = TNumericLimits<double>::Max(), Hi = -TNumericLimits<double>::Max();
+			for (const FVector2d& V : White[0].GetOuter().GetVertices())
+			{
+				Lo = FMath::Min(Lo, V.Y); Hi = FMath::Max(Hi, V.Y);
+			}
+			Expect(FMath::IsNearlyEqual(Lo, 150.0, 1.0) && FMath::IsNearlyEqual(Hi, 850.0, 1.0),
+				TEXT("the bar spans the entering lanes, starting at the median edge"));
+		}
+
+		// A driver must meet the bar BEFORE the zebra, or they stop with the bonnet
+		// over the crossing. Outward is +X here, so "further out" is a larger X: the
+		// bar's near edge has to be past the zebra's far edge.
+		White.Reset(); Signals.Reset();
+		BuildJoint(FVector2D::ZeroVector, 0.0, Arms, ERoadNetJunctionPreset::StopAndCrosswalk,
+			/*bDriveOnLeft*/false, White, Signals);
+
+		// The bar is the one polygon spanning the entering lanes; every zebra stripe
+		// is 50 cm across. Split them on that, then compare their extents along X.
+		double BarNearX   = TNumericLimits<double>::Max();
+		double ZebraNearX = TNumericLimits<double>::Max();
+		double ZebraFarX  = -TNumericLimits<double>::Max();
+		int32  Bars = 0, Stripes = 0;
+		for (const UE::Geometry::FGeneralPolygon2d& P : White)
+		{
+			double X0 = TNumericLimits<double>::Max(), X1 = -TNumericLimits<double>::Max();
+			double Y0 = TNumericLimits<double>::Max(), Y1 = -TNumericLimits<double>::Max();
+			for (const FVector2d& V : P.GetOuter().GetVertices())
+			{
+				X0 = FMath::Min(X0, V.X); X1 = FMath::Max(X1, V.X);
+				Y0 = FMath::Min(Y0, V.Y); Y1 = FMath::Max(Y1, V.Y);
+			}
+			if (Y1 - Y0 > 200.0)
+			{
+				++Bars;
+				BarNearX = FMath::Min(BarNearX, X0);
+			}
+			else
+			{
+				++Stripes;
+				ZebraNearX = FMath::Min(ZebraNearX, X0);
+				ZebraFarX  = FMath::Max(ZebraFarX, X1);
+			}
+		}
+		Expect(Bars == 1, TEXT("a crossing approach still emits exactly one stop bar"));
+		Expect(Stripes > 1, TEXT("a crossing approach emits a zebra band"));
+		Expect(Bars == 1 && Stripes > 1 && BarNearX > ZebraFarX,
+			TEXT("the stop bar sits behind the crosswalk, not on top of it"));
+		// The band is as long as the setting says, so the knob is really wired
+		// through rather than the paint keeping its own constant.
+		Expect(Stripes > 1 && FMath::IsNearlyEqual(ZebraFarX - ZebraNearX,
+				RoadNetJunctionMarks::CrosswalkLengthCm(), 1.0),
+			TEXT("the crosswalk is as long as roadnet.CrosswalkLengthCm asks for"));
 	}
 
 	// ---- part 2: the standards tables --------------------------------------
@@ -2170,6 +2604,94 @@ void URoadNetwork::RunSelfCheck()
 		}
 	}
 
+	// ---- part 1e: a tee ramps up onto the road it joins ---------------------
+	// The stem of a tee ENDS on the through road's centreline, so the two never
+	// weld — the through road runs straight past instead of ending there. That
+	// left the stem with only its own dead-end joint, pinned to its draped ground
+	// level, while the through road was lifted to the junction level. The join
+	// was a vertical wall at the mouth of the tee.
+	{
+		URoadNetwork* Net = NewObject<URoadNetwork>(GetTransientPackage());
+
+		// Through road held 5 m above the stem, both dead flat, so any Z the
+		// grade pass produces is its own doing and not terrain noise.
+		constexpr double kThroughZ = 500.0;
+		FRoadDef Through;
+		Through.Ref = { FVector(-10000.0, 0.0, kThroughZ), FVector(10000.0, 0.0, kThroughZ) };
+		Through.Lanes.Total = 4;
+		const int32 ThroughIdx = Net->AddRoad(Through);
+
+		// The stem runs a metre past the centreline, the way a drawn or imported
+		// one does, so the crossing is unambiguous rather than an exact endpoint
+		// touch. Its far end is a genuine dead end and must stay one.
+		FRoadDef Stem;
+		Stem.Ref = { FVector(0.0, 10000.0, 0.0), FVector(0.0, -100.0, 0.0) };
+		Stem.Lanes.Total = 2;
+		const int32 StemIdx = Net->AddRoad(Stem);
+
+		FRoadNetRebuildContext Ctx;
+		Ctx.Pending = { ThroughIdx, StemIdx };
+		Ctx.TestAgainst = Ctx.Pending;
+		Net->BuildCurves(Ctx);
+		Net->BuildEndpointJoints(Ctx);
+		Net->BuildCrossings(Ctx);
+		Net->BuildVerticalAlignment(Ctx);
+
+		Expect(Ctx.Crossings.Num() > 0, TEXT("the stem crosses the through road it ends on"));
+
+		const FRoadCurves* SC = Ctx.Curves.Find(StemIdx);
+		Expect(SC != nullptr && SC->Sampled.Num() >= 2, TEXT("the stem has a profile"));
+		if (SC && SC->Sampled.Num() >= 2)
+		{
+			// The mouth must sit at the junction, not 5 m below it.
+			Expect(FMath::IsNearlyEqual(SC->Sampled.Last().Z, kThroughZ, 1.0),
+				TEXT("the stem meets the through road at the junction's level"));
+
+			// And it must get there by ramping, not by jumping: no step between
+			// neighbouring samples bigger than the grade cap allows.
+			double WorstStepCm = 0.0, WorstGrade = 0.0;
+			for (int32 i = 1; i < SC->Sampled.Num(); ++i)
+			{
+				const double dZ = FMath::Abs(SC->Sampled[i].Z - SC->Sampled[i - 1].Z);
+				const double dS = FMath::Max(1.0, FVector::Dist2D(SC->Sampled[i - 1], SC->Sampled[i]));
+				WorstStepCm = FMath::Max(WorstStepCm, dZ);
+				WorstGrade  = FMath::Max(WorstGrade,  dZ / dS);
+			}
+			Expect(WorstGrade <= 0.13,
+				TEXT("the stem ramps onto the junction instead of stepping up to it"));
+			UE_LOG(LogRoadNet, Display,
+				TEXT("  tee ramp: mouth %.0f cm, worst sample step %.0f cm (%.1f%% grade)"),
+				SC->Sampled.Last().Z, WorstStepCm, WorstGrade * 100.0);
+		}
+
+		// The through road is the one that keeps its own level (כרך 2 §8.5.3).
+		const FRoadCurves* TC = Ctx.Curves.Find(ThroughIdx);
+		if (TC && TC->Sampled.Num() >= 2)
+		{
+			Expect(FMath::IsNearlyEqual(TC->Sampled[0].Z, kThroughZ, 1.0)
+				&& FMath::IsNearlyEqual(TC->Sampled.Last().Z, kThroughZ, 1.0),
+				TEXT("the through road holds its own level through the tee"));
+		}
+	}
+
+	// Packed XY/Z knots and accidental cross-slope between parallel beds.
+	{
+		TArray<FVector> Packed = {
+			FVector(0.0, 0.0, 0.0),
+			FVector(2.0, 0.0, 200.0),
+			FVector(1000.0, 0.0, 0.0)
+		};
+		const int32 Dropped = RoadNetMath::CollapsePackedSamples(Packed, 50.0, 0.12);
+		Expect(Dropped == 1 && Packed.Num() == 2,
+			TEXT("a 2 cm Z-cluster is dropped, leaving the two honest endpoints"));
+		if (Packed.Num() == 2)
+		{
+			Expect(FMath::IsNearlyEqual(Packed[0].Z, 0.0, 0.5)
+				&& FVector::Dist2D(Packed[0], Packed[1]) > 50.0,
+				TEXT("the survivor of a packed Z-cluster keeps the previous Z, not the spike"));
+		}
+	}
+
 	UE_LOG(LogRoadNet, Display, TEXT("LaneSelfCheck: %s"), bOK ? TEXT("PASS") : TEXT("FAIL"));
 }
 
@@ -2272,8 +2794,37 @@ bool URoadNetwork::ToggleMedian(int32 RoadIdx)
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return false; }
 	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
-	L.bMedian = !L.bMedian;
-	RestackForMedian(L);
+	EnsureDetailedLanes(L, bDriveOnLeft);
+
+	int32 MedianIdx = INDEX_NONE;
+	for (int32 i = 0; i < L.DetailedLanes.Num(); ++i)
+	{
+		if (L.DetailedLanes[i].Type == ERoadNetLaneType::Median) { MedianIdx = i; break; }
+	}
+	if (MedianIdx != INDEX_NONE)
+	{
+		L.DetailedLanes.RemoveAt(MedianIdx);
+		L.bMedian = false;
+	}
+	else
+	{
+		FRoadNetLane M;
+		M.LaneId = FGuid::NewGuid();
+		M.Type = ERoadNetLaneType::Median;
+		M.Direction = ERoadNetLaneDirection::None;
+		M.Side = ERoadNetSide::Center;
+		M.Width = FMath::Max(30.f, L.MedianWidth);
+		int32 Mid = 0;
+		for (int32 i = 0; i < L.DetailedLanes.Num(); ++i)
+		{
+			if (L.DetailedLanes[i].Type != ERoadNetLaneType::Sidewalk) { ++Mid; }
+		}
+		Mid = FMath::Clamp(Mid / 2, 0, L.DetailedLanes.Num());
+		L.DetailedLanes.Insert(M, Mid);
+		L.bMedian = true;
+	}
+	RelayoutLanes(L.DetailedLanes, 0.0);
+	SyncFlagsFromLanes(L);
 	return L.bMedian;
 }
 
@@ -2300,7 +2851,18 @@ float URoadNetwork::SetMedianWidth(int32 RoadIdx, float WidthCm)
 	if (!Roads.IsValidIndex(RoadIdx)) { return 0.f; }
 	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
 	L.MedianWidth = FMath::Clamp(WidthCm, 30.f, 2000.f);
-	RestackForMedian(L);
+	EnsureDetailedLanes(L, bDriveOnLeft);
+	for (FRoadNetLane& Ln : L.DetailedLanes)
+	{
+		if (Ln.Type == ERoadNetLaneType::Median) { Ln.Width = L.MedianWidth; }
+	}
+	if (!L.bMedian)
+	{
+		L.bMedian = true;
+		MigrateFlagsToLanes(L);
+	}
+	RelayoutLanes(L.DetailedLanes, 0.0);
+	SyncFlagsFromLanes(L);
 	return L.MedianWidth;
 }
 
@@ -2313,12 +2875,25 @@ float URoadNetwork::AdjustMedianWidth(int32 RoadIdx, float DeltaCm)
 
 bool URoadNetwork::IsMedian(int32 RoadIdx) const
 {
-	return Roads.IsValidIndex(RoadIdx) && Roads[RoadIdx].Lanes.bMedian;
+	if (!Roads.IsValidIndex(RoadIdx)) { return false; }
+	const FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+	if (L.bMedian) { return true; }
+	for (const FRoadNetLane& Ln : L.DetailedLanes)
+	{
+		if (Ln.Type == ERoadNetLaneType::Median) { return true; }
+	}
+	return false;
 }
 
 float URoadNetwork::GetMedianWidth(int32 RoadIdx) const
 {
-	return Roads.IsValidIndex(RoadIdx) ? Roads[RoadIdx].Lanes.MedianWidth : 0.f;
+	if (!Roads.IsValidIndex(RoadIdx)) { return 0.f; }
+	const FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+	for (const FRoadNetLane& Ln : L.DetailedLanes)
+	{
+		if (Ln.Type == ERoadNetLaneType::Median) { return Ln.Width; }
+	}
+	return L.MedianWidth;
 }
 
 ERoadNetMedianEdge URoadNetwork::GetMedianEdge(int32 RoadIdx) const
@@ -2331,6 +2906,44 @@ double URoadNetwork::AdjustJunctionSmoothing(double DeltaCm)
 {
 	JunctionSmoothingCm = FMath::Clamp(JunctionSmoothingCm + DeltaCm, 0.0, 300.0);
 	return JunctionSmoothingCm;
+}
+
+bool URoadNetwork::SetDriveOnLeft(bool bNewDriveOnLeft)
+{
+	if (bDriveOnLeft == bNewDriveOnLeft) { return false; }
+	bDriveOnLeft = bNewDriveOnLeft;
+
+	// Count-model roads need nothing: ResolveLanes mirrors them from the flag on every
+	// read. Authored lanes are the problem — ResolveLanes returns DetailedLanes verbatim,
+	// so their stored Direction keeps the old country's traffic forever. Re-deriving them
+	// from the counts would fix the handedness by throwing away every per-lane edit, so
+	// flip the stored Direction in place instead.
+	//
+	// The lane STACK deliberately does not move: where a road splits its carriageway is a
+	// physical fact about that road, and changing country only changes which direction
+	// uses which side of the split. RelayoutLanes then re-derives Side from the offsets so
+	// Side and Direction cannot drift apart.
+	for (FRoadDef& R : Roads)
+	{
+		if (!R.Lanes.HasDetailedLanes()) { continue; }
+		for (FRoadNetLane& L : R.Lanes.DetailedLanes)
+		{
+			// FromSide / Both / None already mean the same thing on either side of the
+			// road (bTravelsForward folds bDriveOnLeft into the FromSide answer), so
+			// touching them here would flip that traffic twice.
+			if (L.Direction == ERoadNetLaneDirection::Forward)
+			{
+				L.Direction = ERoadNetLaneDirection::Backward;
+			}
+			else if (L.Direction == ERoadNetLaneDirection::Backward)
+			{
+				L.Direction = ERoadNetLaneDirection::Forward;
+			}
+		}
+		RelayoutLanes(R.Lanes.DetailedLanes, 0.0);
+		SyncFlagsFromLanes(R.Lanes);
+	}
+	return true;
 }
 
 URoadNetwork::URoadNetwork()
@@ -2520,6 +3133,7 @@ int32 URoadNetwork::SmoothAllRoads(float SimplifyTolCm, float CornerAngleDeg, fl
 		Changed = FMath::Max(Changed, DeclusterNearJunctions());
 		Changed = FMath::Max(Changed, StraightenJunctionApproaches());
 	}
+	Changed = FMath::Max(Changed, DeclusterPackedAlongRoads());
 	return Changed;
 }
 
@@ -2626,6 +3240,59 @@ int32 URoadNetwork::DeclusterNearJunctions(double RadiusCm, double MinSpacingCm)
 	UE_LOG(LogRoadNet, Log,
 		TEXT("[RoadNet] DeclusterNearJunctions: dropped %d clustered point(s) across %d/%d road(s) (radius %.0f cm, min spacing %.0f cm)."),
 		Dropped, Changed, Roads.Num(), RadiusCm, MinSpacingCm);
+	return Changed;
+}
+
+int32 URoadNetwork::DeclusterPackedAlongRoads()
+{
+	const IConsoleVariable* SlopeCV = IConsoleManager::Get().FindConsoleVariable(TEXT("osm.RoadGradeMaxSlope"));
+	const double MaxSlope = FMath::Max(0.005, SlopeCV ? (double)SlopeCV->GetFloat() : 0.12);
+	const double MinXY = FMath::Max(50.0, 0.25 * FMath::Max(25.0, PolylineDensityCm));
+
+	TMap<int64, int32> NodeUse;
+	BuildNodeUse(Roads, NodeUse);
+
+	int32 Changed = 0, Dropped = 0;
+	for (FRoadDef& Road : Roads)
+	{
+		const int32 N = Road.Ref.Num();
+		if (N < 3) { continue; }
+		const bool bIds = (Road.NodeIds.Num() == N);
+
+		TBitArray<> AlwaysKeep;
+		AlwaysKeep.Init(false, N);
+		for (int32 i = 0; i < N; ++i)
+		{
+			if (IsProtectedPoint(Road, i, NodeUse)) { AlwaysKeep[i] = true; }
+		}
+
+		TArray<int32> Kept;
+		const int32 Here = RoadNetMath::CollapsePackedSamples(Road.Ref, MinXY, MaxSlope, &AlwaysKeep, &Kept);
+		if (Here <= 0) { continue; }
+
+		if (bIds)
+		{
+			TArray<int64> NewIds;
+			NewIds.Reserve(Kept.Num());
+			for (int32 i : Kept) { NewIds.Add(Road.NodeIds[i]); }
+			Road.NodeIds = MoveTemp(NewIds);
+		}
+		else
+		{
+			Road.NodeIds.Reset();
+		}
+		if (Road.Elev.Num() > 0)
+		{
+			Road.Elev.SetNum(Road.Ref.Num());
+			for (int32 i = 0; i < Road.Ref.Num(); ++i) { Road.Elev[i] = Road.Ref[i].Z; }
+		}
+		Dropped += Here;
+		++Changed;
+	}
+
+	UE_LOG(LogRoadNet, Log,
+		TEXT("[RoadNet] DeclusterPackedAlongRoads: dropped %d packed point(s) across %d/%d road(s) (min XY %.0f cm, max slope %.1f%%)."),
+		Dropped, Changed, Roads.Num(), MinXY, MaxSlope * 100.0);
 	return Changed;
 }
 
@@ -2744,14 +3411,25 @@ float URoadNetwork::AdjustSidewalkWidth(int32 RoadIdx, float DeltaCm)
 {
 	if (!Roads.IsValidIndex(RoadIdx)) { return 0.f; }
 	FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+	EnsureDetailedLanes(L, bDriveOnLeft);
 	L.SidewalkWidth = FMath::Clamp(L.SidewalkWidth + DeltaCm, 0.f, 2000.f);
-	// First widening from nothing turns the sidewalk on (both sides) so the
-	// nudge is immediately visible.
-	if (L.SidewalkWidth > 0.f && !L.bSidewalkLeft && !L.bSidewalkRight)
+	int32 Touched = 0;
+	for (FRoadNetLane& Ln : L.DetailedLanes)
 	{
-		L.bSidewalkLeft  = true;
-		L.bSidewalkRight = true;
+		if (Ln.Type == ERoadNetLaneType::Sidewalk)
+		{
+			Ln.Width = FMath::Max(30.f, L.SidewalkWidth);
+			++Touched;
+		}
 	}
+	if (Touched == 0 && L.SidewalkWidth > 0.f)
+	{
+		L.bSidewalkLeft = true;
+		L.bSidewalkRight = true;
+		MigrateFlagsToLanes(L);
+	}
+	RelayoutLanes(L.DetailedLanes, 0.0);
+	SyncFlagsFromLanes(L);
 	return L.SidewalkWidth;
 }
 
@@ -2780,23 +3458,31 @@ int32 URoadNetwork::AddStandardParkingBay(int32 RoadIdx, ERoadNetSide Side, ERoa
 	const double L       = RoadNetMath::TotalLength(Roads[RoadIdx].Ref);
 	const double Setback = FMath::Max(0.0, (double)ParkingBayJunctionSetbackCm);
 	const double Taper   = FMath::Max(0.0, (double)ParkingBayTaperCm);
-	// Keep the pocket (and tapers) clear of junctions at both ends.
-	const double Lo = Setback + Taper;
-	const double Hi = FMath::Max(Lo, L - (Setback + Taper));
+
+	// The setback exists to keep stalls out of a junction, so an end that meets no
+	// junction does not need it — a cul-de-sac or a road that simply stops can park
+	// right up to its end.
+	bool bJointAtStart = false, bJointAtEnd = false;
+	GetJunctionEnds(RoadIdx, bJointAtStart, bJointAtEnd);
+
+	const double Lo = (bJointAtStart ? Setback : 0.0) + Taper;
+	const double Hi = FMath::Max(Lo, L - ((bJointAtEnd ? Setback : 0.0) + Taper));
 	const double Available = FMath::Max(0.0, Hi - Lo);
-	double Want = (ParkingBayLengthCm > 0.f)
+	const double Want = (ParkingBayLengthCm > 0.f)
 		? FMath::Min((double)ParkingBayLengthCm, Available) : Available;
 
 	Bay.TaperCm = ParkingBayTaperCm;
 	if (Want < 2.0 * (double)Bay.StallWidthCm)
 	{
-		// Too short to set back from both junctions — take what the road has and
-		// drop the taper rather than emitting a degenerate bay.
-		Want = FMath::Max(0.0, L);
-		Bay.TaperCm = 0.f;
-		Bay.StartArcCm = 0.f;
-		Bay.LengthCm   = (float)Want;
-		return Roads[RoadIdx].ParkingBays.Add(Bay);
+		// Not enough road between the junctions for two stalls. This used to fall
+		// back to a full-length bay with the setback dropped, which is exactly the
+		// bay the setback exists to prevent: stalls sitting in the junction. Refuse
+		// instead — the caller reports it and the user shortens the bay or setback.
+		UE_LOG(LogRoadNet, Warning,
+			TEXT("[RoadNet] AddStandardParkingBay: road %d has %.0f cm clear of its junctions, "
+			     "needs %.0f cm for two %.0f cm stalls — no bay added."),
+			RoadIdx, Available, 2.0 * (double)Bay.StallWidthCm, (double)Bay.StallWidthCm);
+		return INDEX_NONE;
 	}
 
 	// Centre on the authored edge point when given; otherwise mid-road.
@@ -2806,6 +3492,18 @@ int32 URoadNetwork::AddStandardParkingBay(int32 RoadIdx, ERoadNetSide Side, ERoa
 	Bay.StartArcCm = (float)S0;
 	Bay.LengthCm   = (float)Want;
 	return Roads[RoadIdx].ParkingBays.Add(Bay);
+}
+
+int32 URoadNetwork::AddBikeCrossing(const TArray<FVector>& Path, float WidthCm)
+{
+	if (Path.Num() < 2) { return INDEX_NONE; }
+	if (RoadNetMath::TotalLength(Path) < 90.0) { return INDEX_NONE; }  // shorter than one block pitch
+
+	FRoadNetBikeCrossing X;
+	X.Id = FGuid::NewGuid();
+	X.Path = Path;
+	X.WidthCm = FMath::Max(100.f, WidthCm);
+	return BikeCrossings.Add(MoveTemp(X));
 }
 
 int32 URoadNetwork::ClearParkingBays(int32 RoadIdx)
@@ -3173,6 +3871,15 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 {
 	const double T0 = FPlatformTime::Seconds();
 
+	auto EnsureIds = [](auto& Arr)
+	{
+		for (auto& E : Arr) { if (!E.Id.IsValid()) { E.Id = FGuid::NewGuid(); } }
+	};
+	EnsureIds(PlacedMarks);
+	EnsureIds(PlacedIslands);
+	EnsureIds(BikeCrossings);
+	EnsureIds(CurbPaints);
+
 	FRoadNetRebuildContext Ctx;
 	Ctx.ExplicitDirtyBox = DirtyRegionWorld;
 
@@ -3199,6 +3906,49 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 	else
 	{
 		Ctx.Modified = TArray<int32>(Modified.GetData(), Modified.Num());
+	}
+
+	for (int32 i : Ctx.Modified)
+	{
+		if (!Roads.IsValidIndex(i) || !Roads[i].Lanes.HasDetailedLanes()) { continue; }
+		MigrateFlagsToLanes(Roads[i].Lanes);
+		RelayoutLanes(Roads[i].Lanes.DetailedLanes, 0.0);
+		SyncFlagsFromLanes(Roads[i].Lanes);
+	}
+
+	for (FRoadDef& R : Roads)
+	{
+		if (!RoadLooksClosed(R.Ref) || R.Ref.Num() < 4) { continue; }
+		FVector2D Cent(0, 0);
+		for (const FVector& P : R.Ref) { Cent += FVector2D(P.X, P.Y); }
+		Cent /= (double)R.Ref.Num();
+		const FRoadNetRoundaboutConfig* Rb = FindRoundaboutNear(Cent);
+		if (!Rb || Rb->CirculatoryWidthCm < 50.f) { continue; }
+		const float Want = Rb->CirculatoryWidthCm;
+		const float Have = R.Lanes.HalfWidthCm() * 2.f;
+		if (FMath::Abs(Have - Want) < 8.f) { continue; }
+		FRoadNetLaneSpec& L = R.Lanes;
+		if (L.HasDetailedLanes())
+		{
+			double Driven = 0.0;
+			for (const FRoadNetLane& Ln : L.DetailedLanes)
+			{
+				if (!Ln.bOutboard() && Ln.Type != ERoadNetLaneType::Median) { Driven += Ln.Width; }
+			}
+			if (Driven < 50.0) { continue; }
+			const double S = (double)Want / Driven;
+			for (FRoadNetLane& Ln : L.DetailedLanes)
+			{
+				if (!Ln.bOutboard() && Ln.Type != ERoadNetLaneType::Median) { Ln.Width = (float)(Ln.Width * S); }
+			}
+			RelayoutLanes(L.DetailedLanes, 0.0);
+			SyncFlagsFromLanes(L);
+		}
+		else
+		{
+			const int32 N = FMath::Max(1, L.EffectiveLaneCount());
+			L.LaneWidthDefault = Want / (float)N;
+		}
 	}
 
 	// Per-stage timing so large imports show where time goes (§10.18 profiling).
@@ -3293,6 +4043,7 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 	BuildLaneRibbons(Ctx);        // §12.1 per-lane ribbon polys
 	const double tRibbon = Now();  Trace(TEXT("laneribbon"), tRibbon - tGraph);
 	BuildStandardParkingBays(Ctx);// § standard stalls → parking overlay + white stall lines
+	BuildBikeCrossings(Ctx);      // § elephant's-footprint cycle crossings → white bank
 	BuildFurniture(Ctx);          // § street-furniture placement sampling (spaced + continuous)
 	const double tExtras = Now();  Trace(TEXT("streetextras"), tExtras - tRibbon);
 	CommitGeometry(Ctx);          // §10.15 triangulate + spawn surface actor
@@ -3514,13 +4265,17 @@ void URoadNetwork::BuildCurves(FRoadNetRebuildContext& Ctx) const
 		FRoadCurves C;
 		C.RoadIndex = Idx;
 		const double DensityCm = FMath::Max(25.0, PolylineDensityCm);
-		// Round the piecewise-linear reference with a G2 (curvature-continuous)
-		// cubic spline through the source knots, THEN resample at uniform spacing.
-		// G2 (vs C1 Catmull-Rom) means curvature no longer jumps at knots, so the
-		// offset edges and meshed surface stop faceting on curves.
+		const double MinXY = FMath::Max(50.0, 0.25 * DensityCm);
+		const IConsoleVariable* SlopeCV = IConsoleManager::Get().FindConsoleVariable(TEXT("osm.RoadGradeMaxSlope"));
+		const double MaxSlope = FMath::Max(0.005, SlopeCV ? (double)SlopeCV->GetFloat() : 0.12);
+		// Packed Ref knots make the G2 spline oscillate; collapse a COPY so authored
+		// points survive in the editor until DeclusterPackedAlongRoads runs at import.
+		TArray<FVector> Knots = R.Ref;
+		RoadNetMath::CollapsePackedSamples(Knots, MinXY, MaxSlope);
 		TArray<FVector> Smooth;
-		RoadNetMath::SmoothG2Spline(R.Ref, DensityCm, Smooth);
+		RoadNetMath::SmoothG2Spline(Knots, DensityCm, Smooth);
 		RoadNetMath::ResampleByArcLength(Smooth, DensityCm, C.Sampled, kAdaptiveTurnRad);
+		RoadNetMath::CollapsePackedSamples(C.Sampled, MinXY, MaxSlope);
 		if (C.Sampled.Num() < 2) { continue; }
 
 		// Grade the longitudinal profile into a clean ramp: the G2 spline through
@@ -3966,9 +4721,22 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 
 		// (a) welded endpoint joints whose arms lie in this zone. This covers both
 		// N-way intersections (3+ arms) AND end-to-end seams (2 arms): two roads
-		// meeting at a node leave a wedge/notch that a disc at the node fills. The
-		// disc is centred on the centroid of the participating arm endpoints and
-		// grown to span the gap between them, so the fill reaches both road ends.
+		// meeting at a node leave a wedge/notch between their outlines, and the
+		// node itself may be a genuine gap because arms weld up to kEndpointWeldCm
+		// apart without touching. Both are filled by the CONVEX HULL of the arms'
+		// own carriageway edge ends.
+		//
+		// This used to be a disc of radius max(arm half-width), which is where the
+		// "blob" came from: a circle has no orientation, so a 2-lane road meeting a
+		// 4-lane one got the 4-lane road's 7 m radius stamped across it and bulged
+		// 3.5 m past both its kerbs. The kerb ribbon, which is traced off this same
+		// merged boundary, then ran into the bulge and got cut off mid-stone.
+		//
+		// The hull cannot do that: every vertex of it IS an arm's own edge point, so
+		// the fill is as wide as the arms are and no wider, it leans the way they
+		// lean, and a skewed junction gets a skewed fill. That is also what כרך 2
+		// §2.1 defines the junction area to be — the region bounded by the arms'
+		// edge lines and their imaginary extension.
 		auto ArmEndpoint = [&](const FRoadNetJointArm& Arm) -> FVector2D
 		{
 			if (const FRoadCurves* C = Ctx.Curves.Find(Arm.Road))
@@ -3980,6 +4748,30 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 			return FVector2D(P.X, P.Y);
 		};
 
+		// The two outer-edge corners this arm presents to the node. Falls back to
+		// the centreline endpoint offset by the arm's half width when the arm has
+		// no resolved curves (hand-drawn road not yet sampled), so a joint never
+		// silently loses its fill.
+		auto ArmEdgeEnds = [&](const FRoadNetJointArm& Arm, TArray<FVector2D>& Out)
+		{
+			const FRoadCurves* C = Ctx.Curves.Find(Arm.Road);
+			if (C && C->LeftEdge.Num() > 0 && C->RightEdge.Num() > 0)
+			{
+				const FVector& L = Arm.bAtStart ? C->LeftEdge[0]  : C->LeftEdge.Last();
+				const FVector& R = Arm.bAtStart ? C->RightEdge[0] : C->RightEdge.Last();
+				Out.Emplace(L.X, L.Y);
+				Out.Emplace(R.X, R.Y);
+				return;
+			}
+			const FVector2D P = ArmEndpoint(Arm);
+			const FVector2D N(-FMath::Sin(Arm.BearingRad), FMath::Cos(Arm.BearingRad));
+			const double H = FMath::Max(50.0, (double)Arm.HalfWidthCm);
+			Out.Add(P + N * H);
+			Out.Add(P - N * H);
+		};
+
+		TArray<UE::Geometry::FGeneralPolygon2d> Fills;   // node fills (hulls)
+
 		for (const FRoadNetJoint& J : Ctx.Joints)
 		{
 			// Terminal (dead-end) joints have a single arm — nothing to bridge.
@@ -3988,18 +4780,25 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 			double MaxHalf = 0.0;
 			FVector2D Centroid(0, 0);
 			int32 InZoneArms = 0;
+			TArray<FVector2D> EdgeEnds;
 			for (const FRoadNetJointArm& Arm : J.Arms)
 			{
 				if (!ZoneSet.Contains(Arm.Road)) { continue; }
 				Centroid += ArmEndpoint(Arm);
 				MaxHalf = FMath::Max(MaxHalf, HalfWidth(Arm.Road));
+				ArmEdgeEnds(Arm, EdgeEnds);
 				++InZoneArms;
 			}
 			if (InZoneArms < 2 || MaxHalf <= 0.0) { continue; }
 			Centroid /= (double)InZoneArms;
 
-			// Radius must reach the farthest arm endpoint (so the gap is covered)
-			// plus that road's half-width (so the disc meets its edges cleanly).
+			UE::Geometry::FGeneralPolygon2d Hull;
+			if (RoadNetSurface::MakeHull(EdgeEnds, Hull)) { Fills.Add(MoveTemp(Hull)); }
+
+			// The smoothing pass still works in discs, and its radius has to reach
+			// the farthest arm endpoint plus that road's half width or it would
+			// clip the corner it is meant to round. Note this no longer adds any
+			// pavement — it only says how much of the surface to look at.
 			double R = MaxHalf;
 			for (const FRoadNetJointArm& Arm : J.Arms)
 			{
@@ -4013,21 +4812,16 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 		// (b) centerline crossings between roads in this zone (X and touching-T).
 		// Uses the precomputed shared crossings (grid broadphase) instead of a
 		// per-zone O(N^2) segment sweep.
+		//
+		// A crossing needs NO fill: two full-width bands laid across each other
+		// already overlap over the whole crossing, so the union covers it. It is
+		// still a junction point for smoothing, which is what the corners of that
+		// overlap need.
 		for (const FRoadNetCrossing& X : Ctx.Crossings)
 		{
 			if (!ZoneSet.Contains(X.RoadA) || !ZoneSet.Contains(X.RoadB)) { continue; }
 			const double R = FMath::Max(HalfWidth(X.RoadA), HalfWidth(X.RoadB));
 			AddJPoint(X.Point, R);
-		}
-
-		TArray<UE::Geometry::FGeneralPolygon2d> Discs;         // fill discs (radius R)
-		Discs.Reserve(JPts.Num());
-		for (const TPair<FVector2D, double>& E : JPts)
-		{
-			UE::Geometry::FGeneralPolygon2d Disc;
-			// Higher segment count → smoother junction fill (fewer facet corners).
-			RoadNetSurface::MakeDisc(E.Key, E.Value, /*Segments*/48, Disc);
-			Discs.Add(MoveTemp(Disc));
 		}
 
 		// JunctionSmoothingCm drives the morphological close (round corners / gap
@@ -4041,7 +4835,6 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 		{
 			// Match a JPt to a stored override the same way the interactive picker
 			// does (nearest config within tolerance).
-			constexpr double kJunctionMatchCm = 600.0; // 6 m
 			JClose.Reserve(JPts.Num());
 			for (const TPair<FVector2D, double>& E : JPts)
 			{
@@ -4069,7 +4862,7 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 		// and then rounds each junction inside its own disc, so a bigger radius
 		// buys rounder corners and nothing else.
 		RoadNetSurface::BuildMergedSurface(Ptrs, Ctx.ZoneSurfacePolys[z], CloseCm,
-			&Discs, JClose.Num() > 0 ? &JClose : nullptr);
+			&Fills, JClose.Num() > 0 ? &JClose : nullptr);
 		Ctx.SurfacePolys.Append(Ctx.ZoneSurfacePolys[z]);
 
 		// ---- true junction area (§2.1 "שטח הצומת") for clipping paint ----------
@@ -4198,17 +4991,29 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 		{
 			using namespace UE::Geometry;
 
+			auto SidewalkW = [](const FRoadNetLaneSpec& L, bool bLeft) -> double
+			{
+				for (const FRoadNetLane& Ln : L.DetailedLanes)
+				{
+					if (Ln.Type != ERoadNetLaneType::Sidewalk) { continue; }
+					if (bLeft == (Ln.CenterOffset < 0.0)) { return (double)FMath::Max(0.f, Ln.Width); }
+				}
+				if ((bLeft && L.bSidewalkLeft) || (!bLeft && L.bSidewalkRight))
+				{
+					return (double)FMath::Max(0.f, L.SidewalkWidth);
+				}
+				return 0.0;
+			};
+
 			double MaxW = 0.0;
-			bool bAnySide = false, bAnyDisabled = false;
+			bool bAnySide = false;
 			for (int32 RoadIdx : ZoneRoads)
 			{
 				if (!Roads.IsValidIndex(RoadIdx)) { continue; }
 				const FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
-				const double W = (double)L.SidewalkWidth;
-				if (W <= 0.0 || (!L.bSidewalkLeft && !L.bSidewalkRight)) { continue; }
-				bAnySide = true;
-				MaxW = FMath::Max(MaxW, W);
-				if (!L.bSidewalkLeft || !L.bSidewalkRight) { bAnyDisabled = true; }
+				const double WL = SidewalkW(L, true), WR = SidewalkW(L, false);
+				if (WL > 0.0 || WR > 0.0) { bAnySide = true; }
+				MaxW = FMath::Max(MaxW, FMath::Max(WL, WR));
 			}
 
 			const TArray<FGeneralPolygon2d>& RoadPolys = Ctx.ZoneSurfacePolys[z];
@@ -4224,36 +5029,32 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 				TArray<FGeneralPolygon2d> Band;
 				if (bOff && PolygonsDifference(Dilated, RoadPolys, Band) && Band.Num() > 0)
 				{
-					if (bAnyDisabled)
+					TArray<FGeneralPolygon2d> Masks;
+					for (int32 RoadIdx : ZoneRoads)
 					{
-						// Mask the band to only the requested sides. Ribbons are
-						// intentionally generous (overlap the road edge and extend
-						// past the band) so the intersection edge is the band's.
-						TArray<FGeneralPolygon2d> Masks;
-						for (int32 RoadIdx : ZoneRoads)
+						const FRoadCurves* C = Ctx.Curves.Find(RoadIdx);
+						if (!C || !Roads.IsValidIndex(RoadIdx)) { continue; }
+						const FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
+						const double Half = HalfWidth(RoadIdx);
+						const double In = FMath::Max(1.0, Half - 30.0);
+						const double WL = SidewalkW(L, true), WR = SidewalkW(L, false);
+						FGeneralPolygon2d Mask;
+						if (WL > 0.0)
 						{
-							const FRoadCurves* C = Ctx.Curves.Find(RoadIdx);
-							if (!C || !Roads.IsValidIndex(RoadIdx)) { continue; }
-							const FRoadNetLaneSpec& L = Roads[RoadIdx].Lanes;
-							const double W = (double)L.SidewalkWidth;
-							if (W <= 0.0) { continue; }
-							const double Half = HalfWidth(RoadIdx);
-							const double In  = FMath::Max(1.0, Half - 30.0);
-							const double Out = Half + W + 60.0 + Roads[RoadIdx].MaxBayDepthCm();
-							FGeneralPolygon2d Mask;
-							if (L.bSidewalkLeft  && RoadNetSurface::BuildSideRibbon(C->Sampled, +In, +Out, Mask)) { Masks.Add(Mask); }
-							if (L.bSidewalkRight && RoadNetSurface::BuildSideRibbon(C->Sampled, -In, -Out, Mask)) { Masks.Add(Mask); }
+							const double Out = Half + WL + 60.0 + Roads[RoadIdx].MaxBayDepthCm();
+							if (RoadNetSurface::BuildSideRibbon(C->Sampled, +In, +Out, Mask)) { Masks.Add(Mask); }
 						}
-						TArray<FGeneralPolygon2d> MaskU;
-						if (Masks.Num() > 0 && PolygonsUnion(Masks, MaskU, /*bCopyInputOnFailure*/true)
-							&& PolygonsIntersection(Band, MaskU, Ctx.ZoneSidewalkPolys[z]))
+						if (WR > 0.0)
 						{
-							// masked band stored
+							const double Out = Half + WR + 60.0 + Roads[RoadIdx].MaxBayDepthCm();
+							if (RoadNetSurface::BuildSideRibbon(C->Sampled, -In, -Out, Mask)) { Masks.Add(Mask); }
 						}
-						else
-						{
-							Ctx.ZoneSidewalkPolys[z] = MoveTemp(Band);
-						}
+					}
+					TArray<FGeneralPolygon2d> MaskU;
+					if (Masks.Num() > 0 && PolygonsUnion(Masks, MaskU, /*bCopyInputOnFailure*/true)
+						&& PolygonsIntersection(Band, MaskU, Ctx.ZoneSidewalkPolys[z]))
+					{
+						// per-road width mask stored
 					}
 					else
 					{
@@ -4464,13 +5265,30 @@ void URoadNetwork::BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const
 		}
 
 		// ---- lane markings (§8.10): per-road stripes within this zone ----------
+		// Which road ends meet a junction, so a crossing at a junction mouth does not
+		// paint a second stop bar for traffic the junction has already released.
+		// Ctx.Joints is built earlier in the rebuild; if it is empty nothing is
+		// skipped, which is the old behaviour.
+		TMap<int32, TPair<bool, bool>> JointEnds;
+		for (const FRoadNetJoint& J : Ctx.Joints)
+		{
+			if (J.Arms.Num() < 2) { continue; }   // a terminal node is not a junction
+			for (const FRoadNetJointArm& Arm : J.Arms)
+			{
+				TPair<bool, bool>& E = JointEnds.FindOrAdd(Arm.Road, TPair<bool, bool>(false, false));
+				if (Arm.bAtStart) { E.Key = true; } else { E.Value = true; }
+			}
+		}
+
 		TArray<UE::Geometry::FGeneralPolygon2d> White, Yellow;
 		for (int32 RoadIdx : ZoneRoads)
 		{
 			const FRoadCurves* C = Ctx.Curves.Find(RoadIdx);
 			if (C && Roads.IsValidIndex(RoadIdx))
 			{
-				RoadNetMarkings::BuildRoadMarkings(Roads[RoadIdx], *C, bDriveOnLeft, White, Yellow);
+				const TPair<bool, bool>* Ends = JointEnds.Find(RoadIdx);
+				RoadNetMarkings::BuildRoadMarkings(Roads[RoadIdx], *C, bDriveOnLeft,
+					Ends ? Ends->Key : false, Ends ? Ends->Value : false, White, Yellow);
 			}
 		}
 
@@ -4727,6 +5545,91 @@ void URoadNetwork::RetireEmptyTiles(FRoadNetRebuildContext& Ctx)
 	for (const FIntPoint& C : ToRemove) { TileActors.Remove(C); }
 }
 
+int32 URoadNetwork::CommitMarkingDecals(
+	FName LayerName,
+	const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
+	UMaterialInterface* DecalMaterial, FRoadNetRebuildContext& Ctx)
+{
+	if (!DecalMaterial || !WorldPtr.IsValid()) { return 0; }
+
+	// Projection depth. Deep enough to survive the road's own grade and the
+	// terrain conform underneath it, shallow enough not to reach a bridge deck or
+	// an underpass roof passing overhead.
+	constexpr double kDecalHalfDepthCm = 60.0;
+
+	int32 Placed = 0;
+	for (int32 z = 0; z < ZonePolys.Num(); ++z)
+	{
+		if (ZonePolys[z].Num() == 0 || !Ctx.Zones.IsValidIndex(z)) { continue; }
+
+		TArray<const TArray<FVector>*> CenterLines;
+		for (int32 RoadIdx : Ctx.Zones[z])
+		{
+			if (const FRoadCurves* C = Ctx.Curves.Find(RoadIdx)) { CenterLines.Add(&C->Sampled); }
+		}
+		RoadNetMesh::FCenterlineHeightField Field;
+		Field.Build(CenterLines);
+		const double FallbackZ = Field.FirstZ();
+
+		for (const UE::Geometry::FGeneralPolygon2d& GP : ZonePolys[z])
+		{
+			const TArray<FVector2d>& V = GP.GetOuter().GetVertices();
+			if (V.Num() < 3) { continue; }
+
+			// Oriented box from the longest edge. Every mark in these banks is a
+			// thin quad (a line, a dash, a bar, a zebra stripe), so the longest
+			// edge IS the mark's length and this is exact.
+			// ponytail: a non-convex mark (an arrow head) gets its bounding box
+			// instead, which is the right footprint for a decal anyway — the
+			// material's alpha carries the shape.
+			int32 Longest = 0;
+			double LongestLen2 = -1.0;
+			for (int32 i = 0; i < V.Num(); ++i)
+			{
+				const double L2 = (V[(i + 1) % V.Num()] - V[i]).SizeSquared();
+				if (L2 > LongestLen2) { LongestLen2 = L2; Longest = i; }
+			}
+			FVector2d Axis = V[(Longest + 1) % V.Num()] - V[Longest];
+			if (!Axis.Normalize()) { continue; }
+			const FVector2d Perp(-Axis.Y, Axis.X);
+
+			double LoA = TNumericLimits<double>::Max(), HiA = -LoA;
+			double LoP = TNumericLimits<double>::Max(), HiP = -LoP;
+			for (const FVector2d& P : V)
+			{
+				const double A = P.Dot(Axis), B = P.Dot(Perp);
+				LoA = FMath::Min(LoA, A); HiA = FMath::Max(HiA, A);
+				LoP = FMath::Min(LoP, B); HiP = FMath::Max(HiP, B);
+			}
+			const double HalfLen  = 0.5 * (HiA - LoA);
+			const double HalfWide = 0.5 * (HiP - LoP);
+			if (HalfLen < 1.0 || HalfWide < 1.0) { continue; }   // sub-centimetre sliver
+
+			const FVector2d C =
+				Axis * (0.5 * (LoA + HiA)) + Perp * (0.5 * (LoP + HiP));
+			const FVector Loc(C.X, C.Y,
+				Field.SampleHeight(C.X, C.Y, FallbackZ) + kRoadZLiftCm + kMarkingLiftCm);
+
+			const FIntPoint Coord = TopoKeyOf(Loc, Ctx);
+			if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
+			ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
+			if (!Tile) { continue; }
+
+			// DecalSize is (depth, half-width across the yaw, half-length along it).
+			if (Tile->AddRoadDecal(DecalMaterial, Loc,
+				(float)FMath::RadiansToDegrees(FMath::Atan2(Axis.Y, Axis.X)),
+				FVector(kDecalHalfDepthCm, HalfWide, HalfLen)))
+			{
+				++Placed;
+			}
+		}
+	}
+
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitMarkingDecals(%s): %d decals."),
+		*LayerName.ToString(), Placed);
+	return Placed;
+}
+
 int32 URoadNetwork::CommitLayer(
 	FName LayerName,
 	const TArray<TArray<UE::Geometry::FGeneralPolygon2d>>& ZonePolys,
@@ -4978,6 +5881,7 @@ int32 URoadNetwork::CommitLayer(
 		if (UDynamicMeshComponent* Comp =
 			Tile->GetOrCreateMeshLayer(LayerName, Material, Color, bBakeLaneColors && bShowLaneRibbons))
 		{
+			if (LayerIsPaint(LayerName)) { Comp->SetCastShadow(false); }
 			Comp->SetMesh(MoveTemp(*KV.Value));
 			Comp->NotifyMeshUpdated();
 		}
@@ -5192,10 +6096,27 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 		/*bBakeLaneColors*/false, /*bWorldUVs*/false, /*bConformSurface*/true,
 		/*bSkirtToGround*/true);
 	CTrace(TEXT("layer:walks"));
-	const int32 WhiteTris = CommitLayer(TEXT("MarkingsWhite"),
-		Ctx.ZoneMarkingWhitePolys, /*ExtraLift*/4.0, FColor(232, 232, 226), MarkingWhiteMaterial, Ctx);
-	const int32 YellowTris = CommitLayer(TEXT("MarkingsYellow"),
-		Ctx.ZoneMarkingYellowPolys, /*ExtraLift*/4.0, FColor(240, 190, 30), MarkingYellowMaterial, Ctx);
+	// Paint sits kMarkingLiftCm (1 cm) proud of the asphalt, not the 4 cm it used to:
+	// both are draped off the same centrelines, so 4 cm was pure step, visible at
+	// human height as markings hovering over the road.
+	//
+	// Markings are EITHER meshed ribbons or projected decals, never both — the
+	// two would z-fight over the same centimetre of road.
+	int32 WhiteTris = 0, YellowTris = 0;
+	if (bMarkingsAsDecals)
+	{
+		CommitMarkingDecals(TEXT("MarkingsWhite"), Ctx.ZoneMarkingWhitePolys,
+			MarkingWhiteDecal.LoadSynchronous(), Ctx);
+		CommitMarkingDecals(TEXT("MarkingsYellow"), Ctx.ZoneMarkingYellowPolys,
+			MarkingYellowDecal.LoadSynchronous(), Ctx);
+	}
+	else
+	{
+		WhiteTris = CommitLayer(TEXT("MarkingsWhite"),
+			Ctx.ZoneMarkingWhitePolys, kMarkingLiftCm, FColor(232, 232, 226), MarkingWhiteMaterial, Ctx);
+		YellowTris = CommitLayer(TEXT("MarkingsYellow"),
+			Ctx.ZoneMarkingYellowPolys, kMarkingLiftCm, FColor(240, 190, 30), MarkingYellowMaterial, Ctx);
+	}
 	CTrace(TEXT("layer:markings"));
 
 	// Typed-lane overlays: bike paths (green) + parking bays (amber) as thin
@@ -5204,16 +6125,18 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 	// (they ride the road surface). Empty layers stay empty (cleared above), so
 	// removing the last bike/parking lane clears its surface.
 	//
-	// These sit BELOW the paint (2 cm against the markings' 4 cm). They used to be
-	// lifted above it, which buried the very lines that make them readable: a
-	// parking bay's stall dividers are generated into the white bank by
+	// These sit BELOW the paint (kLaneOverlayLiftCm against kMarkingLiftCm). They
+	// used to be lifted above it, which buried the very lines that make them
+	// readable: a parking bay's stall dividers are generated into the white bank by
 	// BuildStandardParkingBays and were then covered by the bay surface drawn on
 	// top of them, so the bays rendered as blank slabs. Paint goes ON a surface.
+	// The two tiers dropped together when the paint came down to 1 cm — keeping the
+	// overlay at 2 cm would have re-buried the dividers.
 	const int32 BikeTris = CommitLayer(TEXT("LanesBike"),
-		Ctx.ZoneLaneBikePolys, /*ExtraLift*/2.0, FColor(60, 170, 90), BikeLaneMaterial, Ctx,
+		Ctx.ZoneLaneBikePolys, kLaneOverlayLiftCm, FColor(60, 170, 90), BikeLaneMaterial, Ctx,
 		/*bBakeLaneColors*/false, /*bWorldUVs*/false, /*bConformSurface*/false);
 	const int32 ParkTris = CommitLayer(TEXT("LanesParking"),
-		Ctx.ZoneLaneParkPolys, /*ExtraLift*/2.0, FColor(200, 165, 45), ParkingMaterial, Ctx,
+		Ctx.ZoneLaneParkPolys, kLaneOverlayLiftCm, FColor(200, 165, 45), ParkingMaterial, Ctx,
 		/*bBakeLaneColors*/false, /*bWorldUVs*/false, /*bConformSurface*/false);
 
 	UE_LOG(LogRoadNet, Log,
@@ -5228,11 +6151,11 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 	CommitJunctionSignals(Ctx);   // § traffic-signal placeholders at signalized junctions
 	CommitLaneMarks(Ctx);         // turn arrows from LaneConnections + role filter
 	CommitPlacedMarks(Ctx);       // hand-placed road marks (independent of the above)
-	CommitPlacedIslands(Ctx);     // authored pedestrian island meshes
 	CommitMedian(Ctx);            // § raised median strip + centre planting splines
 	CommitPerimeters(Ctx);
 	CommitLaneGraph(Ctx);
 	CommitSegmentSplines(Ctx);    // § per-segment editable centre + edge splines
+	PublishZoneGraphRuns(Ctx);    // § trimmed centrelines for the ZoneGraph builder
 	CTrace(TEXT("furniture+etc"));
 
 	// Retire any cell this pass emptied out (all its layers/instances/splines
@@ -5408,23 +6331,6 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 		}
 	}
 
-	// Mesh-placed islands: kerb the authored ring (extruded islands already
-	// pick up a wrap from the median pass above).
-	{
-		TArray<const TArray<FVector>*> AllLines;
-		for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves) { AllLines.Add(&KV.Value.Sampled); }
-		RoadNetMesh::FCenterlineHeightField Field;
-		Field.Build(AllLines);
-		for (const FRoadNetIsland& Isl : PlacedIslands)
-		{
-			if (!Isl.MeshOverride && !IslandMesh) { continue; }
-			if (Isl.Ring.Num() < 3) { continue; }
-			TArray<FVector> Closed = Isl.Ring;
-			CloseRingInPlace(Closed);
-			RoadNetCurbs::BuildCurbInstancesAlongLine(Closed, Field, CurbSpacingCm, kRoadZLiftCm, Insts);
-		}
-	}
-
 	if (Insts.Num() == 0) { return; }
 
 	// Per-cell zebra kerb HISMs (piece i → A / B), routed by each piece's world
@@ -5537,10 +6443,6 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 
 namespace
 {
-	// Junctions are matched to persistent overrides by proximity (locations
-	// wobble slightly between rebuilds as centrelines re-smooth).
-	constexpr double kJunctionMatchCm = 600.0;
-
 	// Advance/reverse a preset through the cycle order.
 	ERoadNetJunctionPreset CyclePreset(ERoadNetJunctionPreset P, int32 Dir)
 	{
@@ -5720,7 +6622,11 @@ void URoadNetwork::BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const
 			FVector2D Centre(0, 0);
 			for (const FVector2d& V : OV) { Centre += FVector2D(V.X, V.Y); }
 			Centre /= (double)OV.Num();
-			if (!ResolveJunctionIslandsNear(Centre)) { continue; }
+			if (!ResolveJunctionIslandsNear(Centre))
+			{
+				const FRoadNetRoundaboutConfig* Rb = FindRoundaboutNear(Centre);
+				if (!Rb || !Rb->bSplitterIslands) { continue; }
+			}
 
 			// Pavement inside this junction = merged surface ∩ clip polygon.
 			const TArray<FGeneralPolygon2d> GPArr = { GP };
@@ -5757,13 +6663,70 @@ void URoadNetwork::BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const
 		}
 	}
 
-	// Authored pedestrian islands (no mesh override): fold into the median
-	// layer so they inherit grass + the existing kerb wrap. Smooth, clip excess
-	// off existing medians, and cut pedestrian paths from attached crosswalks.
+	for (const FRoadNetRoundaboutConfig& Cfg : RoundaboutConfigs)
+	{
+		const double Half = FMath::Max(50.0, (double)Cfg.CirculatoryWidthCm * 0.5);
+		const double InnerKerb = FMath::Max(80.0, (double)Cfg.InscribedRadiusCm - Half);
+		const double Apron = FMath::Max(0.0, (double)Cfg.ApronWidthCm);
+		const double IslandR = FMath::Max(50.0, InnerKerb - Apron);
+
+		int32 Zone = INDEX_NONE;
+		const FVector2d C(Cfg.Location.X, Cfg.Location.Y);
+		for (int32 z = 0; z < Ctx.ZoneSurfacePolys.Num() && Zone == INDEX_NONE; ++z)
+		{
+			for (const FGeneralPolygon2d& SP : Ctx.ZoneSurfacePolys[z])
+			{
+				if (PointInRing2(SP.GetOuter().GetVertices(), C)) { Zone = z; break; }
+			}
+		}
+		if (Zone == INDEX_NONE)
+		{
+			double BestD2 = TNumericLimits<double>::Max();
+			for (int32 z = 0; z < Ctx.ZoneSurfacePolys.Num(); ++z)
+			{
+				for (const FGeneralPolygon2d& SP : Ctx.ZoneSurfacePolys[z])
+				{
+					for (const FVector2d& V : SP.GetOuter().GetVertices())
+					{
+						const double D2 = (V - C).SizeSquared();
+						if (D2 < BestD2) { BestD2 = D2; Zone = z; }
+					}
+				}
+			}
+		}
+		if (Zone == INDEX_NONE || !Ctx.ZoneMedianPolys.IsValidIndex(Zone)) { continue; }
+
+		FGeneralPolygon2d Island;
+		RoadNetSurface::MakeDisc(Cfg.Location, IslandR, 48, Island);
+		Ctx.ZoneMedianPolys[Zone].Add(MoveTemp(Island));
+
+		if (Apron > 10.0 && Ctx.ZoneMedianWalkPolys.IsValidIndex(Zone))
+		{
+			FGeneralPolygon2d Outer, Inner;
+			RoadNetSurface::MakeDisc(Cfg.Location, InnerKerb, 48, Outer);
+			RoadNetSurface::MakeDisc(Cfg.Location, IslandR, 48, Inner);
+			TArray<FGeneralPolygon2d> Subj, Clip, Ring;
+			Subj.Add(MoveTemp(Outer));
+			Clip.Add(MoveTemp(Inner));
+			if (RoadNetSurface::Difference(Subj, Clip, Ring) && Ring.Num() > 0)
+			{
+				Ctx.ZoneMedianWalkPolys[Zone].Append(MoveTemp(Ring));
+			}
+		}
+	}
+
+	// Authored pedestrian islands: fold into the median layer so they inherit
+	// grass + the existing kerb wrap. Smooth, clip excess off existing medians,
+	// and cut pedestrian paths from attached crosswalks.
+	//
+	// EVERY drawn ring is filled this way. There used to be an escape hatch here
+	// that skipped the fill when an IslandMesh was set and instanced that prefab
+	// at the ring's centroid instead — so drawing an island produced an outline
+	// with an unrelated mesh dropped in the middle. A drawn shape has to become
+	// that shape.
 	for (const FRoadNetIsland& Isl : PlacedIslands)
 	{
 		if (Isl.Ring.Num() < 3) { continue; }
-		if (Isl.MeshOverride || IslandMesh) { continue; }
 		if (RingAreaCm2(Isl.Ring) < RoadNetStandards::MinIslandAreaCm2()) { continue; }
 
 		FVector2d C(0, 0);
@@ -5780,9 +6743,30 @@ void URoadNetwork::BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const
 		}
 		if (Zone == INDEX_NONE)
 		{
-			for (int32 z = 0; z < Ctx.ZoneMedianPolys.Num(); ++z) { Zone = z; break; }
+			// An island drawn off the carriageway (a wide splitter nose, a refuge
+			// that overhangs the kerb) still belongs to the zone it is nearest to.
+			// This used to take zone 0 unconditionally, which on a multi-zone city
+			// dumped the island into whichever zone happened to be built first —
+			// usually kilometres away, where nothing is drawn at all.
+			double BestD2 = TNumericLimits<double>::Max();
+			for (int32 z = 0; z < Ctx.ZoneSurfacePolys.Num(); ++z)
+			{
+				for (const FGeneralPolygon2d& SP : Ctx.ZoneSurfacePolys[z])
+				{
+					for (const FVector2d& V : SP.GetOuter().GetVertices())
+					{
+						const double D2 = (V - C).SizeSquared();
+						if (D2 < BestD2) { BestD2 = D2; Zone = z; }
+					}
+				}
+			}
 		}
-		if (Zone == INDEX_NONE || !Ctx.ZoneMedianPolys.IsValidIndex(Zone)) { continue; }
+		if (Zone == INDEX_NONE || !Ctx.ZoneMedianPolys.IsValidIndex(Zone))
+		{
+			UE_LOG(LogRoadNet, Warning,
+				TEXT("[RoadNet] Island at (%.0f, %.0f) has no zone to live in — not built."), C.X, C.Y);
+			continue;
+		}
 
 		TArray<FVector2d> Loop;
 		Loop.Reserve(Isl.Ring.Num());
@@ -5822,25 +6806,26 @@ void URoadNetwork::BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const
 			if (!TryOpen((double)Isl.SmoothCm)) { TryOpen(0.5 * (double)Isl.SmoothCm); }
 		}
 
+		TArray<FGeneralPolygon2d> Pieces;
+		Pieces.Add(MoveTemp(GP));
+
 		if (Ctx.ZoneMedianPolys[Zone].Num() > 0)
 		{
-			TArray<FGeneralPolygon2d> Subj = { GP }, Cut;
-			if (RoadNetSurface::Difference(Subj, Ctx.ZoneMedianPolys[Zone], Cut) && Cut.Num() > 0)
+			TArray<FGeneralPolygon2d> Cut;
+			if (RoadNetSurface::Difference(Pieces, Ctx.ZoneMedianPolys[Zone], Cut) && Cut.Num() > 0)
 			{
-				int32 Li = 0;
-				double BestA = 0.0;
-				for (int32 i = 0; i < Cut.Num(); ++i)
+				// Keep EVERY fragment worth keeping. This used to keep only the
+				// largest, so an island a median runs through lost the smaller half
+				// and left a gap the user drew a shape to fill.
+				const double MinA = RoadNetStandards::MinIslandAreaCm2();
+				Pieces.Reset();
+				for (FGeneralPolygon2d& Frag : Cut)
 				{
-					const double A = FMath::Abs(Cut[i].GetOuter().SignedArea());
-					if (A > BestA) { BestA = A; Li = i; }
+					if (FMath::Abs(Frag.GetOuter().SignedArea()) >= MinA) { Pieces.Add(MoveTemp(Frag)); }
 				}
-				GP = MoveTemp(Cut[Li]);
+				if (Pieces.Num() == 0) { continue; }   // entirely swallowed by the median
 			}
 
-			TArray<FVector2d> V = GP.GetOuter().GetVertices();
-			FVector2d Cent(0, 0);
-			for (const FVector2d& P : V) { Cent += P; }
-			if (V.Num() > 0) { Cent /= (double)V.Num(); }
 			auto ClosestOnMedians = [&](const FVector2d& Pt, FVector2d& OutQ) -> double
 			{
 				double Best = TNumericLimits<double>::Max();
@@ -5861,24 +6846,35 @@ void URoadNetwork::BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const
 				}
 				return Best;
 			};
-			FVector2d Ignored;
-			const double CentD2 = ClosestOnMedians(Cent, Ignored);
+			// Weld each piece's boundary onto the median it abuts, so the island
+			// reads as one continuous kerb instead of two shapes a hair apart.
 			constexpr double kSnapR2 = 120.0 * 120.0;
-			for (FVector2d& Pt : V)
+			for (FGeneralPolygon2d& Piece : Pieces)
 			{
-				FVector2d Snap;
-				const double D2 = ClosestOnMedians(Pt, Snap);
-				if (D2 < kSnapR2 && D2 + 1.0 < CentD2) { Pt = Snap; }
-			}
-			FPolygon2d NP(V);
-			if (NP.VertexCount() >= 3)
-			{
-				if (NP.IsClockwise()) { NP.Reverse(); }
-				GP.SetOuter(NP);
+				TArray<FVector2d> V = Piece.GetOuter().GetVertices();
+				if (V.Num() < 3) { continue; }
+				FVector2d Cent(0, 0);
+				for (const FVector2d& P : V) { Cent += P; }
+				Cent /= (double)V.Num();
+
+				FVector2d Ignored;
+				const double CentD2 = ClosestOnMedians(Cent, Ignored);
+				for (FVector2d& Pt : V)
+				{
+					FVector2d Snap;
+					const double D2 = ClosestOnMedians(Pt, Snap);
+					if (D2 < kSnapR2 && D2 + 1.0 < CentD2) { Pt = Snap; }
+				}
+				FPolygon2d NP(V);
+				if (NP.VertexCount() >= 3)
+				{
+					if (NP.IsClockwise()) { NP.Reverse(); }
+					Piece.SetOuter(NP);
+				}
 			}
 		}
 
-		TArray<FGeneralPolygon2d> Grass = { GP };
+		TArray<FGeneralPolygon2d> Grass = MoveTemp(Pieces);
 		for (const FRoadNetIslandPath& Path : Isl.Paths)
 		{
 			TArray<FVector> CL;
@@ -6018,6 +7014,41 @@ void URoadNetwork::BuildJunctionMarkings(FRoadNetRebuildContext& Ctx)
 						Ap.StopPos = Boundary + OutN * Extra;
 						Ap.Outward = Outward;
 						Ap.HalfWidthCm = Half;
+
+						// Which of this arm's lanes ENTER the junction, and where they
+						// sit. Without this the arm is only "a place a centreline
+						// crosses the boundary", so every arm got a bar — including a
+						// one-way arm whose traffic only leaves.
+						//
+						// Outward was taken as (B-A) when the road was heading OUT of
+						// the clip at this crossing, so forward travel is inbound
+						// exactly when it was heading in.
+						const bool bForwardEnters = !bPrevIn;
+
+						// Lane offsets are signed +right of the road's FORWARD
+						// direction. The approach frame is +right of INBOUND, so the
+						// two agree when forward is inbound and negate when it is not.
+						const double LatSign = bForwardEnters ? 1.0 : -1.0;
+
+						bool bAnyEnters = false;
+						double EnterLo = 0.0, EnterHi = 0.0;
+						for (const FRoadNetLane& Ln : GetLanesLeftToRight(r))
+						{
+							if (!Ln.bDrivable()) { continue; }
+							const bool bEnters = bForwardEnters
+								? Ln.bTravelsForward(bDriveOnLeft)
+								: Ln.bTravelsBackward(bDriveOnLeft);
+							if (!bEnters) { continue; }
+							const double E0 = LatSign * (Ln.CenterOffset - 0.5 * (double)Ln.Width);
+							const double E1 = LatSign * (Ln.CenterOffset + 0.5 * (double)Ln.Width);
+							const double A0 = FMath::Min(E0, E1), A1 = FMath::Max(E0, E1);
+							EnterLo = bAnyEnters ? FMath::Min(EnterLo, A0) : A0;
+							EnterHi = bAnyEnters ? FMath::Max(EnterHi, A1) : A1;
+							bAnyEnters = true;
+						}
+						Ap.bHasEnteringTraffic = bAnyEnters;
+						if (bAnyEnters) { Ap.EnterLoCm = EnterLo; Ap.EnterHiCm = EnterHi; }
+
 						Approaches.Add(Ap);
 						SumZ += FMath::Lerp(S[i - 1].Z, S[i].Z, 0.5); ++ZN;
 					}
@@ -6026,7 +7057,14 @@ void URoadNetwork::BuildJunctionMarkings(FRoadNetRebuildContext& Ctx)
 			}
 
 			const double CentreZ = (ZN > 0) ? (SumZ / (double)ZN) : 0.0;
-			const ERoadNetJunctionPreset Preset = ResolveJunctionPresetNear(Centre);
+			ERoadNetJunctionPreset Preset = ResolveJunctionPresetNear(Centre);
+			if (const FRoadNetRoundaboutConfig* Rb = FindRoundaboutNear(Centre))
+			{
+				if (Rb->EntryGiveWay && Preset == ERoadNetJunctionPreset::None)
+				{
+					Preset = ERoadNetJunctionPreset::GiveWay;
+				}
+			}
 
 			FRoadNetJunctionView View;
 			View.Location = FVector(Centre.X, Centre.Y, CentreZ);
@@ -6045,12 +7083,13 @@ void URoadNetwork::BuildJunctionMarkings(FRoadNetRebuildContext& Ctx)
 				Ctx.Signals.Emplace(Sg.Location, Sg.YawDeg);
 			}
 
-			// Cut the yellow centre line back to BEHIND the crosswalk: a full-
-			// width rectangle from the junction boundary out past the crosswalk's
-			// far edge (matches the crosswalk band placement in BuildJoint).
+			// Cut the yellow centre line back to BEHIND the approach paint: a full-
+			// width rectangle from the junction boundary out past the stop bar. The
+			// reach comes from BuildJoint's own layout so it follows
+			// roadnet.CrosswalkLengthCm instead of being a second copy of it.
 			if (PresetHasCrosswalk(Preset))
 			{
-				constexpr double kCwFarCm = 560.0;  // just beyond the zebra band
+				const double kCwFarCm = RoadNetJunctionMarks::ApproachPaintReachCm() + 40.0;
 				for (const RoadNetJunctionMarks::FApproach& Ap : Approaches)
 				{
 					FVector2D Out = Ap.Outward;
@@ -6392,12 +7431,13 @@ void URoadNetwork::CommitLaneMarks(FRoadNetRebuildContext& Ctx)
 		if (!H) { continue; }
 
 		// Mark comes off the raw lane centreline, which is the LANDSCAPE line: the
-		// road slab sits kRoadZLiftCm above it and the painted white markings 4 cm
-		// above that. An arrow lifted less than kRoadZLiftCm is inside the asphalt
-		// and invisible, which is exactly how "97 arrows placed, none on screen"
-		// happens. Sit one centimetre proud of the white markings tier.
+		// road slab sits kRoadZLiftCm above it and the painted markings kMarkingLiftCm
+		// above that. An arrow lifted less than kRoadZLiftCm is inside the asphalt and
+		// invisible, which is exactly how "97 arrows placed, none on screen" happens.
+		// Sit half a centimetre proud of the paint tier.
 		Batches.FindOrAdd(H).Add(
-			MakeMarkInstance(Mesh, Mark, Yaw, /*bUserMesh*/Mesh != Cube, kRoadZLiftCm + 5.0));
+			MakeMarkInstance(Mesh, Mark, Yaw, /*bUserMesh*/Mesh != Cube,
+				kRoadZLiftCm + kMarkingLiftCm + 0.5));
 		++Placed;
 	}
 
@@ -6412,14 +7452,30 @@ void URoadNetwork::CommitLaneMarks(FRoadNetRebuildContext& Ctx)
 		Placed, Approaches.Num(), bUseOSMStencils ? TEXT(" [OSM stencils]") : TEXT(""));
 }
 
+// How far a click may be from a road's reference line and still count as "on it".
+// Generous enough to cover the far kerb of a dual carriageway.
+static constexpr double kMarkBindRadiusCm = 3000.0;
+
 void URoadNetwork::CommitPlacedMarks(FRoadNetRebuildContext& Ctx)
 {
 	if (!WorldPtr.IsValid() || PlacedMarks.Num() == 0) { return; }
 
 	UStaticMesh* Cube = nullptr;   // loaded lazily: only an empty slot needs it
 	TMap<FName, UStaticMesh*> StencilCache;
-	int32 Placed = 0, NoMesh = 0;
+	int32 Placed = 0, NoMesh = 0, Migrated = 0, Unbound = 0;
 	TMap<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>> Batches;
+
+	// Migration for saves written before marks carried a road binding: resolve each
+	// once, here, and write the keys back so it only ever happens on the first
+	// rebuild after load. A mark that resolves to nothing is NOT dropped — it stays
+	// world-anchored, which is what it has always been.
+	for (FRoadNetPlacedMark& Mk : PlacedMarks)
+	{
+		if (Mk.IsBoundToRoad()) { continue; }
+		if (BindPlacedMarkToRoad(Mk, kMarkBindRadiusCm)) { ++Migrated; }
+		else { ++Unbound; }
+	}
+	if (Migrated > 0) { Modify(); }
 
 	for (const FRoadNetPlacedMark& Mk : PlacedMarks)
 	{
@@ -6437,18 +7493,24 @@ void URoadNetwork::CommitPlacedMarks(FRoadNetRebuildContext& Ctx)
 		}
 		if (!Mesh) { continue; }
 
-		const FIntPoint Coord = TopoKeyOf(Mk.Location, Ctx);
+		// Where the mark goes NOW: a bound mark is derived from its lane, so it has
+		// already followed any median restack or centreline edit since it was clicked.
+		FVector At; float Yaw = 0.f;
+		const bool bBound = ResolvePlacedMark(Mk, At, Yaw);
+
+		const FIntPoint Coord = TopoKeyOf(At, Ctx);
 		if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
 		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
 		if (!Tile) { continue; }
 		UHierarchicalInstancedStaticMeshComponent* H = Tile->GetOrCreateHISM(Key, Mesh, Mat);
 		if (!H) { continue; }
 
-		// Location was traced onto the visible road surface, so it is already at
-		// slab height — unlike the automatic path, which starts from the raw
-		// centreline. Only clear the 4 cm white-marking tier.
+		// A bound mark's Z is the raw landscape line, so it needs the full slab lift
+		// plus the paint clearance. An unbound one kept the traced Z of the surface
+		// under the cursor and only needs to clear the marking tier.
+		const double Lift = bBound ? (kRoadZLiftCm + kMarkingLiftCm + 0.5) : (kMarkingLiftCm + 0.5);
 		Batches.FindOrAdd(H).Add(
-			MakeMarkInstance(Mesh, Mk.Location, Mk.YawDeg, /*bUserMesh*/Mesh != Cube, 5.0));
+			MakeMarkInstance(Mesh, At, Yaw, /*bUserMesh*/Mesh != Cube, Lift));
 		++Placed;
 	}
 
@@ -6456,19 +7518,106 @@ void URoadNetwork::CommitPlacedMarks(FRoadNetRebuildContext& Ctx)
 	{
 		KV.Key->AddInstances(KV.Value, /*bShouldReturnIndices*/false, /*bWorldSpace*/true);
 	}
-	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitPlacedMarks: %d hand-placed mark(s) of %d%s."),
+	UE_LOG(LogRoadNet, Log,
+		TEXT("[RoadNet] CommitPlacedMarks: %d hand-placed mark(s) of %d%s; %d bound to a road this run, %d left world-anchored."),
 		Placed, PlacedMarks.Num(),
 		NoMesh > 0 ? *FString::Printf(TEXT(" (%d on a placeholder cube — assign the arrow mesh in Assets | Markings)"), NoMesh)
-		           : TEXT(""));
+		           : TEXT(""),
+		Migrated, Unbound);
+}
+
+bool URoadNetwork::BindPlacedMarkToRoad(FRoadNetPlacedMark& Mk, double RadiusCm) const
+{
+	int32   BestRoad = INDEX_NONE;
+	double  BestD    = RadiusCm;
+	RoadNetMath::FProjectResult BestP;
+
+	const FVector2D Q(Mk.Location.X, Mk.Location.Y);
+	for (int32 i = 0; i < Roads.Num(); ++i)
+	{
+		if (Roads[i].Ref.Num() < 2) { continue; }
+		const RoadNetMath::FProjectResult P = RoadNetMath::ProjectToPolyline(Roads[i].Ref, Q);
+		if (P.Distance >= BestD || P.Segment < 0 || !Roads[i].Ref.IsValidIndex(P.Segment + 1)) { continue; }
+		BestD = P.Distance; BestRoad = i; BestP = P;
+	}
+	if (BestRoad == INDEX_NONE) { return false; }
+
+	Mk.Road       = BestRoad;
+	Mk.DistanceCm = (float)BestP.AlongDist;
+
+	// Which lane the offset lands in, and where inside it. Nearest lane centre
+	// rather than a containment test, so a click on a lane boundary still binds.
+	const TArray<FRoadNetLane> Lanes = GetLanesLeftToRight(BestRoad);
+	Mk.LaneIndex    = INDEX_NONE;
+	Mk.LaneOffsetCm = (float)BestP.Offset;
+	double BestLaneD = TNumericLimits<double>::Max();
+	for (int32 i = 0; i < Lanes.Num(); ++i)
+	{
+		const double D = FMath::Abs(BestP.Offset - Lanes[i].CenterOffset);
+		if (D < BestLaneD) { BestLaneD = D; Mk.LaneIndex = i; Mk.LaneOffsetCm = (float)(BestP.Offset - Lanes[i].CenterOffset); }
+	}
+
+	// Yaw is stored against the road's tangent so a reshaped centreline re-aims
+	// the arrow instead of leaving it pointing at the old heading.
+	const FVector& A = Roads[BestRoad].Ref[BestP.Segment];
+	const FVector& B = Roads[BestRoad].Ref[BestP.Segment + 1];
+	const float TangentYaw = (float)FMath::RadiansToDegrees(FMath::Atan2(B.Y - A.Y, B.X - A.X));
+	Mk.LaneYawDeg = FRotator::NormalizeAxis(Mk.YawDeg - TangentYaw);
+	return true;
+}
+
+bool URoadNetwork::ResolvePlacedMark(const FRoadNetPlacedMark& Mk, FVector& OutLoc, float& OutYawDeg) const
+{
+	// Unbound: the click point is all there is. Its Z came off a collision trace,
+	// so it is already on whatever surface was under the cursor.
+	if (!Mk.IsBoundToRoad() || !Roads.IsValidIndex(Mk.Road) || Roads[Mk.Road].Ref.Num() < 2)
+	{
+		OutLoc = Mk.Location;
+		OutYawDeg = Mk.YawDeg;
+		return false;
+	}
+
+	const TArray<FVector>& Ref = Roads[Mk.Road].Ref;
+	TArray<double> CL;
+	RoadNetMath::CumulativeLength(Ref, CL);
+	const double Len = CL.Last();
+	const double S = FMath::Clamp((double)Mk.DistanceCm, 0.0, Len);
+
+	int32 Seg = 0;
+	while (Seg + 2 < Ref.Num() && CL[Seg + 1] < S) { ++Seg; }
+	const double SegLen = FMath::Max(1e-3, CL[Seg + 1] - CL[Seg]);
+	const double t = FMath::Clamp((S - CL[Seg]) / SegLen, 0.0, 1.0);
+	const FVector Base = FMath::Lerp(Ref[Seg], Ref[Seg + 1], t);
+
+	FVector2D Fwd(Ref[Seg + 1].X - Ref[Seg].X, Ref[Seg + 1].Y - Ref[Seg].Y);
+	if (!Fwd.Normalize()) { Fwd = FVector2D(1.0, 0.0); }
+	const FVector2D Right(Fwd.Y, -Fwd.X);   // +right of travel, matching FProjectResult::Offset
+
+	// The lane is where the offset comes from: a median restack moves the lane
+	// centre, so the mark moves with it and never ends up under the median.
+	const TArray<FRoadNetLane> Lanes = GetLanesLeftToRight(Mk.Road);
+	const double Offset = Lanes.IsValidIndex(Mk.LaneIndex)
+		? Lanes[Mk.LaneIndex].CenterOffset + (double)Mk.LaneOffsetCm
+		: (double)Mk.LaneOffsetCm;
+
+	// Z from the road model, not a trace: Ref is the landscape line the slab is
+	// built on, so the slab top is exactly kRoadZLiftCm above it. (Tracing here
+	// would hit the landscape, because the road slab is deliberately NoCollision.)
+	OutLoc = FVector(Base.X + Right.X * Offset, Base.Y + Right.Y * Offset, Base.Z + kRoadZLiftCm);
+	OutYawDeg = FRotator::NormalizeAxis(
+		(float)FMath::RadiansToDegrees(FMath::Atan2(Fwd.Y, Fwd.X)) + Mk.LaneYawDeg);
+	return true;
 }
 
 int32 URoadNetwork::AddPlacedMark(const FVector& WorldLoc, float YawDeg, ERoadNetMarkKind Kind)
 {
 	Modify();
 	FRoadNetPlacedMark Mk;
+	Mk.Id = FGuid::NewGuid();
 	Mk.Location = WorldLoc;
 	Mk.YawDeg = YawDeg;
 	Mk.Kind = Kind;
+	BindPlacedMarkToRoad(Mk, kMarkBindRadiusCm);
 	return PlacedMarks.Add(Mk);
 }
 
@@ -6478,13 +7627,39 @@ int32 URoadNetwork::RemovePlacedMarkNear(const FVector& WorldLoc, double RadiusC
 	double BestD2 = RadiusCm * RadiusCm;
 	for (int32 i = 0; i < PlacedMarks.Num(); ++i)
 	{
-		const double D2 = FVector::DistSquaredXY(PlacedMarks[i].Location, WorldLoc);
+		// Compare against where the mark is DRAWN, not where it was clicked — a
+		// bound mark has moved with its lane since then.
+		FVector At; float Yaw = 0.f;
+		ResolvePlacedMark(PlacedMarks[i], At, Yaw);
+		const double D2 = FVector::DistSquaredXY(At, WorldLoc);
 		if (D2 <= BestD2) { BestD2 = D2; Best = i; }
 	}
 	if (Best == INDEX_NONE) { return INDEX_NONE; }
 	Modify();
 	PlacedMarks.RemoveAt(Best);
 	return Best;
+}
+
+bool URoadNetwork::RemovePlacedById(ERoadNetPlacedKind Kind, FGuid Id)
+{
+	if (!Id.IsValid()) { return false; }
+	Modify();
+	auto Drop = [Id](auto& Arr) -> bool
+	{
+		for (int32 i = 0; i < Arr.Num(); ++i)
+		{
+			if (Arr[i].Id == Id) { Arr.RemoveAt(i); return true; }
+		}
+		return false;
+	};
+	switch (Kind)
+	{
+	case ERoadNetPlacedKind::Mark:         return Drop(PlacedMarks);
+	case ERoadNetPlacedKind::Island:       return Drop(PlacedIslands);
+	case ERoadNetPlacedKind::BikeCrossing: return Drop(BikeCrossings);
+	case ERoadNetPlacedKind::CurbPaint:    return Drop(CurbPaints);
+	default: return false;
+	}
 }
 
 bool URoadNetwork::HeadingOfNearestRoad(const FVector& WorldLoc, double RadiusCm, float& OutYawDeg) const
@@ -6511,49 +7686,6 @@ bool URoadNetwork::HeadingOfNearestRoad(const FVector& WorldLoc, double RadiusCm
 	if (BestDir.IsZero()) { return false; }
 	OutYawDeg = (float)FMath::RadiansToDegrees(FMath::Atan2(BestDir.Y, BestDir.X));
 	return true;
-}
-
-void URoadNetwork::CommitPlacedIslands(FRoadNetRebuildContext& Ctx)
-{
-	if (!WorldPtr.IsValid() || PlacedIslands.Num() == 0) { return; }
-
-	int32 Placed = 0;
-	TMap<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>> Batches;
-	for (const FRoadNetIsland& Isl : PlacedIslands)
-	{
-		UStaticMesh* Mesh = Isl.MeshOverride ? Isl.MeshOverride.Get() : (IslandMesh ? IslandMesh.Get() : nullptr);
-		if (!Mesh) { continue; } // extrude path handled in BuildJunctionIslands
-		if (Isl.Ring.Num() < 3) { continue; }
-		if (RingAreaCm2(Isl.Ring) < RoadNetStandards::MinIslandAreaCm2()) { continue; }
-
-		FVector C(0, 0, 0);
-		for (const FVector& P : Isl.Ring) { C += P; }
-		C /= (double)Isl.Ring.Num();
-
-		const FIntPoint Coord = TopoKeyOf(C, Ctx);
-		if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
-		ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
-		if (!Tile) { continue; }
-		UMaterialInterface* Mat = Isl.MaterialOverride ? Isl.MaterialOverride.Get() : IslandMaterial.Get();
-		UHierarchicalInstancedStaticMeshComponent* H = Tile->GetOrCreateHISM(FName(TEXT("Islands")), Mesh, Mat);
-		if (!H) { continue; }
-
-		const FBox Box = Mesh->GetBoundingBox();
-		const bool bUser = (Isl.MeshOverride != nullptr || IslandMesh != nullptr);
-		const FVector Size = Box.GetSize();
-		const double sXY = bUser ? 1.0 : 200.0 / FMath::Max(1.0, FMath::Max(Size.X, Size.Y));
-		const double sZ  = bUser ? 1.0 : 15.0 / FMath::Max(1.0, Size.Z);
-		FTransform Inst(FRotator::ZeroRotator, FVector::ZeroVector, FVector(sXY, sXY, sZ));
-		const FVector Anchor = Inst.TransformVector(FVector(Box.GetCenter().X, Box.GetCenter().Y, Box.Min.Z));
-		Inst.SetTranslation(C - Anchor);
-		Batches.FindOrAdd(H).Add(Inst);
-		++Placed;
-	}
-	for (TPair<UHierarchicalInstancedStaticMeshComponent*, TArray<FTransform>>& KV : Batches)
-	{
-		KV.Key->AddInstances(KV.Value, /*bShouldReturnIndices*/false, /*bWorldSpace*/true);
-	}
-	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitPlacedIslands: %d mesh islands."), Placed);
 }
 
 int32 URoadNetwork::AddSplineSplitByTile(const TArray<FVector>& Points, bool bClosed,
@@ -6689,6 +7821,132 @@ void URoadNetwork::CommitMedian(FRoadNetRebuildContext& Ctx)
 
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitMedian: median strips=%s, %d centre spline(s)."),
 		bAnyMedian ? TEXT("yes") : TEXT("no"), SplineCount);
+}
+
+void URoadNetwork::GetJunctionEnds(int32 RoadIdx, bool& bOutAtStart, bool& bOutAtEnd) const
+{
+	bOutAtStart = bOutAtEnd = false;
+	if (!Roads.IsValidIndex(RoadIdx) || !Roads[RoadIdx].IsValid()) { return; }
+
+	// The joint topology itself is rebuild-scoped (FRoadNetRebuildContext::Joints)
+	// and there is no serialized copy, so callers that run OUTSIDE a rebuild — a
+	// parking bay added from the panel — have to re-derive it. This repeats the
+	// same spatial endpoint weld BuildEndpointJoints uses, at the same radius, so
+	// the two cannot disagree about where a junction is.
+	//
+	// ponytail: O(roads) per call, which is nothing for a per-click action but
+	// would not do inside a loop over roads. It also counts a plain two-road
+	// continuation seam as a junction, so a bay is set back from one — the
+	// conservative direction. The upgrade path is publishing the joint arms from
+	// the rebuild the way ZoneGraphRuns are published.
+	const FVector2D S(Roads[RoadIdx].Ref[0]);
+	const FVector2D E(Roads[RoadIdx].Ref.Last());
+	const double R2 = FMath::Square(kEndpointWeldCm);
+	for (int32 i = 0; i < Roads.Num(); ++i)
+	{
+		if (i == RoadIdx || !Roads[i].IsValid()) { continue; }
+		const FVector2D Ends[2] = { FVector2D(Roads[i].Ref[0]), FVector2D(Roads[i].Ref.Last()) };
+		for (const FVector2D& Q : Ends)
+		{
+			if (FVector2D::DistSquared(Q, S) <= R2) { bOutAtStart = true; }
+			if (FVector2D::DistSquared(Q, E) <= R2) { bOutAtEnd = true; }
+		}
+		if (bOutAtStart && bOutAtEnd) { return; }
+	}
+}
+
+int32 URoadNetwork::SetZoneGraphOnRoads(TArrayView<const int32> RoadIndices, bool bOn)
+{
+	int32 Changed = 0;
+	for (int32 r : RoadIndices)
+	{
+		if (!Roads.IsValidIndex(r) || Roads[r].bZoneGraph == bOn) { continue; }
+		Roads[r].bZoneGraph = bOn;
+		++Changed;
+	}
+	return Changed;
+}
+
+void URoadNetwork::PublishZoneGraphRuns(FRoadNetRebuildContext& Ctx)
+{
+	// Master gate off: nothing is published, and the builder's next sync destroys
+	// whatever shapes are standing. Per-road flags are left alone, so the feature
+	// can be parked and resumed without re-picking every segment.
+	if (!bBuildZoneGraph)
+	{
+		ZoneGraphRuns.Reset();
+		return;
+	}
+
+	// How far the junction reaches down each arm. A joint's own arms carry the
+	// half-widths that produced its mouth, so the widest of them is the right
+	// scale to pull back by — a lane-width guess would leave a spline hanging in
+	// the middle of a wide intersection.
+	TMap<FGuid, TPair<double, double>> Trim;   // road id -> (at start, at end)
+	for (const FRoadNetJoint& J : Ctx.Joints)
+	{
+		if (J.Arms.Num() < 2) { continue; }
+		double Reach = 0.0;
+		for (const FRoadNetJointArm& Arm : J.Arms) { Reach = FMath::Max(Reach, (double)Arm.HalfWidthCm); }
+		// Past the mouth, not level with it: a lane that ends exactly on the
+		// junction edge still overlaps the crossing traffic's turning path.
+		Reach += 150.0;
+		for (const FRoadNetJointArm& Arm : J.Arms)
+		{
+			if (!Roads.IsValidIndex(Arm.Road)) { continue; }
+			TPair<double, double>& T = Trim.FindOrAdd(Roads[Arm.Road].Id, TPair<double, double>(0.0, 0.0));
+			double& Side = Arm.bAtStart ? T.Key : T.Value;
+			Side = FMath::Max(Side, Reach);
+		}
+	}
+
+	// Per-road replacement keyed on the stable id, NOT a wholesale reset: a
+	// windowed rebuild only has curves for the roads in its scope, and clearing
+	// the array would silently drop every other road's shape.
+	for (const TPair<int32, FRoadCurves>& Pair : Ctx.Curves)
+	{
+		const int32 r = Pair.Key;
+		if (!Roads.IsValidIndex(r)) { continue; }
+		const FRoadDef& R = Roads[r];
+		ZoneGraphRuns.RemoveAll([&R](const FRoadNetZoneRun& Run) { return Run.RoadId == R.Id; });
+		if (!R.bZoneGraph || Pair.Value.Sampled.Num() < 2) { continue; }
+
+		const TPair<double, double>* T = Trim.Find(R.Id);
+		TArray<FVector> Pts = Pair.Value.Sampled;
+		if (T)
+		{
+			TrimPolylineEnd(Pts, /*bFromStart*/true,  T->Key);
+			TrimPolylineEnd(Pts, /*bFromStart*/false, T->Value);
+		}
+		// Wholly inside its own junctions: a stub here is worse than nothing,
+		// because ZoneGraph would run it straight into the crossing traffic.
+		if (Pts.Num() < 2 || RoadNetMath::TotalLength(Pts) < 500.0) { continue; }
+
+		FRoadNetZoneRun Run;
+		Run.RoadId = R.Id;
+		Run.Points = MoveTemp(Pts);
+		Run.LanesForward = 0;
+		Run.LanesBackward = 0;
+		Run.LaneWidthCm = 0.f;
+		for (const FRoadNetLane& L : GetLanesLeftToRight(r))
+		{
+			if (L.Type == ERoadNetLaneType::Bicycle) { Run.bHasBikeLane = true; }
+			if (!L.bDrivable()) { continue; }
+			(L.bTravelsForward(bDriveOnLeft) ? Run.LanesForward : Run.LanesBackward) += 1;
+			Run.LaneWidthCm = FMath::Max(Run.LaneWidthCm, (float)L.Width);
+		}
+		if (Run.LanesForward + Run.LanesBackward == 0) { continue; }
+		ZoneGraphRuns.Add(MoveTemp(Run));
+	}
+
+	// Drop runs whose road was deleted or merged away. Cheap, and it is the only
+	// thing standing between a delete and a shape that outlives its road.
+	TSet<FGuid> Live;
+	for (const FRoadDef& R : Roads) { if (R.bZoneGraph) { Live.Add(R.Id); } }
+	ZoneGraphRuns.RemoveAll([&Live](const FRoadNetZoneRun& Run) { return !Live.Contains(Run.RoadId); });
+
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] PublishZoneGraphRuns: %d run(s) for the ZoneGraph builder."),
+		ZoneGraphRuns.Num());
 }
 
 void URoadNetwork::CommitPerimeters(FRoadNetRebuildContext& Ctx)

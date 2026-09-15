@@ -263,6 +263,12 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	// 4. Per-road profile: chord -> budget -> grade cap -> plate + curve.
 	// -----------------------------------------------------------------------
 	int32 RoadsAligned = 0, SteepChords = 0, BudgetBreaks = 0, RelaxEscapes = 0;
+	// "A high junction meeting a low road": every anchor whose junction level sits
+	// clear of the ground the road would otherwise lie on. Counted so the pass can
+	// say how many it found and ramped, and warned about individually only when
+	// the road ran out of length to swallow one at a legal grade.
+	constexpr double kStepReportCm = 30.0;
+	int32 StepsRamped = 0, StepsTooTight = 0, StepsReported = 0;
 
 	for (int32 j = 0; j < NumJoints; ++j)
 	{
@@ -307,13 +313,40 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 		};
 
 		// ---- anchors: both ends plus any mid-span crossing -------------------
+		// A crossing nearer an end than MinGap has no room for its own flat plate
+		// and vertical curve, so it cannot be a MID-span anchor. It used to be
+		// dropped, and that is what put a cliff at the mouth of every T.
+		//
+		// A minor road that tees into a major one ENDS on the major road's
+		// centreline. There is no endpoint-to-endpoint weld there (the major road
+		// runs straight past), so the joint pass never sees it and the end anchor
+		// fell back to the road's own draped ground level. The major road, whose
+		// crossing IS mid-span, kept its anchor and was lifted to KingZ. One side
+		// lifted, the other left on the terrain, nothing in between: a vertical
+		// step exactly at the junction mouth.
+		//
+		// A crossing at the end is not a mid-span anchor to discard — it is that
+		// END's junction level. Promote it, and the plate-and-curve pass below
+		// ramps the arm up onto the junction the way it already does at a weld.
 		const double MinGap = FMath::Max(1.0, 2.0 * FlatCm);
 		TArray<TPair<double, double>> MidAnchors;
+		TOptional<double> StartCrossZ, EndCrossZ;
 		if (const TArray<TPair<double, double>>* Ints = Interior.Find(RoadIdx))
 		{
 			for (const TPair<double, double>& It : *Ints)
 			{
-				if (It.Key > MinGap && It.Key < Len - MinGap)
+				if (It.Key <= MinGap)
+				{
+					// Several crossings can pile up at one mouth (a divided road
+					// is two centrelines); the junction sits at the highest, which
+					// is the same "king road wins" rule KingZ applies.
+					StartCrossZ = StartCrossZ.IsSet() ? FMath::Max(*StartCrossZ, It.Value) : It.Value;
+				}
+				else if (It.Key >= Len - MinGap)
+				{
+					EndCrossZ = EndCrossZ.IsSet() ? FMath::Max(*EndCrossZ, It.Value) : It.Value;
+				}
+				else
 				{
 					MidAnchors.Add(It);
 				}
@@ -332,11 +365,31 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 		const int32* JStart = ArmToJoint.Find(ArmKey(RoadIdx, true));
 		const int32* JEnd   = ArmToJoint.Find(ArmKey(RoadIdx, false));
 
+		// A joint of two or more arms outranks a crossing: the joint pass has
+		// already balanced every arm meeting there, while a crossing only knows
+		// about two roads.
+		//
+		// A ONE-arm joint does not outrank anything — it is the record of a dead
+		// end, and it is why this bug survived. Every road end gets a joint, so a
+		// tee's stem had one too, holding it at its own draped ground level. But a
+		// dead end that a crossing lands on is not a dead end at all: it is a tee
+		// whose stem never welded, because the road it runs into carries straight
+		// past instead of ending there.
+		auto EndAnchorZ = [&Ctx, &JointZ](const int32* Joint,
+			const TOptional<double>& CrossZ, double DrapeZ)
+		{
+			const bool bWelded = Joint && Ctx.Joints.IsValidIndex(*Joint)
+				&& Ctx.Joints[*Joint].Arms.Num() >= 2;
+			if (bWelded)        { return JointZ[*Joint]; }
+			if (CrossZ.IsSet()) { return *CrossZ; }
+			return Joint ? JointZ[*Joint] : DrapeZ;
+		};
+
 		TArray<TPair<double, double>> Anchors;
 		Anchors.Reserve(MidAnchors.Num() + 2);
-		Anchors.Emplace(0.0, JStart ? JointZ[*JStart] : C.Sampled[0].Z);
+		Anchors.Emplace(0.0, EndAnchorZ(JStart, StartCrossZ, C.Sampled[0].Z));
 		Anchors.Append(MidAnchors);
-		Anchors.Emplace(Len, JEnd ? JointZ[*JEnd] : C.Sampled.Last().Z);
+		Anchors.Emplace(Len, EndAnchorZ(JEnd, EndCrossZ, C.Sampled.Last().Z));
 
 		// ---- straight chord with a span-scaled deviation budget --------------
 		// Budget(L) = MaxDev * clamp((L - Straight) / (2*Straight), 0, 1)
@@ -409,16 +462,54 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 			return Tangent[i];
 		};
 
+		// Reach of each anchor's plate + vertical curve, so the budget self-check
+		// below skips exactly the stretch this pass deliberately shaped.
+		TArray<double> Reach;
+		Reach.Init(FlatCm, Anchors.Num());
+
 		for (int32 ai = 0; ai < Anchors.Num(); ++ai)
 		{
 			const double Sa = Anchors[ai].Key;
 			const double Za = Anchors[ai].Value;
 
-			// Neighbouring anchors bound the reach so two curves never overlap.
-			double MaxH = LandingCm;
+			// How far this junction rides above (or below) the ground the road
+			// would otherwise lie on. C.Sampled still holds the raw drape here —
+			// the reconciled profile is written back after this loop — so the two
+			// levels are directly comparable.
+			//
+			// This is the quantity the whole "high junction, low road" complaint
+			// is about, so it now sizes the ramp rather than being ignored. A fixed
+			// landing put a 3 m step onto an 8 m run, which is 37% and reads as a
+			// wall; the length a step needs to land at the legal grade is
+			// Step/MaxSlope, so ask for that and let the neighbouring anchors be
+			// the only thing allowed to shorten it.
+			const int32  AnchorIdx = NearestIdx(Sa);
+			const double StepCm    = FMath::Abs(Za - C.Sampled[AnchorIdx].Z);
+
+			double MaxH = FMath::Max(LandingCm, StepCm / MaxSlope);
 			if (ai > 0)                 { MaxH = FMath::Min(MaxH, 0.5 * (Sa - Anchors[ai - 1].Key)); }
 			if (ai + 1 < Anchors.Num()) { MaxH = FMath::Min(MaxH, 0.5 * (Anchors[ai + 1].Key - Sa)); }
 			MaxH = FMath::Max(0.0, MaxH - FlatCm);
+
+			if (StepCm > kStepReportCm)
+			{
+				++StepsRamped;
+				// The neighbours won: this anchor cannot get the length its step
+				// needs, so what lands here is steeper than the cap. Worth naming,
+				// because the fix is to move a junction, not to retune anything.
+				if (MaxH * MaxSlope + 1.0 < StepCm)
+				{
+					++StepsTooTight;
+					if (StepsReported < 5)
+					{
+						++StepsReported;
+						UE_LOG(LogRoadNet, Warning,
+							TEXT("[RoadNet][GRADE] junction at (%.0f, %.0f) sits %.2f m off road %d's own ground, but the next anchor is close enough that only %.0f m of ramp fits — %.0f m is needed at the %.0f%% cap. Move one of the two junctions apart, or lower this one."),
+							C.Sampled[AnchorIdx].X, C.Sampled[AnchorIdx].Y, StepCm / 100.0, RoadIdx,
+							MaxH / 100.0, (StepCm / MaxSlope) / 100.0, MaxSlope * 100.0);
+					}
+				}
+			}
 
 			const double Probe = FlatCm + MaxH;
 			const double gIn   = (Probe > 1.0 && Sa - Probe >= 0.0) ? (Za - TangentAt(Sa - Probe)) / Probe : 0.0;
@@ -430,6 +521,7 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 			};
 			const double hIn  = CurveLen(gIn);
 			const double hOut = CurveLen(gOut);
+			Reach[ai] = FlatCm + FMath::Max(hIn, hOut);
 
 			for (int32 i = 0; i < N; ++i)
 			{
@@ -476,8 +568,9 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 			for (int32 i = 0; i < N; ++i)
 			{
 				// Skip the plate + curve zone at either end: that is where the
-				// profile is deliberately shaped away from the chord.
-				if (S[i] <= Sa + FlatCm + LandingCm || S[i] >= Sb - FlatCm - LandingCm)
+				// profile is deliberately shaped away from the chord. The reach is
+				// per anchor now that a big step buys a longer curve than LandingCm.
+				if (S[i] <= Sa + Reach[ai] || S[i] >= Sb - Reach[ai + 1])
 				{
 					continue;
 				}
@@ -580,7 +673,7 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	}
 
 	UE_LOG(LogRoadNet, Log,
-		TEXT("[RoadNet][GRADE] aligned %d road(s) over %d junction(s) | straight span %.0f m, chord budget %.1f m, relax %.0f cm, curve %.1f m/%% | %d steep chord(s), %d budget break(s), %d relax escape(s), %d over-graded junction(s)"),
+		TEXT("[RoadNet][GRADE] aligned %d road(s) over %d junction(s) | straight span %.0f m, chord budget %.1f m, relax %.0f cm, curve %.1f m/%% | %d steep chord(s), %d budget break(s), %d relax escape(s), %d over-graded junction(s) | %d junction(s) sit clear of their road's ground and were ramped, %d of those too tight to ramp fully"),
 		RoadsAligned, NumJoints, StraightCm / 100.0, MaxDevCm / 100.0, RelaxCm, CurveKCm / 100.0,
-		SteepChords, BudgetBreaks, RelaxEscapes, SteepJunctions);
+		SteepChords, BudgetBreaks, RelaxEscapes, SteepJunctions, StepsRamped, StepsTooTight);
 }

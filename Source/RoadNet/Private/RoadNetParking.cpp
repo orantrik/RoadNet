@@ -197,7 +197,7 @@ void URoadNetwork::BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const
 			RoadNetMath::CumulativeLength(Win, WinCL);
 			const double WinLen = WinCL.Last();
 
-			auto SampleWin = [&](double S, FVector2D& OutP, FVector2D& OutTan)
+			auto SampleWin = [&](double S, FVector2D& OutP, FVector2D& OutTan, double& OutZ)
 			{
 				S = FMath::Clamp(S, 0.0, WinLen);
 				int32 seg = 0;
@@ -206,6 +206,7 @@ void URoadNetwork::BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const
 				const double t = FMath::Clamp((S - WinCL[seg]) / segLen, 0.0, 1.0);
 				const FVector Pos = FMath::Lerp(Win[seg], Win[seg + 1], t);
 				OutP = FVector2D(Pos.X, Pos.Y);
+				OutZ = Pos.Z;
 				FVector2D Tan(Win[seg + 1].X - Win[seg].X, Win[seg + 1].Y - Win[seg].Y);
 				if (!Tan.Normalize()) { Tan = FVector2D(1.0, 0.0); }
 				OutTan = Tan;
@@ -215,8 +216,8 @@ void URoadNetwork::BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const
 			// the tapers are the entry/exit throat, not a stall.
 			for (double S = 0.0; S <= WinLen + 1e-3; S += AlongSpacing)
 			{
-				FVector2D Base, Tan;
-				SampleWin(S, Base, Tan);
+				FVector2D Base, Tan; double BaseZ = 0.0;
+				SampleWin(S, Base, Tan, BaseZ);
 				const FVector2D Nout(Tan.Y * Sign, -Tan.X * Sign); // outward normal (side-aware)
 				// Inner edge point (at the carriageway edge) and the divider dir.
 				const FVector2D Inner = Base + Nout * Half;
@@ -231,12 +232,146 @@ void URoadNetwork::BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const
 					++StallLines;
 				}
 			}
+
+			// (c) Parked cars, one per whole stall — i.e. at the MIDPOINT between
+			// two dividers, not at a divider. The last stall is skipped unless it
+			// fits completely, and the tapers get none: a car in the throat blocks
+			// the bay's own entrance.
+			const int32 NumCarMeshes = ParkingCarMeshes.Num();
+			const double Fill = FMath::Clamp((double)ParkingCarFill, 0.0, 1.0);
+			if (NumCarMeshes > 0 && Fill > 0.0)
+			{
+				for (double S = 0.0; S + AlongSpacing <= WinLen + 1e-3; S += AlongSpacing)
+				{
+					FVector2D Base, Tan; double BaseZ = 0.0;
+					SampleWin(S + 0.5 * AlongSpacing, Base, Tan, BaseZ);
+					const FVector2D Nout(Tan.Y * Sign, -Tan.X * Sign);
+					const FVector2D Inner = Base + Nout * Half;
+					const FVector2D Dir = (Nout * SinT + Tan * CosT).GetSafeNormal();
+
+					// Hash the stall's world position, not a running counter: the
+					// same stall then keeps the same car (and the same occupancy)
+					// no matter which roads a windowed rebuild happens to touch.
+					const uint32 Seed = HashCombine(
+						GetTypeHash(FMath::RoundToInt(Inner.X)),
+						GetTypeHash(FMath::RoundToInt(Inner.Y)));
+					if ((double)(Seed % 1000u) / 1000.0 >= Fill) { continue; }
+
+					// Parallel stalls hold the car along the kerb; perpendicular and
+					// angled ones hold it along the divider, nose out.
+					const bool bParallel = (Bay.Layout == ERoadNetParkingLayout::Parallel);
+					const FVector2D Facing = bParallel ? Tan : Dir;
+					const FVector2D Centre = bParallel
+						? (Inner + Nout * (0.5 * Depth))
+						: (Inner + Dir * (0.5 * DividerLen));
+
+					const int32 MeshIdx = (int32)((Seed / 1000u) % (uint32)NumCarMeshes);
+					Ctx.ParkedCars.Emplace(MeshIdx, FTransform(
+						FRotator(0.0, FMath::RadiansToDegrees(FMath::Atan2(Facing.Y, Facing.X)), 0.0),
+						FVector(Centre.X, Centre.Y, BaseZ)));
+				}
+			}
 		}
 	}
 
 	if (BayCount > 0)
 	{
-		UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] BuildStandardParkingBays: %d bays, %d stall lines."),
-			BayCount, StallLines);
+		UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] BuildStandardParkingBays: %d bays, %d stall lines, %d parked cars."),
+			BayCount, StallLines, Ctx.ParkedCars.Num());
 	}
+}
+
+void URoadNetwork::BuildBikeCrossings(FRoadNetRebuildContext& Ctx) const
+{
+	Ctx.BikeStencils.Reset();
+	const int32 NumZones = Ctx.Zones.Num();
+	if (NumZones == 0 || BikeCrossings.Num() == 0) { return; }
+	if (Ctx.ZoneMarkingWhitePolys.Num() != NumZones) { Ctx.ZoneMarkingWhitePolys.SetNum(NumZones); }
+
+	// "Elephant's footprints": two rows of square blocks flanking the cycleway,
+	// one row per edge. Squares, not stripes, is what distinguishes a cycle
+	// crossing from a pedestrian zebra at a glance.
+	constexpr double kBlockCm = 50.0;    // square side
+	constexpr double kPitchCm = 90.0;    // start-to-start along the path
+
+	int32 Blocks = 0;
+	for (const FRoadNetBikeCrossing& X : BikeCrossings)
+	{
+		if (X.Path.Num() < 2) { continue; }
+		TArray<double> CL;
+		RoadNetMath::CumulativeLength(X.Path, CL);
+		const double Len = CL.Last();
+		if (Len < kPitchCm) { continue; }
+
+		auto SampleAt = [&](double S, FVector2D& OutP, FVector2D& OutTan, double& OutZ)
+		{
+			S = FMath::Clamp(S, 0.0, Len);
+			int32 seg = 0;
+			while (seg + 1 < CL.Num() - 1 && CL[seg + 1] < S) { ++seg; }
+			const double segLen = FMath::Max(1e-3, CL[seg + 1] - CL[seg]);
+			const double t = FMath::Clamp((S - CL[seg]) / segLen, 0.0, 1.0);
+			const FVector P = FMath::Lerp(X.Path[seg], X.Path[seg + 1], t);
+			OutP = FVector2D(P.X, P.Y);
+			OutZ = P.Z;
+			FVector2D Tan(X.Path[seg + 1].X - X.Path[seg].X, X.Path[seg + 1].Y - X.Path[seg].Y);
+			if (!Tan.Normalize()) { Tan = FVector2D(1.0, 0.0); }
+			OutTan = Tan;
+		};
+
+		// One zone for the whole crossing, resolved at its midpoint: a crossing
+		// spans a single carriageway, and splitting it across zones would give the
+		// two halves different grades.
+		FVector2D Mid, MidTan; double MidZ = 0.0;
+		SampleAt(0.5 * Len, Mid, MidTan, MidZ);
+		int32 z = INDEX_NONE;
+		double BestD2 = TNumericLimits<double>::Max();
+		for (int32 zi = 0; zi < NumZones; ++zi)
+		{
+			for (int32 RoadIdx : Ctx.Zones[zi])
+			{
+				const FRoadCurves* C = Ctx.Curves.Find(RoadIdx);
+				if (!C || C->Sampled.Num() < 2) { continue; }
+				const double D2 = FMath::Square(RoadNetMath::ProjectToPolyline(C->Sampled, Mid).Distance);
+				if (D2 < BestD2) { BestD2 = D2; z = zi; }
+			}
+		}
+		if (z == INDEX_NONE) { continue; }
+
+		const double HalfW = 0.5 * FMath::Max(100.f, X.WidthCm);
+		const double HalfB = 0.5 * kBlockCm;
+		// Centre the row so a block sits at each end of the drawn path rather than
+		// leaving a ragged tail wherever the length is not a whole number of pitches.
+		const int32 Count = FMath::Max(1, FMath::FloorToInt(Len / kPitchCm));
+		const double Span = Count * kPitchCm;
+		const double S0 = 0.5 * (Len - Span) + 0.5 * kPitchCm;
+
+		for (int32 i = 0; i < Count; ++i)
+		{
+			FVector2D P, Tan; double Z = 0.0;
+			SampleAt(S0 + i * kPitchCm, P, Tan, Z);
+			const FVector2D Perp(Tan.Y, -Tan.X);
+			for (double Side : { -1.0, 1.0 })
+			{
+				const FVector2D C = P + Perp * (Side * HalfW);
+				TArray<FVector2d> Loop;
+				Loop.Emplace(C.X + (Tan.X * HalfB + Perp.X * HalfB), C.Y + (Tan.Y * HalfB + Perp.Y * HalfB));
+				Loop.Emplace(C.X + (-Tan.X * HalfB + Perp.X * HalfB), C.Y + (-Tan.Y * HalfB + Perp.Y * HalfB));
+				Loop.Emplace(C.X + (-Tan.X * HalfB - Perp.X * HalfB), C.Y + (-Tan.Y * HalfB - Perp.Y * HalfB));
+				Loop.Emplace(C.X + (Tan.X * HalfB - Perp.X * HalfB), C.Y + (Tan.Y * HalfB - Perp.Y * HalfB));
+				FPolygon2d Poly(Loop);
+				if (Poly.VertexCount() < 3) { continue; }
+				if (Poly.IsClockwise()) { Poly.Reverse(); }
+				FGeneralPolygon2d GP;
+				GP.SetOuter(Poly);
+				Ctx.ZoneMarkingWhitePolys[z].Add(MoveTemp(GP));
+				++Blocks;
+			}
+		}
+
+		Ctx.BikeStencils.Emplace(FVector(Mid.X, Mid.Y, MidZ),
+			(float)FMath::RadiansToDegrees(FMath::Atan2(MidTan.Y, MidTan.X)));
+	}
+
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] BuildBikeCrossings: %d crossings, %d blocks."),
+		BikeCrossings.Num(), Blocks);
 }

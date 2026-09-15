@@ -32,14 +32,14 @@ static TAutoConsoleVariable<int32> CVarRoadNetDriveOnLeft(
 	TEXT("1 = drive on the left (UK/JP/AU), 0 = drive on the right. Moves forward traffic to the other side, swaps the stop-bar/zebra half at junctions, and paints the centre line white instead of yellow."),
 	ECVF_Default);
 
-// Active RoadNet Draw sub-tool (see ERoadNetDrawTool): 0=Draw .. 8=CurbBrush.
+// Active RoadNet Draw sub-tool (see ERoadNetDrawTool): 0=Draw .. 9=BikeCrossing.
 // Registered here in the always-loaded runtime module so the OSM Roads panel
 // (which writes it) and the RoadNetEditor mode (which reads it) can both reach
 // it by name without a module dependency between them.
 static TAutoConsoleVariable<int32> CVarRoadNetDrawTool(
 	TEXT("roadnet.DrawTool"),
 	0,
-	TEXT("Active RoadNet Draw sub-tool: 0=Draw, 1=Points, 2=Lanes, 3=Junctions, 4=Edge, 5=Markings, 6=Crosswalk, 7=Island, 8=CurbBrush. Exactly one tool is live at a time so clicks/hotkeys are unambiguous."),
+	TEXT("Active RoadNet Draw sub-tool: 0=Draw, 1=Points, 2=Lanes, 3=Junctions, 4=Edge, 5=Markings, 6=Crosswalk, 7=Island, 8=CurbBrush, 9=BikeCrossing. Exactly one tool is live at a time so clicks/hotkeys are unambiguous."),
 	ECVF_Default);
 
 // Shape the Draw sub-tool lays down (see ERoadNetDrawShape): 0=Freehand

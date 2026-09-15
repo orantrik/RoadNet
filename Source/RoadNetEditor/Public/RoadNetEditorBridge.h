@@ -15,6 +15,18 @@ namespace RoadNetEditorBridge
 	// status/error string suitable for logging or an on-screen toast.
 	ROADNETEDITOR_API bool AddParkingBayToActiveSelection(uint8 LayoutInt, FString& OutMsg);
 
+	// Merge the roads owning the current selection into one multi-lane road
+	// (same as the Points-tool U hotkey). Returns true on success.
+	ROADNETEDITOR_API bool MergeSelectedRoads(FString& OutMsg);
+
+	// Fit a circle to the selected roads and replace them with one clean ring.
+	ROADNETEDITOR_API bool CleanSelectedRoundabout(FString& OutMsg);
+
+	// Turn FRoadDef::bZoneGraph on/off for every road the active mode has
+	// selected, then rebuild those roads. Returns true when something changed;
+	// OutMsg receives a status/error string suitable for logging or a toast.
+	ROADNETEDITOR_API bool SetZoneGraphOnActiveSelection(bool bOn, FString& OutMsg);
+
 	// OSMRoadCore registers a handler that runs the same path as the panel's
 	// "Conform Terrain" button. RoadNetEditor fires it (debounced, off the
 	// network's rebuild serial) after ANY authoring edit settles, without taking

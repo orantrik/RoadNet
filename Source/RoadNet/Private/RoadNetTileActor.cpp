@@ -2,6 +2,7 @@
 #include "RoadNetTileActor.h"
 #include "DynamicMesh/DynamicMesh3.h"
 #include "UDynamicMesh.h"
+#include "Components/DecalComponent.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/SplineComponent.h"
@@ -48,6 +49,13 @@ UDynamicMeshComponent* ARoadNetTileActor::GetOrCreateMeshLayer(FName LayerName, 
 
 	// Two-sided so thin ribbons / island edges never cull to a hole.
 	Comp->SetTwoSided(true);
+
+	// Only road-level surfaces take marking decals. A decal is a box projected
+	// down, so without this a stop bar at a kerb also paints itself across the
+	// sidewalk and up the median next to it.
+	static const TSet<FName> kNoDecalLayers = {
+		FName(TEXT("Sidewalks")), FName(TEXT("Median")), FName(TEXT("MedianWalk")) };
+	Comp->SetReceivesDecals(!kNoDecalLayers.Contains(LayerName));
 
 	if (Material)
 	{
@@ -124,6 +132,27 @@ USplineComponent* ARoadNetTileActor::AddSpline()
 	return Sp;
 }
 
+UDecalComponent* ARoadNetTileActor::AddRoadDecal(UMaterialInterface* Material, const FVector& Location,
+	float YawDeg, const FVector& HalfSize)
+{
+	if (!Material || Decals.Num() >= kMaxDecalsPerTile) { return nullptr; }
+
+	UDecalComponent* D = NewObject<UDecalComponent>(this);
+	if (!D) { return nullptr; }
+	D->SetMobility(EComponentMobility::Static);
+	D->SetDecalMaterial(Material);
+	D->DecalSize = HalfSize;
+	D->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+	// Pitch -90 aims the decal's projection axis straight down (the pose
+	// ADecalActor gives its own component); yaw then spins the painted rectangle
+	// in the ground plane, with DecalSize.Z running along that yaw.
+	D->SetWorldLocationAndRotation(Location, FRotator(-90.f, YawDeg, 0.f));
+	D->RegisterComponent();
+	AddInstanceComponent(D);
+	Decals.Add(D);
+	return D;
+}
+
 void ARoadNetTileActor::TrackChildActor(AActor* Child)
 {
 	if (Child) { ChildActors.Add(Child); }
@@ -154,6 +183,12 @@ void ARoadNetTileActor::ClearForRebuild()
 	}
 	Splines.Reset();
 
+	for (TObjectPtr<UDecalComponent>& D : Decals)
+	{
+		if (UDecalComponent* Dec = D.Get()) { Dec->DestroyComponent(); }
+	}
+	Decals.Reset();
+
 	for (TWeakObjectPtr<AActor>& C : ChildActors)
 	{
 		if (AActor* A = C.Get()) { A->Destroy(); }
@@ -180,7 +215,7 @@ bool ARoadNetTileActor::IsEmptyTile() const
 			if (H->GetInstanceCount() > 0) { return false; }
 		}
 	}
-	if (Splines.Num() > 0) { return false; }
+	if (Splines.Num() > 0 || Decals.Num() > 0) { return false; }
 	for (const TWeakObjectPtr<AActor>& C : ChildActors) { if (C.IsValid()) { return false; } }
 	return true;
 }

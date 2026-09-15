@@ -35,7 +35,14 @@ namespace RoadNetSurface
 	ROADNET_API void MakeDisc(const FVector2D& Center, double Radius, int32 Segments,
 		UE::Geometry::FGeneralPolygon2d& Out);
 
-	// Union all road outlines (+ any ExtraPolys, e.g. junction fillet discs) into
+	// Convex hull of a point set, as a CCW polygon. Used to fill a junction node
+	// from its arms' own carriageway edge ends, which is what כרך 2 §2.1 calls the
+	// junction area ("bounded by the roads' edge lines and their imaginary
+	// extension") — a shape that follows the arms instead of ignoring them.
+	// Returns false if the points are collinear or fewer than three.
+	ROADNET_API bool MakeHull(const TArray<FVector2D>& Pts, UE::Geometry::FGeneralPolygon2d& Out);
+
+	// Union all road outlines (+ any ExtraPolys, e.g. junction hulls) into
 	// merged surface polygons. InflateEpsilonCm bridges micro-gaps between abutting
 	// arms (a "close" morphological op). Returns false only on a hard failure.
 	// PerJunction (optional): when non-empty, InflateEpsilonCm is applied only as

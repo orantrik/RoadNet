@@ -1,5 +1,6 @@
 #pragma once
 #include "CoreMinimal.h"
+#include "Containers/BitArray.h"
 
 // ===========================================================================
 // RoadNetMath — pure, engine-only geometry math for the road pipeline.
@@ -62,6 +63,17 @@ namespace RoadNetMath
 	// X/Y are left untouched (plan geometry unchanged); only the height ramps.
 	ROADNET_API void SmoothProfileZ(TArray<FVector>& Poly, double HalfWindowCm);
 
+	// Drop interior knots that sit on top of each other in plan, in place.
+	// Packed XY (Dist2D < MinXYCm) with leftover drape ΔZ triangulates as a
+	// near-vertical facet across the carriageway — a car-tipping side slope.
+	// A Z-cluster (still within 2×MinXYCm but |dZ| > MaxSlope·Dist2D) is the
+	// same defect and is dropped the same way. First and last are kept.
+	// Optional AlwaysKeep (bit i ⇒ never drop index i) is for junction welds.
+	// Returns how many points were removed.
+	ROADNET_API int32 CollapsePackedSamples(TArray<FVector>& Poly, double MinXYCm, double MaxSlope,
+		const TBitArray<>* AlwaysKeep = nullptr, TArray<int32>* OutKept = nullptr);
+
+
 	// ---- §10.4 Offset ------------------------------------------------------
 	// Offset a polyline laterally by SignedOffset (cm, +right). Uses miter joins
 	// clamped to MiterLimit*|offset|, falling back to the plain per-vertex offset
@@ -114,6 +126,11 @@ namespace RoadNetMath
 	// Sample a full circle (CCW) into a CLOSED 3-D ring (last point == first) at
 	// height Z. Segments clamped to [8,256]. Drives the Draw tool's roundabout;
 	// the duplicated end point lets the endpoint weld close it into a loop.
+	// Algebraic (Kåsa) least-squares circle fit. Needs 3+ non-collinear points.
+	// Returns false when the system is degenerate. OutRadius is centimetres.
+	ROADNET_API bool FitCircle(TArrayView<const FVector2D> Points,
+		FVector2D& OutCentre, double& OutRadius);
+
 	ROADNET_API void SampleCircle(const FVector2D& Center, double Radius, double Z,
 		int32 Segments, TArray<FVector>& Out);
 

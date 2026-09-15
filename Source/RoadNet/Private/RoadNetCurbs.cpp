@@ -55,15 +55,17 @@ namespace RoadNetCurbs
 			const double Total = S[N - 1];
 			if (Total < 1.0) { return; }
 
-			const double StdLenCm   = FMath::Max(20.0, SpacingCm);       // standard piece length
-			const double MinPieceCm = FMath::Max(15.0, StdLenCm * 0.25); // grade subdivision threshold
-			constexpr double kMaxPieceTurnRad = 0.20;                    // ~11.5° → cut on curves
-			// Max allowed sag/hump (cm) of a straight stone's chord from the real
-			// draped grade at its midpoint. When the LONGITUDINAL slope curves (a
-			// crest/dip), a full-length stone would bridge the bump and lift off /
-			// dig in — so shrink the piece until the chord hugs the grade. On a
-			// constant slope the chord matches exactly → pieces stay standard length.
-			constexpr double kZChordTolCm = 2.0;
+			const double StdLenCm = FMath::Max(20.0, SpacingCm);   // standard piece length
+			constexpr double kMaxPieceTurnRad = 0.20;              // ~11.5° → cut on curves
+
+			// Pieces are cut on the PLAN shape only. A kerb stone is a rigid
+			// precast block: a layer sets it to the grade and lets the joints take
+			// up the curvature, so the stone never subdivides to trace a vertical
+			// curve. The code used to halve a piece until its chord matched the
+			// draped grade at its midpoint, which meant every crest and sag in the
+			// height field spawned a run of stunted stones — and at a genuine step
+			// it bottomed out at the minimum length and produced the shattered,
+			// tilted chains around junctions.
 
 			// Position along the polyline at arc length s (forward-only hint).
 			auto PosAt = [&](double s, int32& Hint) -> FVector2D
@@ -124,24 +126,8 @@ namespace RoadNetCurbs
 					if (Turn > kMaxPieceTurnRad) { e = S[k]; break; }
 				}
 
-				// Vertical (grade) curvature cut: halve the piece until its straight
-				// chord stays within kZChordTolCm of the draped grade at the midpoint,
-				// down to MinPieceCm. Short stones where the slope bends, standard
-				// length where it doesn't.
-				for (int32 VGuard = 0; VGuard < 24 && (e - s) > MinPieceCm; ++VGuard)
-				{
-					int32 hA = HintS, hM = HintS, hB = HintS;
-					const FVector2D PA = PosAt(s, hA);
-					const FVector2D PB = PosAt(e, hB);
-					const FVector2D PM = PosAt(0.5 * (s + e), hM);
-					const double Za = Height.SampleHeight(PA.X, PA.Y, Fallback);
-					const double Zb = Height.SampleHeight(PB.X, PB.Y, Fallback);
-					const double Zm = Height.SampleHeight(PM.X, PM.Y, Fallback);
-					if (FMath::Abs(Zm - 0.5 * (Za + Zb)) <= kZChordTolCm) { break; }
-					e = s + 0.5 * (e - s);
-				}
-				// Do not extend a corner cut or fold a tail across it: either would
-				// undo the heading/grade check above. Short end pieces are intentional.
+				// Do not extend a corner cut or fold a tail across it: that would
+				// undo the heading check above. Short end pieces are intentional.
 
 				HintE = HintS;
 				Emit(PosAt(s, HintS), PosAt(e, HintE));
