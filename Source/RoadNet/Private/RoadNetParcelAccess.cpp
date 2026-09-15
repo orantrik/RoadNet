@@ -310,6 +310,245 @@ namespace
 	}
 }
 
+// ---------------------------------------------------------------------------
+// § parcel-street snap — the latent-space seam, parcel side.
+//
+// A parcel vertex near a road is not cadastral truth any more: it belongs to
+// the street. This pass MOVES it onto the road's sidewalk OUTER edge (XY and
+// Z), records the binding (road GUID + station + snapped offset) as an
+// osm:bind tag, and then cleans the ring — packed knots and collinear noise
+// are dropped BEFORE anything downstream (conform, surfaces, fences) reads the
+// ring. Bindings re-seat from the CURRENT curve on every rebuild, so editing a
+// road drags its parcels' street edges along.
+//
+// Runs in BOTH rebuild modes: latent (import / Build Street stage 1, before
+// the landscape conform) and full (idempotent — the vertices are already on
+// the edge, so the snap is a no-op and only the re-seat matters).
+// ---------------------------------------------------------------------------
+void URoadNetwork::BindParcelsToStreet(FRoadNetRebuildContext& Ctx)
+{
+	UWorld* World = WorldPtr.Get();
+	if (!World || Ctx.Curves.Num() == 0) { return; }
+
+	TArray<FParcelRing> Parcels;
+	GatherParcels(World, Parcels);
+	if (Parcels.Num() == 0) { return; }
+
+	TMap<int32, FBox2D> RoadBox;
+	for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+	{
+		if (KV.Value.Sampled.Num() < 2) { continue; }
+		FBox2D B(ForceInit);
+		for (const FVector& P : KV.Value.Sampled) { B += FVector2D(P.X, P.Y); }
+		RoadBox.Add(KV.Key, B);
+	}
+
+	// Sidewalk OUTER edge distance from the centreline: where a street-facing
+	// parcel vertex belongs. Same terms the deform corridor uses for pavement.
+	auto BandOuterOf = [this](int32 RoadIdx) -> double
+	{
+		const FRoadNetLaneSpec& RL = Roads[RoadIdx].Lanes;
+		return FMath::Max(50.0, (double)RL.HalfWidthCm())
+			+ ((RL.bSidewalkLeft || RL.bSidewalkRight) ? (double)FMath::Max(0.f, RL.SidewalkWidth) : 0.0);
+	};
+
+	// A vertex "belongs to the street" within the pavement plus a margin.
+	constexpr double kBindMarginCm    = 300.0;
+	constexpr double kMinSpacingCm    = 80.0;   // packed parcel knots below this triangulate as spikes
+	constexpr double kCollinearTolCm  = 5.0;    // cadastral noise on a straight edge
+	int32 Bound = 0, Reseated = 0, Orphaned = 0, Dropped = 0;
+
+	for (FParcelRing& Parcel : Parcels)
+	{
+		if (!Parcel.Actor || !Parcel.Spline) { continue; }
+
+		TMap<int32, FVertexBinding> Bindings;
+		ParseBindings(Parcel.Actor, Bindings);
+		TMap<int32, FVertexBinding> Live;   // final snapped bindings by vertex index
+		const int32 OldOrphans = Orphaned;
+
+		bool bModified = false;
+		auto EnsureModify = [&]()
+		{
+			if (!bModified)
+			{
+				bModified = true;
+				Parcel.Actor->Modify();
+				Parcel.Spline->Modify();
+			}
+		};
+
+		const int32 NumV = FMath::Min(Parcel.Pts.Num(), Parcel.Spline->GetNumberOfSplinePoints());
+		for (int32 i = 0; i < NumV; ++i)
+		{
+			if (const FVertexBinding* B = Bindings.Find(i))
+			{
+				// Re-seat from the stored station on the CURRENT curve — this is
+				// what makes a parcel follow a road edit. The offset is re-snapped
+				// to the current sidewalk outer edge, so a widened road pushes its
+				// parcels back instead of paving over them.
+				const int32 RoadIdx = FindRoadById(B->RoadId);
+				const FRoadCurves* C = (RoadIdx != INDEX_NONE) ? Ctx.Curves.Find(RoadIdx) : nullptr;
+				if (!C || C->Sampled.Num() < 2)
+				{
+					++Orphaned;   // road gone: vertex reverts to cadastral truth (tag not re-stamped)
+					continue;
+				}
+				const double Off = (B->OffsetCm >= 0.0 ? 1.0 : -1.0) * BandOuterOf(RoadIdx);
+				FVector2D Pos, Tan; double BedZ = 0.0;
+				EvalPolylineAtArc(C->Sampled, B->StationCm, Pos, Tan, BedZ);
+				const FVector2D N(-Tan.Y, Tan.X);   // Cross2D(Tan, N) = +1, matches Offset's sign
+				const FVector NewW(Pos.X + N.X * Off, Pos.Y + N.Y * Off, BedZ + SidewalkTopLiftCm);
+				EnsureModify();
+				Parcel.Spline->SetLocationAtSplinePoint(i, NewW,
+					ESplineCoordinateSpace::World, /*bUpdateSpline*/false);
+				Parcel.Pts[i] = FVector2D(NewW.X, NewW.Y);
+				Live.Add(i, { B->RoadId, B->StationCm, Off });
+				++Reseated;
+				continue;
+			}
+
+			// No binding yet: does this vertex belong to the street? Nearest
+			// eligible road within (pavement + margin) claims it, and the vertex
+			// is SNAPPED onto that road's sidewalk outer edge — XY and Z. This is
+			// the "road sidewalk splines snapped with parcel splines" rule: after
+			// this pass the two lines are the same line.
+			int32  BestR = INDEX_NONE;
+			double BestD = TNumericLimits<double>::Max();
+			RoadNetMath::FProjectResult BestVPR;
+			double BestBandOuter = 0.0;
+			for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+			{
+				const int32 r = KV.Key;
+				if (!Roads.IsValidIndex(r) || KV.Value.Sampled.Num() < 2) { continue; }
+				if (Roads[r].bBridge || Roads[r].bTunnel || Roads[r].Layer != 0) { continue; }
+				const double BandOuter = BandOuterOf(r);
+				if (const FBox2D* Bx = RoadBox.Find(r))
+				{
+					if (!Bx->ExpandBy(BandOuter + kBindMarginCm).IsInside(Parcel.Pts[i])) { continue; }
+				}
+				const RoadNetMath::FProjectResult PR =
+					RoadNetMath::ProjectToPolyline(KV.Value.Sampled, Parcel.Pts[i]);
+				if (PR.Distance < BestD)
+				{
+					BestD = PR.Distance; BestR = r; BestVPR = PR; BestBandOuter = BandOuter;
+				}
+			}
+			if (BestR == INDEX_NONE || BestD > BestBandOuter + kBindMarginCm) { continue; }
+
+			FVector2D Pos, Tan; double BedZ = 0.0;
+			EvalPolylineAtArc(Ctx.Curves.FindChecked(BestR).Sampled, BestVPR.AlongDist, Pos, Tan, BedZ);
+			const FVector2D N(-Tan.Y, Tan.X);
+			double Sign = (BestVPR.Offset >= 0.0) ? 1.0 : -1.0;
+			if (FMath::Abs(BestVPR.Offset) < 1.0)
+			{
+				// Dead on the centreline: push toward the parcel's own side.
+				Sign = (FVector2D::DotProduct(N, Parcel.Centroid - Pos) >= 0.0) ? 1.0 : -1.0;
+			}
+			const double Off = Sign * BestBandOuter;
+			const FVector NewW(Pos.X + N.X * Off, Pos.Y + N.Y * Off, BedZ + SidewalkTopLiftCm);
+			EnsureModify();
+			Parcel.Spline->SetLocationAtSplinePoint(i, NewW,
+				ESplineCoordinateSpace::World, /*bUpdateSpline*/false);
+			Parcel.Pts[i] = FVector2D(NewW.X, NewW.Y);
+			Live.Add(i, { Roads[BestR].Id, BestVPR.AlongDist, Off });
+			++Bound;
+		}
+
+		// ---- post-snap ring hygiene ---------------------------------------
+		// Snapping can pile vertices up (two cadastral corners projecting to
+		// nearly the same station), and cadastral rings carry noise of their
+		// own. Drop packed and collinear knots NOW, before any surface, fence
+		// or conform reads this ring — this is where "no vertex spikes and bad
+		// topology" is enforced for parcels. Bound vertices are only dropped
+		// when packed against another BOUND vertex (they sit on the same edge
+		// line, so the ring reads identical without one of them).
+		{
+			int32 N = Parcel.Pts.Num();
+			bool bAny = true;
+			while (bAny && N > 3)
+			{
+				bAny = false;
+				for (int32 i = 0; i < N && N > 3; )
+				{
+					const int32 Prev = (i + N - 1) % N;
+					const int32 Next = (i + 1) % N;
+					const double DPrev = FVector2D::Distance(Parcel.Pts[i], Parcel.Pts[Prev]);
+					bool bRemove = false;
+					if (!Live.Contains(i))
+					{
+						if (DPrev < kMinSpacingCm)
+						{
+							bRemove = true;
+						}
+						else
+						{
+							const FVector2D AC = Parcel.Pts[Next] - Parcel.Pts[Prev];
+							const double L = AC.Size();
+							if (L > 1e-6)
+							{
+								const FVector2D D = AC / L;
+								const FVector2D AB = Parcel.Pts[i] - Parcel.Pts[Prev];
+								if (FMath::Abs(AB.X * D.Y - AB.Y * D.X) < kCollinearTolCm)
+								{
+									bRemove = true;
+								}
+							}
+						}
+					}
+					else if (Live.Contains(Prev) && DPrev < kMinSpacingCm)
+					{
+						bRemove = true;   // two bound knots on the same edge line
+					}
+					if (!bRemove) { ++i; continue; }
+
+					EnsureModify();
+					Parcel.Spline->RemoveSplinePoint(i, /*bUpdateSpline*/false);
+					Parcel.Pts.RemoveAt(i);
+					Live.Remove(i);
+					TMap<int32, FVertexBinding> Shifted;
+					for (TPair<int32, FVertexBinding>& KV : Live)
+					{
+						Shifted.Add(KV.Key > i ? KV.Key - 1 : KV.Key, KV.Value);
+					}
+					Live = MoveTemp(Shifted);
+					--N;
+					++Dropped;
+					bAny = true;
+				}
+			}
+		}
+
+		// ---- re-stamp the binding tags (indices are final only now) --------
+		if (bModified || Live.Num() != Bindings.Num() || Orphaned > OldOrphans)
+		{
+			EnsureModify();
+			Parcel.Actor->Tags.RemoveAll([](const FName& T)
+			{
+				return T.ToString().StartsWith(TEXT("osm:bind="));
+			});
+			for (const TPair<int32, FVertexBinding>& KV : Live)
+			{
+				Parcel.Actor->Tags.Add(*FString::Printf(TEXT("osm:bind=%d,%s,%.0f,%.0f"),
+					KV.Key, *KV.Value.RoadId.ToString(EGuidFormats::DigitsWithHyphens),
+					KV.Value.StationCm, KV.Value.OffsetCm));
+			}
+			Parcel.Spline->UpdateSpline();
+			Parcel.Box = FBox2D(ForceInit);
+			Parcel.Centroid = FVector2D::ZeroVector;
+			for (const FVector2D& P : Parcel.Pts) { Parcel.Box += P; Parcel.Centroid += P; }
+			Parcel.Centroid /= (double)FMath::Max(1, Parcel.Pts.Num());
+		}
+	}
+
+	if (Bound + Reseated + Orphaned + Dropped > 0)
+	{
+		UE_LOG(LogRoadNet, Log,
+			TEXT("[RoadNet] ParcelSnap: %d vertex(es) snapped to sidewalk edges (new), %d re-seated from bindings, %d orphaned (road deleted), %d packed/collinear knot(s) dropped."),
+			Bound, Reseated, Orphaned, Dropped);
+	}
+}
+
 void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 {
 	using namespace UE::Geometry;
@@ -320,6 +559,10 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 
 	UWorld* World = WorldPtr.Get();
 	if (!World) { return; }
+
+	// Snap + clean FIRST (idempotent if the latent pass already ran), so every
+	// ring this stage measures is the ring the level actually has.
+	BindParcelsToStreet(Ctx);
 
 	TArray<FParcelRing> Parcels;
 	GatherParcels(World, Parcels);
@@ -353,137 +596,6 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 		FBox2D B(ForceInit);
 		for (const FVector& P : KV.Value.Sampled) { B += FVector2D(P.X, P.Y); }
 		RoadBox.Add(KV.Key, B);
-	}
-
-	// -----------------------------------------------------------------------
-	// Phase 3 — vertex bindings: record which parcel vertices belong to the
-	// street, and re-seat previously bound vertices from the CURRENT curves.
-	// Runs BEFORE the access/frontage pass so arcs are measured on the ring
-	// the parcel will actually have.
-	// -----------------------------------------------------------------------
-	{
-		// A vertex "belongs to the street" within the pavement plus a margin.
-		constexpr double kBindMarginCm = 300.0;
-		int32 Bound = 0, Reseated = 0, Orphaned = 0;
-
-		for (FParcelRing& Parcel : Parcels)
-		{
-			if (!Parcel.Actor || !Parcel.Spline) { continue; }
-
-			TMap<int32, FVertexBinding> Bindings;
-			ParseBindings(Parcel.Actor, Bindings);
-
-			bool bMovedAny = false;
-			bool bModified = false;
-			auto EnsureModify = [&]()
-			{
-				if (!bModified)
-				{
-					bModified = true;
-					Parcel.Actor->Modify();
-					Parcel.Spline->Modify();
-				}
-			};
-
-			const int32 NumV = FMath::Min(Parcel.Pts.Num(), Parcel.Spline->GetNumberOfSplinePoints());
-			for (int32 i = 0; i < NumV; ++i)
-			{
-				if (const FVertexBinding* B = Bindings.Find(i))
-				{
-					// Re-seat from the stored (station, offset) on the current
-					// curve — this is what makes a parcel follow a road edit.
-					const int32 RoadIdx = FindRoadById(B->RoadId);
-					const FRoadCurves* C = (RoadIdx != INDEX_NONE) ? Ctx.Curves.Find(RoadIdx) : nullptr;
-					if (!C || C->Sampled.Num() < 2)
-					{
-						// The road is gone: the vertex reverts to cadastral truth.
-						++Orphaned;
-						EnsureModify();
-						Parcel.Actor->Tags.RemoveAll([i](const FName& T)
-						{
-							return T.ToString().StartsWith(FString::Printf(TEXT("osm:bind=%d,"), i));
-						});
-						continue;
-					}
-					FVector2D Pos, Tan; double BedZ = 0.0;
-					EvalPolylineAtArc(C->Sampled, B->StationCm, Pos, Tan, BedZ);
-					const FVector2D N(-Tan.Y, Tan.X);   // Cross2D(Tan, N) = +1, matches Offset's sign
-					const FVector NewW(
-						Pos.X + N.X * B->OffsetCm,
-						Pos.Y + N.Y * B->OffsetCm,
-						BedZ + SidewalkTopLiftCm);
-					EnsureModify();
-					Parcel.Spline->SetLocationAtSplinePoint(i, NewW,
-						ESplineCoordinateSpace::World, /*bUpdateSpline*/false);
-					Parcel.Pts[i] = FVector2D(NewW.X, NewW.Y);
-					bMovedAny = true;
-					++Reseated;
-					continue;
-				}
-
-				// No binding yet: does this vertex belong to the street? Nearest
-				// eligible road within (pavement + margin) claims it. XY stays
-				// cadastral on first contact — the binding just remembers the
-				// relationship — but Z snaps to the sidewalk top immediately, so
-				// fences and sourcez seating read street height, not drape noise.
-				int32  BestR = INDEX_NONE;
-				double BestD = TNumericLimits<double>::Max();
-				RoadNetMath::FProjectResult BestVPR;
-				double BestBandOuter = 0.0;
-				for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
-				{
-					const int32 r = KV.Key;
-					if (!Roads.IsValidIndex(r) || KV.Value.Sampled.Num() < 2) { continue; }
-					if (Roads[r].bBridge || Roads[r].bTunnel || Roads[r].Layer != 0) { continue; }
-					const FRoadNetLaneSpec& RL = Roads[r].Lanes;
-					const double BandOuter = FMath::Max(50.0, (double)RL.HalfWidthCm())
-						+ ((RL.bSidewalkLeft || RL.bSidewalkRight) ? (double)FMath::Max(0.f, RL.SidewalkWidth) : 0.0);
-					if (const FBox2D* Bx = RoadBox.Find(r))
-					{
-						if (!Bx->ExpandBy(BandOuter + kBindMarginCm).IsInside(Parcel.Pts[i])) { continue; }
-					}
-					const RoadNetMath::FProjectResult PR =
-						RoadNetMath::ProjectToPolyline(KV.Value.Sampled, Parcel.Pts[i]);
-					if (PR.Distance < BestD)
-					{
-						BestD = PR.Distance; BestR = r; BestVPR = PR; BestBandOuter = BandOuter;
-					}
-				}
-				if (BestR == INDEX_NONE || BestD > BestBandOuter + kBindMarginCm) { continue; }
-
-				EnsureModify();
-				Parcel.Actor->Tags.Add(*FString::Printf(TEXT("osm:bind=%d,%s,%.0f,%.0f"),
-					i, *Roads[BestR].Id.ToString(EGuidFormats::DigitsWithHyphens),
-					BestVPR.AlongDist, BestVPR.Offset));
-
-				FVector2D Pos, Tan; double BedZ = 0.0;
-				EvalPolylineAtArc(Ctx.Curves.FindChecked(BestR).Sampled, BestVPR.AlongDist, Pos, Tan, BedZ);
-				const FVector OldW = Parcel.Spline->GetLocationAtSplinePoint(i, ESplineCoordinateSpace::World);
-				Parcel.Spline->SetLocationAtSplinePoint(i,
-					FVector(OldW.X, OldW.Y, BedZ + SidewalkTopLiftCm),
-					ESplineCoordinateSpace::World, /*bUpdateSpline*/false);
-				bMovedAny = true;
-				++Bound;
-			}
-
-			if (bMovedAny)
-			{
-				Parcel.Spline->UpdateSpline();
-				// Post-snap hygiene inputs: the ring the access pass reads next
-				// must be the ring the level now has.
-				Parcel.Box = FBox2D(ForceInit);
-				Parcel.Centroid = FVector2D::ZeroVector;
-				for (const FVector2D& P : Parcel.Pts) { Parcel.Box += P; Parcel.Centroid += P; }
-				Parcel.Centroid /= (double)FMath::Max(1, Parcel.Pts.Num());
-			}
-		}
-
-		if (Bound + Reseated + Orphaned > 0)
-		{
-			UE_LOG(LogRoadNet, Log,
-				TEXT("[RoadNet] ParcelBind: %d vertex(es) newly bound to road splines, %d re-seated from bindings, %d orphaned (road deleted)."),
-				Bound, Reseated, Orphaned);
-		}
 	}
 
 	// Everything a path must not cover, unioned once rather than per parcel: the plots themselves

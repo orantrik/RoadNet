@@ -3952,6 +3952,13 @@ void URoadNetwork::PostEditUndo()
 }
 #endif
 
+void URoadNetwork::RebuildLatent()
+{
+	bLatentRebuild = true;
+	Rebuild();
+	bLatentRebuild = false;
+}
+
 void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& DirtyRegionWorld)
 {
 	const double T0 = FPlatformTime::Seconds();
@@ -4119,6 +4126,25 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 	BuildSurfaceUnion(Ctx);       // §10.9 Clipper2 boolean-union per zone
 	CaptureStreetPlan(Ctx);       // § street plan API: sidewalk edges with Z
 	const double tSurface = Now(); Trace(TEXT("surface"), tSurface - tZones);
+
+	// LATENT-ONLY stop (the street-plan order): the plan now exists — curves,
+	// reconciled alignment, deform corridors, surface plan, sidewalk edges. Snap
+	// the parcel splines to it, clean their rings, and return WITHOUT committing
+	// a single triangle. The stale conform soup is dropped so the landscape
+	// conform that follows reads the latent corridors, never yesterday's mesh.
+	// RebuildSerial is deliberately NOT bumped: nothing visible changed, and the
+	// editor mode's conform watch must not fire off a half-built state.
+	if (bLatentRebuild)
+	{
+		BindParcelsToStreet(Ctx);
+		ConformVerts.Reset();
+		ConformTris.Reset();
+		UE_LOG(LogRoadNet, Log,
+			TEXT("[RoadNet] Rebuild (latent): %d road(s), %d curve(s), %d joint(s), %d corridor(s) — plan captured, parcels snapped, no meshes committed."),
+			Roads.Num(), Ctx.Curves.Num(), Ctx.Joints.Num(), DeformCorridors.Num());
+		return;
+	}
+
 	BuildJunctionMarkings(Ctx);   // §2 junction paint (stop/crosswalk) + signals
 	BuildJunctionIslands(Ctx);    // § corner channelizing grass islands (per-junction)
 	const double tJunc = Now();    Trace(TEXT("junctionmarks"), tJunc - tSurface);

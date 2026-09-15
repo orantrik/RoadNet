@@ -1078,6 +1078,16 @@ public:
 	// merge). Returns INDEX_NONE if not present.
 	int32 FindRoadById(const FGuid& Id) const;
 
+	// LATENT-ONLY rebuild — the street-plan order. Runs the pipeline up to and
+	// including the plan (curves, vertical alignment, corridors, surface plan,
+	// sidewalk edges), snaps the level's parcel splines onto the sidewalk outer
+	// edges and cleans their rings — and STOPS. No triangle is committed and the
+	// stale conform soup is dropped, so a landscape conform that follows reads
+	// the latent spline plan, never yesterday's mesh. Import ends here; the
+	// Build Street orchestrator conforms the landscape and only then runs the
+	// full Rebuild to mesh onto the clean bed.
+	void RebuildLatent();
+
 	// ---- Street plan API (latent-space seam) -------------------------------
 	// Refreshed on every rebuild by CaptureStreetPlan / BuildParcelAccessPaths.
 	// Transient: derived facts, never saved — a rebuild is the source of truth.
@@ -1367,6 +1377,9 @@ private:
 	// GetDeformCorridors / FRoadNetDeformCorridor). Not serialized.
 	TArray<FRoadNetDeformCorridor> DeformCorridors;
 
+	// True only while RebuildLatent() drives Rebuild(): stop after the plan.
+	bool bLatentRebuild = false;
+
 	// Transient world-space triangle soup of the last rebuild's ground driving
 	// surface (see GetConformVerts/GetConformTris). Accumulated in CommitLayer
 	// for the layers flagged bConformSurface, skipping elevated zones. Not
@@ -1404,6 +1417,7 @@ private:
 	void BuildZones(FRoadNetRebuildContext& Ctx) const;          // §10.12 grade separation
 	void BuildSurfaceUnion(FRoadNetRebuildContext& Ctx) const;   // §10.9 per-zone union + §8.12 sidewalks
 	void CaptureStreetPlan(FRoadNetRebuildContext& Ctx);         // § street plan API (sidewalk edges w/ Z)
+	void BindParcelsToStreet(FRoadNetRebuildContext& Ctx);       // § snap parcel splines to sidewalk edges + ring hygiene
 	void BuildPerimeterLoops(FRoadNetRebuildContext& Ctx) const; // §10.11 loops for PCG export
 	void BuildLaneGraph(FRoadNetRebuildContext& Ctx) const;      // §12.2 lane connectivity
 	void BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const;    // §12.1 per-lane ribbon polys

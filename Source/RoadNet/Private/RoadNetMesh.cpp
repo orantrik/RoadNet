@@ -459,14 +459,20 @@ namespace RoadNetMesh
 			return FVector3f((float)N.X, (float)N.Y, (float)N.Z);
 		};
 
-		// Ring hygiene BEFORE triangulation (the latent-space rule): a packed
-		// boundary cluster triangulates as a spike, a near-collinear vertex as a
-		// sliver. A 25 cm spacing floor and 1.5 cm line deviation are invisible
-		// at street scale but keep Delaunay's input clean. Winding is preserved.
+		// Ring hygiene BEFORE triangulation (the latent-space rule), with a hard
+		// safety bound: only DEVIATION-SAFE removals. Dropping duplicates (<1 cm)
+		// and collinear knots (<1.5 cm off the line) moves the boundary by at
+		// most 1.5 cm, so the cleaned outer ring can never cross a hole and the
+		// constrained Delaunay stays legal. A spacing floor was tried here and
+		// produced map-crossing spike triangles: cutting a 25 cm corner cluster
+		// let rings intersect, and a constrained triangulation fed intersecting
+		// constraints returns garbage. Packed-cluster removal belongs upstream,
+		// on the latent polylines, where a removal can be checked against the
+		// plan — never on triangulation input.
 		auto CleanRing = [](const FPolygon2d& In) -> FPolygon2d
 		{
 			TArray<FVector2D> V(In.GetVertices());
-			RoadNetMath::CleanPolygonRing(V, /*MinSpacingCm*/25.0, /*CollinearTolCm*/1.5);
+			RoadNetMath::CleanPolygonRing(V, /*MinSpacingCm*/1.0, /*CollinearTolCm*/1.5);
 			return FPolygon2d(V);
 		};
 
