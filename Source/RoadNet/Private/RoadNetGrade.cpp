@@ -845,16 +845,70 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 			}
 			ReclampLongitudinal();
 			TieRemaining = Sweep(/*bCorrect*/false);
+		}
+	}
 
-			// The edges are index-parallel to the centreline: re-sync their Z.
-			for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+	// 4c. Rogue-knot filter — "my spline represents X, so all its vertices keep
+	// the same height, more or less." Every pass above moves Z per SAMPLE, and a
+	// single sample can end up metres off its neighbours (a noisy drape hit, a
+	// tie against the wrong bed) while both its longitudinal grades stay just
+	// inside the cap — the plan splines made these visible as one white knot
+	// diving under the road. Robust local rule: a knot further from its 5-window
+	// MEDIAN than the grade cap allows over its own span is not road, it is
+	// noise, and it takes the median. Junction plates / pinned anchors are
+	// untouchable, exactly as in the tie pass.
+	int32 RogueKnots = 0;
+	{
+		for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+		{
+			TArray<FVector>& P = KV.Value.Sampled;
+			const int32 N = P.Num();
+			if (N < 3) { continue; }
+			const TBitArray<>* Prot = TieProtected.Find(KV.Key);
+			for (int32 Pass = 0; Pass < 2; ++Pass)   // twice: rogue PAIRS shadow each other's median
 			{
-				FRoadCurves& C = KV.Value;
-				const int32 N = C.Sampled.Num();
-				if (C.LeftEdge.Num()  == N) { for (int32 i = 0; i < N; ++i) { C.LeftEdge[i].Z  = C.Sampled[i].Z; } }
-				if (C.RightEdge.Num() == N) { for (int32 i = 0; i < N; ++i) { C.RightEdge[i].Z = C.Sampled[i].Z; } }
+				bool bAny = false;
+				for (int32 i = 0; i < N; ++i)
+				{
+					if (Prot && Prot->IsValidIndex(i) && (*Prot)[i]) { continue; }
+					double W[5];
+					int32 M = 0;
+					for (int32 k = FMath::Max(0, i - 2); k <= FMath::Min(N - 1, i + 2); ++k)
+					{
+						W[M++] = P[k].Z;
+					}
+					for (int32 a = 1; a < M; ++a)   // insertion sort, M <= 5
+					{
+						const double V = W[a];
+						int32 b = a - 1;
+						while (b >= 0 && W[b] > V) { W[b + 1] = W[b]; --b; }
+						W[b + 1] = V;
+					}
+					const double Med = W[M / 2];
+					const double Span = FVector::Dist2D(P[FMath::Max(0, i - 1)], P[FMath::Min(N - 1, i + 1)]);
+					const double Allow = FMath::Max(30.0, MaxSlope * FMath::Max(Span, 1.0));
+					if (FMath::Abs(P[i].Z - Med) > Allow)
+					{
+						P[i].Z = Med;
+						++RogueKnots;
+						bAny = true;
+					}
+				}
+				if (!bAny) { break; }
 			}
 		}
+	}
+
+	// The edges are index-parallel to the centreline and their Z is DEFINED as
+	// the centreline's: re-sync unconditionally. (This used to run only after a
+	// tie correction, so an edge-only rogue Z from the curve build could sail
+	// into the mesh and the plan splines untouched.)
+	for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+	{
+		FRoadCurves& C = KV.Value;
+		const int32 N = C.Sampled.Num();
+		if (C.LeftEdge.Num()  == N) { for (int32 i = 0; i < N; ++i) { C.LeftEdge[i].Z  = C.Sampled[i].Z; } }
+		if (C.RightEdge.Num() == N) { for (int32 i = 0; i < N; ++i) { C.RightEdge[i].Z = C.Sampled[i].Z; } }
 	}
 
 	// -----------------------------------------------------------------------
@@ -944,10 +998,10 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	}
 
 	UE_LOG(LogRoadNet, Log,
-		TEXT("[RoadNet][GRADE] aligned %d road(s) over %d junction(s) | straight span %.0f m, chord budget %.1f m, relax %.0f cm, curve %.1f m/%% | %d steep chord(s), %d budget break(s), %d relax escape(s), %d over-graded junction(s) | %d junction(s) sit clear of their road's ground and were ramped, %d of those too tight to ramp fully | %d steep chord(s) negotiated (%d unfixable) | %d lateral tie(s) at %.1f%%, %d left after solve"),
+		TEXT("[RoadNet][GRADE] aligned %d road(s) over %d junction(s) | straight span %.0f m, chord budget %.1f m, relax %.0f cm, curve %.1f m/%% | %d steep chord(s), %d budget break(s), %d relax escape(s), %d over-graded junction(s) | %d junction(s) sit clear of their road's ground and were ramped, %d of those too tight to ramp fully | %d steep chord(s) negotiated (%d unfixable) | %d lateral tie(s) at %.1f%%, %d left after solve | %d rogue knot(s) pulled to their spline's median"),
 		RoadsAligned, NumJoints, StraightCm / 100.0, MaxDevCm / 100.0, RelaxCm, CurveKCm / 100.0,
 		SteepChords, BudgetBreaks, RelaxEscapes, SteepJunctions, StepsRamped, StepsTooTight,
-		ChordViolations, ChordUnfixable, TieViolations, TanLat * 100.0, TieRemaining);
+		ChordViolations, ChordUnfixable, TieViolations, TanLat * 100.0, TieRemaining, RogueKnots);
 
 	// Snapshot for RoadNet.SlopeSelfCheck: the last rebuild's residual defects.
 	GSlopeCheck = { ChordUnfixable, TieRemaining, StepsTooTight, SteepJunctions };
