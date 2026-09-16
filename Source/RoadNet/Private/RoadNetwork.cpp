@@ -47,6 +47,62 @@ static TAutoConsoleVariable<int32> CVarRoadNetJunctionConditioning(
 	TEXT("1 = decluster and straighten road points near junctions during Smooth Roads and OSM import. 0 = leave imported points as-is."),
 	ECVF_Default);
 
+// § keep spline edits — user edits of the plan splines (centrelines and
+// sidewalk rings) survive Build Street: harvested into the road polylines +
+// persistent pins before every rebuild regenerates the splines.
+static TAutoConsoleVariable<int32> CVarRoadNetKeepSplineEdits(
+	TEXT("roadnet.KeepSplineEdits"),
+	1,
+	TEXT("1 = edits made to the plan splines (road centrelines, sidewalk rings) are harvested before a rebuild and re-applied, instead of being regenerated away. Default 1."),
+	ECVF_Default);
+
+// § ease heights — adjacent knots closer than the radius may not disagree in
+// Z by more than the step. Two rulers, exposed on the OSM Roads panel.
+// NOT static: RoadNetParcelAccess.cpp reads the same rulers for its field pass.
+TAutoConsoleVariable<int32> CVarRoadNetEaseHeights(
+	TEXT("roadnet.EaseHeights"),
+	1,
+	TEXT("1 = ease pass on the latent splines: knots closer than roadnet.EaseRadiusCm may not differ in Z by more than roadnet.EaseMaxStepCm. Default 1."),
+	ECVF_Default);
+TAutoConsoleVariable<float> CVarRoadNetEaseMaxStepCm(
+	TEXT("roadnet.EaseMaxStepCm"),
+	25.0f,
+	TEXT("Ease heights: max Z difference (cm) between two knots inside the ease radius. Default 25."),
+	ECVF_Default);
+TAutoConsoleVariable<float> CVarRoadNetEaseRadiusCm(
+	TEXT("roadnet.EaseRadiusCm"),
+	600.0f,
+	TEXT("Ease heights: only knots closer than this (cm) are eased against each other. Default 600."),
+	ECVF_Default);
+
+// § ease heights along ONE polyline: consecutive knots closer than RadiusCm
+// (2D) are clamped to at most MaxStepCm of Z difference. Forward + backward
+// sweep, two rounds, so a single spiked knot is pulled down from both sides
+// while a long segment (> radius) may still carry a legitimate grade change.
+static int32 EasePolylineZ(TArray<FVector>& P, bool bClosed, double MaxStepCm, double RadiusCm)
+{
+	if (P.Num() < 2 || MaxStepCm <= 0.0) { return 0; }
+	int32 Moves = 0;
+	auto Relax = [&](int32 A, int32 B)
+	{
+		const double D = FVector::Dist2D(P[A], P[B]);
+		if (D > RadiusCm) { return; }
+		const double dZ = P[B].Z - P[A].Z;
+		if (FMath::Abs(dZ) <= MaxStepCm) { return; }
+		P[B].Z = P[A].Z + FMath::Clamp(dZ, -MaxStepCm, MaxStepCm);
+		++Moves;
+	};
+	const int32 N = P.Num();
+	for (int32 Round = 0; Round < 2; ++Round)
+	{
+		for (int32 i = 1; i < N; ++i)      { Relax(i - 1, i); }
+		if (bClosed)                        { Relax(N - 1, 0); }
+		for (int32 i = N - 2; i >= 0; --i) { Relax(i + 1, i); }
+		if (bClosed)                        { Relax(0, N - 1); }
+	}
+	return Moves;
+}
+
 // Pipeline tunables (§2.6). Kept local until a settings object is added.
 namespace
 {
@@ -136,6 +192,9 @@ int32 URoadNetwork::AddRoad(const FRoadDef& Road)
 void URoadNetwork::ResetRoads()
 {
 	Roads.Reset();
+	// The user's plan-spline edits describe roads that no longer exist.
+	PlanEditPins.Reset();
+	PlanSplineBaselines.Reset();
 }
 
 int32 URoadNetwork::RemoveRoadsBySource(ERoadNetSource Source)
@@ -674,8 +733,48 @@ void URoadNetwork::CaptureStreetPlan(FRoadNetRebuildContext& Ctx)
 		}
 	}
 
-	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] StreetPlan: captured %d sidewalk edge ring(s) with Z across %d zone(s)."),
-		PlanSidewalkEdges.Num(), Ctx.ZoneSidewalkPolys.Num());
+	// § keep spline edits: the rings above were just re-derived from the
+	// surface union, so the user's sidewalk-knot edits go back on now — each
+	// pin claims the nearest ring point to where the plan HAD that knot.
+	int32 Pinned = 0;
+	if (CVarRoadNetKeepSplineEdits.GetValueOnAnyThread() != 0)
+	{
+		for (const FRoadNetPlanPin& Pin : PlanEditPins)
+		{
+			if (!Pin.bWalk) { continue; }
+			FVector* BestP = nullptr;
+			double BestD = 500.0;
+			for (FRoadNetPlanEdge& E : PlanSidewalkEdges)
+			{
+				for (FVector& P : E.Points)
+				{
+					const double D = FVector2D::Distance(FVector2D(P.X, P.Y), Pin.OrigXY);
+					if (D < BestD) { BestD = D; BestP = &P; }
+				}
+			}
+			if (BestP)
+			{
+				*BestP = FVector(Pin.XY.X, Pin.XY.Y, Pin.ZCm);
+				++Pinned;
+			}
+		}
+	}
+
+	// § ease heights on every ring: adjacent knots inside the ease radius may
+	// not disagree in Z by more than the ease step — pinned or not.
+	int32 Eased = 0;
+	if (CVarRoadNetEaseHeights.GetValueOnAnyThread() != 0)
+	{
+		const double MaxStep = FMath::Max(1.0, (double)CVarRoadNetEaseMaxStepCm.GetValueOnAnyThread());
+		const double Radius  = FMath::Max(10.0, (double)CVarRoadNetEaseRadiusCm.GetValueOnAnyThread());
+		for (FRoadNetPlanEdge& E : PlanSidewalkEdges)
+		{
+			Eased += EasePolylineZ(E.Points, /*bClosed*/true, MaxStep, Radius);
+		}
+	}
+
+	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] StreetPlan: captured %d sidewalk edge ring(s) with Z across %d zone(s); %d user pin(s) re-applied, %d knot(s) eased."),
+		PlanSidewalkEdges.Num(), Ctx.ZoneSidewalkPolys.Num(), Pinned, Eased);
 }
 
 void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
@@ -2777,6 +2876,31 @@ void URoadNetwork::RunSelfCheck()
 			TEXT("an honest square ring is left alone"));
 	}
 
+	// § ease heights: a single spiked knot inside the radius is pulled to
+	// within the step of its neighbours; a genuine grade over a segment longer
+	// than the radius is left alone.
+	{
+		TArray<FVector> Spiked = {
+			FVector(0.0, 0.0, 100.0),
+			FVector(200.0, 0.0, 100.0),
+			FVector(400.0, 0.0, 480.0),   // the rogue knot (+380 over 2 m)
+			FVector(600.0, 0.0, 100.0),
+			FVector(800.0, 0.0, 100.0)
+		};
+		EasePolylineZ(Spiked, /*bClosed*/false, /*MaxStepCm*/25.0, /*RadiusCm*/600.0);
+		Expect(FMath::Abs(Spiked[2].Z - Spiked[1].Z) <= 25.5 &&
+		       FMath::Abs(Spiked[3].Z - Spiked[2].Z) <= 25.5,
+			TEXT("a spiked knot is eased to within the max step of both neighbours"));
+
+		TArray<FVector> LongGrade = {
+			FVector(0.0, 0.0, 100.0),
+			FVector(1000.0, 0.0, 400.0)   // 3 m rise over 10 m — beyond the radius
+		};
+		Expect(EasePolylineZ(LongGrade, false, 25.0, 600.0) == 0 &&
+		       LongGrade[1].Z == 400.0,
+			TEXT("a grade across a segment longer than the ease radius is untouched"));
+	}
+
 	UE_LOG(LogRoadNet, Display, TEXT("LaneSelfCheck: %s"), bOK ? TEXT("PASS") : TEXT("FAIL"));
 }
 
@@ -3991,13 +4115,21 @@ void URoadNetwork::RefreshPlanSplines(FRoadNetRebuildContext& Ctx)
 	{
 		if (S && S->ComponentHasTag(kPlanTag)) { S->DestroyComponent(); }
 	}
+	// The old splines are gone, so their edit baselines mean nothing now.
+	PlanSplineBaselines.Reset();
 
 	int32 Made = 0;
-	auto MakePlan = [&](const TArray<FVector>& P, const FLinearColor& Color, bool bClosed)
+	// IdTag names what a spline IS so HarvestPlanSplineEdits can route an edit
+	// back to the data: "RoadNetPlanRoad:<idx>" = centreline of that road,
+	// "RoadNetPlanWalk" = sidewalk outer ring. Carriageway edges carry no id —
+	// they are DERIVED from centreline + widths, so edit the centreline.
+	auto MakePlan = [&](const TArray<FVector>& P, const FLinearColor& Color, bool bClosed,
+		const FName IdTag)
 	{
 		if (P.Num() < 2) { return; }
 		USplineComponent* S = NewObject<USplineComponent>(Owner, NAME_None, RF_Transient);
 		S->ComponentTags.Add(kPlanTag);
+		if (!IdTag.IsNone()) { S->ComponentTags.Add(IdTag); }
 		S->bIsEditorOnly = true;
 		if (USceneComponent* Root = Owner->GetRootComponent())
 		{
@@ -4028,21 +4160,33 @@ void URoadNetwork::RefreshPlanSplines(FRoadNetRebuildContext& Ctx)
 		S->bShouldVisualizeScale = false;
 #endif
 		S->UpdateSpline();
+
+		// § keep spline edits: remember the as-built points so the next
+		// rebuild can tell which knots the USER moved.
+		TArray<FVector> Baseline;
+		Baseline.Reserve(S->GetNumberOfSplinePoints());
+		for (int32 i = 0; i < S->GetNumberOfSplinePoints(); ++i)
+		{
+			Baseline.Add(S->GetLocationAtSplinePoint(i, ESplineCoordinateSpace::World));
+		}
+		PlanSplineBaselines.Add(S, MoveTemp(Baseline));
 		++Made;
 	};
 
 	const FLinearColor kCentre(0.05f, 0.75f, 1.0f);   // plan blue
 	const FLinearColor kEdge(0.9f, 0.9f, 0.9f);       // carriageway edge white
 	const FLinearColor kWalk(0.1f, 1.0f, 0.25f);      // sidewalk outer edge green
+	static const FName kWalkTag(TEXT("RoadNetPlanWalk"));
 	const bool bEdges = CVarRoadNetPlanEdgeSplines.GetValueOnAnyThread() != 0;
 
 	for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
 	{
-		MakePlan(KV.Value.Sampled, kCentre, /*bClosed*/false);
+		MakePlan(KV.Value.Sampled, kCentre, /*bClosed*/false,
+			FName(*FString::Printf(TEXT("RoadNetPlanRoad:%d"), KV.Key)));
 		if (bEdges)
 		{
-			MakePlan(KV.Value.LeftEdge,  kEdge, /*bClosed*/false);
-			MakePlan(KV.Value.RightEdge, kEdge, /*bClosed*/false);
+			MakePlan(KV.Value.LeftEdge,  kEdge, /*bClosed*/false, NAME_None);
+			MakePlan(KV.Value.RightEdge, kEdge, /*bClosed*/false, NAME_None);
 		}
 	}
 	// The sidewalk OUTER edge (with reconciled Z, sidewalk-top height): the
@@ -4052,7 +4196,7 @@ void URoadNetwork::RefreshPlanSplines(FRoadNetRebuildContext& Ctx)
 	{
 		for (const FRoadNetPlanEdge& E : PlanSidewalkEdges)
 		{
-			MakePlan(E.Points, kWalk, /*bClosed*/true);
+			MakePlan(E.Points, kWalk, /*bClosed*/true, kWalkTag);
 		}
 	}
 
@@ -4062,9 +4206,204 @@ void URoadNetwork::RefreshPlanSplines(FRoadNetRebuildContext& Ctx)
 		bEdges ? TEXT("centrelines + carriageway edges + sidewalk edge rings") : TEXT("centrelines only"));
 }
 
+// ---------------------------------------------------------------------------
+// § keep spline edits — the user shapes the street ON the plan splines, then
+// presses Build Street. Without this, the rebuild regenerates every plan
+// spline from the source data and the edits evaporate. So BEFORE the rebuild
+// touches anything, diff every live plan spline against the baseline stored at
+// its creation, and route each moved knot back to the data:
+//   centreline knot : XY goes straight into the road polyline (Roads[].Ref,
+//                     persistent) + a Z pin (the vertical solver recomputes Z
+//                     every rebuild, so the chosen height must be re-applied).
+//   sidewalk knot   : a full-position pin (the ring is derived from the
+//                     surface union each rebuild; re-applied after capture).
+//   carriageway edge: derived from centreline + lane widths — not harvested.
+// ---------------------------------------------------------------------------
+void URoadNetwork::HarvestPlanSplineEdits()
+{
+	if (CVarRoadNetKeepSplineEdits.GetValueOnAnyThread() == 0) { return; }
+	AActor* Owner = Cast<AActor>(GetOuter());
+	if (!Owner || PlanSplineBaselines.IsEmpty()) { return; }
+	static const FName kPlanTag(TEXT("RoadNetPlanSpline"));
+	static const FName kWalkTag(TEXT("RoadNetPlanWalk"));
+
+	// Editing the same knot again must UPDATE its pin, not stack a second one:
+	// a new edit's plan position is the previous edit's placed position (the
+	// splines were rebuilt from the pinned plan), so match against both.
+	auto UpsertPin = [this](const FVector2D& OrigXY, const FVector& Edited, bool bWalk)
+	{
+		for (FRoadNetPlanPin& Pin : PlanEditPins)
+		{
+			if (Pin.bWalk == bWalk &&
+				(FVector2D::Distance(Pin.XY, OrigXY) < 150.0 ||
+				 FVector2D::Distance(Pin.OrigXY, OrigXY) < 150.0))
+			{
+				Pin.OrigXY = OrigXY;
+				Pin.XY = FVector2D(Edited.X, Edited.Y);
+				Pin.ZCm = (float)Edited.Z;
+				return;
+			}
+		}
+		FRoadNetPlanPin Pin;
+		Pin.OrigXY = OrigXY;
+		Pin.XY = FVector2D(Edited.X, Edited.Y);
+		Pin.ZCm = (float)Edited.Z;
+		Pin.bWalk = bWalk;
+		PlanEditPins.Add(Pin);
+	};
+
+	int32 CentreEdits = 0, WalkEdits = 0;
+	TArray<USplineComponent*> Splines;
+	Owner->GetComponents<USplineComponent>(Splines);
+	for (USplineComponent* S : Splines)
+	{
+		if (!S || !S->ComponentHasTag(kPlanTag)) { continue; }
+		const TArray<FVector>* Base = PlanSplineBaselines.Find(S);
+		if (!Base) { continue; }
+
+		int32 RoadIdx = INDEX_NONE;
+		bool bWalk = false;
+		for (const FName& Tag : S->ComponentTags)
+		{
+			FString TagStr = Tag.ToString();
+			if (Tag == kWalkTag) { bWalk = true; }
+			else if (TagStr.RemoveFromStart(TEXT("RoadNetPlanRoad:"))) { RoadIdx = FCString::Atoi(*TagStr); }
+		}
+		if (RoadIdx == INDEX_NONE && !bWalk) { continue; } // derived edge spline
+
+		const int32 N = FMath::Min(S->GetNumberOfSplinePoints(), Base->Num());
+		if (S->GetNumberOfSplinePoints() != Base->Num())
+		{
+			UE_LOG(LogRoadNet, Warning,
+				TEXT("[RoadNet] KeepSplineEdits: a plan spline changed point COUNT — only knots up to the common count are kept. Shape by MOVING knots, not adding/deleting."));
+		}
+		for (int32 i = 0; i < N; ++i)
+		{
+			const FVector E = S->GetLocationAtSplinePoint(i, ESplineCoordinateSpace::World);
+			const FVector B = (*Base)[i];
+			if (E.Equals(B, 1.0)) { continue; } // untouched (1 cm)
+
+			if (RoadIdx != INDEX_NONE && Roads.IsValidIndex(RoadIdx))
+			{
+				// The plan knot is a decimated SAMPLE of the curve, so it has
+				// no 1:1 source vertex — move the nearest road vertex to it.
+				// ponytail: one plan knot moves one Ref vertex; a curve denser
+				// than the plan decimation follows approximately. Upgrade path
+				// is a windowed re-fit of Ref around the edit.
+				TArray<FVector>& Ref = Roads[RoadIdx].Ref;
+				int32 Best = INDEX_NONE;
+				double BestD = 1500.0;
+				for (int32 k = 0; k < Ref.Num(); ++k)
+				{
+					const double D = FVector::Dist2D(Ref[k], B);
+					if (D < BestD) { BestD = D; Best = k; }
+				}
+				if (Best != INDEX_NONE)
+				{
+					Ref[Best].X = E.X;
+					Ref[Best].Y = E.Y;
+				}
+				UpsertPin(FVector2D(B.X, B.Y), E, /*bWalk=*/false);
+				++CentreEdits;
+			}
+			else if (bWalk)
+			{
+				UpsertPin(FVector2D(B.X, B.Y), E, /*bWalk=*/true);
+				++WalkEdits;
+			}
+		}
+	}
+	if (CentreEdits + WalkEdits > 0)
+	{
+		UE_LOG(LogRoadNet, Log,
+			TEXT("[RoadNet] KeepSplineEdits: harvested %d centreline + %d sidewalk knot edit(s) -> %d pin(s) held across rebuilds."),
+			CentreEdits, WalkEdits, PlanEditPins.Num());
+	}
+}
+
+// ---------------------------------------------------------------------------
+// § keep spline edits + ease heights on the CURVES, right after the vertical
+// solver: the solver recomputed every Z from scratch, so the user's pinned
+// heights go back on now — nearest sample within 5 m of each pin takes the
+// pin's Z, edges follow by the same delta — and then the ease pass sweeps
+// every centreline so no two adjacent samples inside the ease radius disagree
+// by more than the ease step (spike filter; long segments still grade freely).
+// ---------------------------------------------------------------------------
+void URoadNetwork::ApplyPlanEditPins(FRoadNetRebuildContext& Ctx)
+{
+	const bool bKeep = CVarRoadNetKeepSplineEdits.GetValueOnAnyThread() != 0;
+	const bool bEase = CVarRoadNetEaseHeights.GetValueOnAnyThread() != 0;
+	if (!bKeep && !bEase) { return; }
+
+	int32 Pinned = 0;
+	if (bKeep)
+	{
+		for (const FRoadNetPlanPin& Pin : PlanEditPins)
+		{
+			if (Pin.bWalk) { continue; } // sidewalk pins land in CaptureStreetPlan
+			FRoadCurves* BestC = nullptr;
+			int32 BestI = INDEX_NONE;
+			double BestD = 500.0;
+			for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+			{
+				for (int32 i = 0; i < KV.Value.Sampled.Num(); ++i)
+				{
+					const double D = FVector2D::Distance(
+						FVector2D(KV.Value.Sampled[i].X, KV.Value.Sampled[i].Y), Pin.XY);
+					if (D < BestD) { BestD = D; BestC = &KV.Value; BestI = i; }
+				}
+			}
+			if (!BestC) { continue; }
+			const double dZ = (double)Pin.ZCm - BestC->Sampled[BestI].Z;
+			BestC->Sampled[BestI].Z = Pin.ZCm;
+			if (BestC->LeftEdge.IsValidIndex(BestI))  { BestC->LeftEdge[BestI].Z  += dZ; }
+			if (BestC->RightEdge.IsValidIndex(BestI)) { BestC->RightEdge[BestI].Z += dZ; }
+			++Pinned;
+		}
+	}
+
+	int32 Eased = 0;
+	if (bEase)
+	{
+		const double MaxStep = FMath::Max(1.0, (double)CVarRoadNetEaseMaxStepCm.GetValueOnAnyThread());
+		const double Radius  = FMath::Max(10.0, (double)CVarRoadNetEaseRadiusCm.GetValueOnAnyThread());
+		for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+		{
+			TArray<FVector>& P = KV.Value.Sampled;
+			TArray<double> ZBefore;
+			ZBefore.Reserve(P.Num());
+			for (const FVector& V : P) { ZBefore.Add(V.Z); }
+			const int32 Moves = EasePolylineZ(P, /*bClosed*/false, MaxStep, Radius);
+			if (Moves == 0) { continue; }
+			Eased += Moves;
+			// Edges ride the centreline: apply the same per-sample delta so
+			// the crossfall the solver set is preserved exactly.
+			for (int32 i = 0; i < P.Num(); ++i)
+			{
+				const double dZ = P[i].Z - ZBefore[i];
+				if (dZ == 0.0) { continue; }
+				if (KV.Value.LeftEdge.IsValidIndex(i))  { KV.Value.LeftEdge[i].Z  += dZ; }
+				if (KV.Value.RightEdge.IsValidIndex(i)) { KV.Value.RightEdge[i].Z += dZ; }
+			}
+		}
+	}
+
+	if (Pinned + Eased > 0)
+	{
+		UE_LOG(LogRoadNet, Log,
+			TEXT("[RoadNet] PlanEditPins: %d pinned height(s) re-applied, %d sample(s) eased (step %.0f cm within %.0f cm)."),
+			Pinned, Eased,
+			CVarRoadNetEaseMaxStepCm.GetValueOnAnyThread(), CVarRoadNetEaseRadiusCm.GetValueOnAnyThread());
+	}
+}
+
 void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& DirtyRegionWorld)
 {
 	const double T0 = FPlatformTime::Seconds();
+
+	// § keep spline edits: read the user's plan-spline edits BEFORE anything
+	// regenerates those splines out from under them.
+	HarvestPlanSplineEdits();
 
 	auto EnsureIds = [](auto& Arr)
 	{
@@ -4174,6 +4513,7 @@ void URoadNetwork::Rebuild(TArrayView<const int32> Modified, const FBox2D& Dirty
 	BuildCrossings(Ctx);          // §10.12 grid broadphase (shared by zones+surface)
 	const double tCross = Now();   Trace(TEXT("crossings"), tCross - tCurves);
 	BuildVerticalAlignment(Ctx);  // § tangent grades between junctions + plates
+	ApplyPlanEditPins(Ctx);       // § keep user heights + ease adjacent samples
 	const double tGrade = Now();   Trace(TEXT("grade"), tGrade - tCross);
 
 	// Snapshot the smoothed+densified centrelines for OSMRoadCore's terrain

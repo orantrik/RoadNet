@@ -6,6 +6,8 @@
 #include "RoadNetPerimeters.h"
 #include "RoadNetwork.generated.h"
 
+class USplineComponent;
+
 // ===========================================================================
 // URoadNetwork — the orchestration container (§1.1 / §10).
 //
@@ -56,6 +58,23 @@ struct FRoadNetPlanEdge
 	int32 Zone  = 0;
 	bool  bHole = false;         // inner ring of the band (faces the kerb)
 	TArray<FVector> Points;      // closed ring
+};
+
+// § keep spline edits — one user edit of a plan-spline knot, harvested before
+// a rebuild regenerates the plan splines (roadnet.KeepSplineEdits). A
+// centreline knot's XY is written straight into the road polyline when
+// harvested; the Z (and a sidewalk knot's whole position) cannot live in the
+// source data — the vertical solver / surface capture recompute them — so they
+// persist here and are re-applied on every rebuild. Saved with the network.
+USTRUCT()
+struct FRoadNetPlanPin
+{
+	GENERATED_BODY()
+
+	UPROPERTY() FVector2D XY = FVector2D::ZeroVector;     // where the user put the knot (world cm)
+	UPROPERTY() FVector2D OrigXY = FVector2D::ZeroVector; // where the plan had it (match key on rebuild)
+	UPROPERTY() float ZCm = 0.f;                          // the height the user chose
+	UPROPERTY() bool bWalk = false;                       // sidewalk-ring pin; else road centreline pin
 };
 
 // Where one parcel meets the street: which road fronts it, where along that
@@ -1380,6 +1399,16 @@ private:
 	// True only while RebuildLatent() drives Rebuild(): stop after the plan.
 	bool bLatentRebuild = false;
 
+	// § keep spline edits — the user's plan-spline knot edits, held across
+	// rebuilds (the splines themselves are transient and regenerated).
+	UPROPERTY()
+	TArray<FRoadNetPlanPin> PlanEditPins;
+
+	// Baseline world points of each live plan spline at creation. The diff
+	// against these is what "the user edited it" means. Transient: plan
+	// splines never survive a level reload either.
+	TMap<TWeakObjectPtr<USplineComponent>, TArray<FVector>> PlanSplineBaselines;
+
 	// Transient world-space triangle soup of the last rebuild's ground driving
 	// surface (see GetConformVerts/GetConformTris). Accumulated in CommitLayer
 	// for the layers flagged bConformSurface, skipping elevated zones. Not
@@ -1419,6 +1448,8 @@ private:
 	void CaptureStreetPlan(FRoadNetRebuildContext& Ctx);         // § street plan API (sidewalk edges w/ Z)
 	void BindParcelsToStreet(FRoadNetRebuildContext& Ctx);       // § snap/weld/reconcile ALL splines + ring hygiene
 	void RefreshPlanSplines(FRoadNetRebuildContext& Ctx);        // § mirror reconciled centrelines as visible spline components
+	void HarvestPlanSplineEdits();                               // § keep user edits: diff live plan splines against baselines -> Ref XY + pins
+	void ApplyPlanEditPins(FRoadNetRebuildContext& Ctx);         // § re-apply pinned centreline Z + ease heights along every curve
 	void BuildPerimeterLoops(FRoadNetRebuildContext& Ctx) const; // §10.11 loops for PCG export
 	void BuildLaneGraph(FRoadNetRebuildContext& Ctx) const;      // §12.2 lane connectivity
 	void BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const;    // §12.1 per-lane ribbon polys

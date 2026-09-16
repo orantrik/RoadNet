@@ -51,6 +51,13 @@ static TAutoConsoleVariable<float> CVarRoadNetSplineFieldMaxSlopeDeg(
 	TEXT("Max slope (degrees) between nearby spline points of different elements (parcel vs road, parcel vs parcel), reconciled on the latent splines before terrain deform. Default 8."),
 	ECVF_Default);
 
+// § ease heights rulers — defined in RoadNetwork.cpp (same module), read here
+// so the parcel field pass enforces the SAME step/radius contract the road
+// centrelines and sidewalk rings get.
+extern TAutoConsoleVariable<int32> CVarRoadNetEaseHeights;
+extern TAutoConsoleVariable<float> CVarRoadNetEaseMaxStepCm;
+extern TAutoConsoleVariable<float> CVarRoadNetEaseRadiusCm;
+
 namespace
 {
 	using namespace UE::Geometry;
@@ -660,6 +667,13 @@ void URoadNetwork::BindParcelsToStreet(FRoadNetRebuildContext& Ctx)
 		const double TanCap = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(
 			(double)CVarRoadNetSplineFieldMaxSlopeDeg.GetValueOnAnyThread(), 0.5, 45.0)));
 		constexpr double kFieldCellCm = 1500.0;   // = the reconcile radius
+		// § ease heights: inside the ease radius the allowance is also capped
+		// ABSOLUTELY (max step cm), not just by slope — the user's two rulers.
+		// ponytail: the grid search only reaches kFieldCellCm, so an ease
+		// radius above 1500 cm is clamped to it; widen the cell if ever needed.
+		const bool bEase = CVarRoadNetEaseHeights.GetValueOnAnyThread() != 0;
+		const double EaseStep = FMath::Max(1.0, (double)CVarRoadNetEaseMaxStepCm.GetValueOnAnyThread());
+		const double EaseRad  = FMath::Clamp((double)CVarRoadNetEaseRadiusCm.GetValueOnAnyThread(), 10.0, kFieldCellCm);
 		auto CellOf = [](const FVector2D& P)
 		{
 			return FIntPoint((int32)FMath::FloorToInt(P.X / kFieldCellCm),
@@ -727,7 +741,8 @@ void URoadNetwork::BindParcelsToStreet(FRoadNetRebuildContext& Ctx)
 						{
 							const double D = FVector2D::Distance(Pins[Idx].XY, XY);
 							if (D > kFieldCellCm) { continue; }
-							const double Allow = TanCap * D + 2.0;
+							double Allow = TanCap * D + 2.0;
+							if (bEase && D <= EaseRad) { Allow = FMath::Min(Allow, EaseStep); }
 							Lo = FMath::Max(Lo, Pins[Idx].Z - Allow);
 							Hi = FMath::Min(Hi, Pins[Idx].Z + Allow);
 						}
@@ -739,7 +754,8 @@ void URoadNetwork::BindParcelsToStreet(FRoadNetRebuildContext& Ctx)
 							const FParcelRing& Qr = Parcels[Frees[Idx].P];
 							const double D = FVector2D::Distance(Qr.Pts[Frees[Idx].V], XY);
 							if (D > kFieldCellCm) { continue; }
-							const double Allow = TanCap * D + 2.0;
+							double Allow = TanCap * D + 2.0;
+							if (bEase && D <= EaseRad) { Allow = FMath::Min(Allow, EaseStep); }
 							Lo = FMath::Max(Lo, Qr.PtZ[Frees[Idx].V] - Allow);
 							Hi = FMath::Min(Hi, Qr.PtZ[Frees[Idx].V] + Allow);
 						}
