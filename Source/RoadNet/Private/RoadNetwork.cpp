@@ -777,6 +777,70 @@ void URoadNetwork::CaptureStreetPlan(FRoadNetRebuildContext& Ctx)
 		PlanSidewalkEdges.Num(), Ctx.ZoneSidewalkPolys.Num(), Pinned, Eased);
 }
 
+// ---------------------------------------------------------------------------
+// § chop — recursively bisect polygons until each piece's bbox fits a cell.
+// The zone-wide union leaves the surface/band as a FEW city-sized polygons
+// (10^5+ vertices each); every per-arm boolean in tiling pays the full vertex
+// count of whichever operand it touches, and bbox narrowing cannot drop a
+// polygon that covers everything — O(arms x city), the same shape as the
+// lane-merge and junction-patch hangs. Chopping once makes every later
+// boolean local. Region-exact: the two half-rects tile the bbox, so the
+// pieces tile the input; the only change is seam vertices along chop lines,
+// which triangulate as coplanar (invisible) edges.
+static void ChopPolyToCell(UE::Geometry::FGeneralPolygon2d&& Poly, double CellCm,
+	TArray<UE::Geometry::FGeneralPolygon2d>& Out, int32 Depth = 0)
+{
+	using namespace UE::Geometry;
+	const FAxisAlignedBox2d B = Poly.Bounds();
+	const double W = B.Max.X - B.Min.X;
+	const double H = B.Max.Y - B.Min.Y;
+	// ponytail: depth 12 caps a pathological input at 4096 pieces; a real zone
+	// bottoms out far earlier (an 8 km zone needs ~6 splits per axis to 200 m).
+	if ((W <= CellCm && H <= CellCm) || Depth >= 12)
+	{
+		Out.Add(MoveTemp(Poly));
+		return;
+	}
+	const bool bSplitX = W >= H;
+	const double Mid = bSplitX ? 0.5 * (B.Min.X + B.Max.X) : 0.5 * (B.Min.Y + B.Max.Y);
+	auto HalfRect = [&](bool bLow) -> FGeneralPolygon2d
+	{
+		double x0 = B.Min.X - 10.0, x1 = B.Max.X + 10.0;
+		double y0 = B.Min.Y - 10.0, y1 = B.Max.Y + 10.0;
+		if (bSplitX) { (bLow ? x1 : x0) = Mid; }
+		else         { (bLow ? y1 : y0) = Mid; }
+		FPolygon2d R;
+		R.AppendVertex(FVector2d(x0, y0)); R.AppendVertex(FVector2d(x1, y0));
+		R.AppendVertex(FVector2d(x1, y1)); R.AppendVertex(FVector2d(x0, y1));
+		return FGeneralPolygon2d(R);
+	};
+	const TArray<FGeneralPolygon2d> Subject = { Poly };
+	const TArray<FGeneralPolygon2d> ClipLo = { HalfRect(true) };
+	const TArray<FGeneralPolygon2d> ClipHi = { HalfRect(false) };
+	TArray<FGeneralPolygon2d> Lo, Hi;
+	// BOTH halves must clip cleanly or the piece is kept whole — losing half a
+	// zone's asphalt to a Clipper failure is worse than one slow polygon.
+	if (!PolygonsIntersection(Subject, ClipLo, Lo) ||
+		!PolygonsIntersection(Subject, ClipHi, Hi))
+	{
+		Out.Add(MoveTemp(Poly));
+		return;
+	}
+	for (FGeneralPolygon2d& P : Lo) { ChopPolyToCell(MoveTemp(P), CellCm, Out, Depth + 1); }
+	for (FGeneralPolygon2d& P : Hi) { ChopPolyToCell(MoveTemp(P), CellCm, Out, Depth + 1); }
+}
+
+static void ChopToCells(const TArray<UE::Geometry::FGeneralPolygon2d>& In, double CellCm,
+	TArray<UE::Geometry::FGeneralPolygon2d>& Out)
+{
+	Out.Reset();
+	Out.Reserve(In.Num());
+	for (const UE::Geometry::FGeneralPolygon2d& P : In)
+	{
+		ChopPolyToCell(UE::Geometry::FGeneralPolygon2d(P), CellCm, Out);
+	}
+}
+
 void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 {
 	using namespace UE::Geometry;
@@ -815,6 +879,19 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 		const TArray<FGeneralPolygon2d>& Carve  = Ctx.ZoneJunctionCarve.IsValidIndex(z) ? Ctx.ZoneJunctionCarve[z] : Empty;
 		if (Merged.Num() == 0 && Band.Num() == 0) { continue; }
 
+		// Chop the zone-wide surface/band ONCE (see ChopPolyToCell). Without
+		// this, bbox narrowing below is useless against a single polygon that
+		// covers the whole zone, and every arm pays the city's vertex count.
+		const double TChop = FPlatformTime::Seconds();
+		constexpr double ChopCellCm = 20000.0; // 200 m
+		TArray<FGeneralPolygon2d> MergedChop, BandChop;
+		ChopToCells(Merged, ChopCellCm, MergedChop);
+		ChopToCells(Band, ChopCellCm, BandChop);
+		UE_LOG(LogRoadNet, Log,
+			TEXT("[RoadNet]   tiling zone %d: chopped surface %d->%d, band %d->%d piece(s) in %.1f s (%d road(s))"),
+			z, Merged.Num(), MergedChop.Num(), Band.Num(), BandChop.Num(),
+			FPlatformTime::Seconds() - TChop, Ctx.Zones.IsValidIndex(z) ? Ctx.Zones[z].Num() : 0);
+
 		// Bboxes for the zone-wide operands. Every per-arm boolean below used to
 		// take the WHOLE list — Carve is one polygon per junction (~800 in a city
 		// zone) and each arm only touches two or three of them, so the booleans
@@ -827,8 +904,8 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 			return B;
 		};
 		const TArray<FBox2D> CarveBoxes  = BoxesOf(Carve);
-		const TArray<FBox2D> BandBoxes   = BoxesOf(Band);
-		const TArray<FBox2D> MergedBoxes = BoxesOf(Merged);
+		const TArray<FBox2D> BandBoxes   = BoxesOf(BandChop);
+		const TArray<FBox2D> MergedBoxes = BoxesOf(MergedChop);
 
 		auto BoxOfArr = [&BoxOf](const TArray<FGeneralPolygon2d>& A)
 		{
@@ -871,13 +948,13 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 			const TArray<FGeneralPolygon2d> CPArr = { CP };
 			const FBox2D CPBox = BoxOf(CP);
 			TArray<FGeneralPolygon2d> Piece;
-			const TArray<FGeneralPolygon2d>& MSrc = Narrow(Merged, MergedBoxes, CPBox, NearMerged);
+			const TArray<FGeneralPolygon2d>& MSrc = Narrow(MergedChop, MergedBoxes, CPBox, NearMerged);
 			if (MSrc.Num() > 0 && PolygonsIntersection(MSrc, CPArr, Piece) && Piece.Num() > 0)
 			{
 				Surf[z].FindOrAdd(JKey).Append(MoveTemp(Piece));
 			}
 			TArray<FGeneralPolygon2d> WPiece;
-			const TArray<FGeneralPolygon2d>& BSrc = Narrow(Band, BandBoxes, CPBox, NearBand);
+			const TArray<FGeneralPolygon2d>& BSrc = Narrow(BandChop, BandBoxes, CPBox, NearBand);
 			if (BSrc.Num() > 0 && PolygonsIntersection(BSrc, CPArr, WPiece) && WPiece.Num() > 0)
 			{
 				Walk[z].FindOrAdd(JKey).Append(MoveTemp(WPiece));
@@ -982,7 +1059,7 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 				// the zone band (band already excludes every carriageway → no
 				// flaps) and cut at the carve. Emitted under the SAME key as the
 				// carriageway — theft is structurally impossible.
-				if (SwW > 0.0 && Band.Num() > 0)
+				if (SwW > 0.0 && BandChop.Num() > 0)
 				{
 					auto EmitSide = [&](double InOff, double OutOff, uint8 SideBit)
 					{
@@ -991,7 +1068,7 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 						const TArray<FGeneralPolygon2d> RArr = { Ribbon };
 						TArray<FGeneralPolygon2d> Piece;
 						const TArray<FGeneralPolygon2d>& WBSrc =
-							Narrow(Band, BandBoxes, BoxOf(Ribbon), NearBand);
+							Narrow(BandChop, BandBoxes, BoxOf(Ribbon), NearBand);
 						if (WBSrc.Num() == 0) { return; }
 						if (!PolygonsIntersection(WBSrc, RArr, Piece) || Piece.Num() == 0) { return; }
 						if (Carve.Num() > 0)
@@ -1018,20 +1095,43 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 		// for them (the failure mode was OFFSET geometry, which no longer gets
 		// here). Without this sweep the welds would be visible holes.
 		auto SweepResidual = [&](const TArray<FGeneralPolygon2d>& Source,
-			const TArray<FGeneralPolygon2d>& Emitted,
+			const TArray<FBox2D>& SourceBoxes,
+			const TArray<FGeneralPolygon2d>& Emitted, const TArray<FBox2D>& EmittedBoxes,
 			TMap<FIntPoint, TArray<FGeneralPolygon2d>>& Buckets)
 		{
 			if (Source.Num() == 0) { return; }
-			TArray<FGeneralPolygon2d> Residual = Source;
-			if (Carve.Num() > 0)
+			// Per chopped piece, against bbox-narrowed operands. The old form was
+			// TWO zone-wide Differences (whole merged surface minus ALL emitted
+			// pieces) — the largest single boolean in the plugin at city scale.
+			TArray<FGeneralPolygon2d> Residual;
+			TArray<FGeneralPolygon2d> NearC, Prior;
+			for (int32 s = 0; s < Source.Num(); ++s)
 			{
-				TArray<FGeneralPolygon2d> Cut;
-				if (RoadNetSurface::Difference(Residual, Carve, Cut)) { Residual = MoveTemp(Cut); }
-			}
-			if (Emitted.Num() > 0 && Residual.Num() > 0)
-			{
-				TArray<FGeneralPolygon2d> Cut;
-				if (RoadNetSurface::Difference(Residual, Emitted, Cut)) { Residual = MoveTemp(Cut); }
+				TArray<FGeneralPolygon2d> PieceRes = { Source[s] };
+				const FBox2D& SB = SourceBoxes[s];
+				const TArray<FGeneralPolygon2d>& CSrc = Narrow(Carve, CarveBoxes, SB, NearC);
+				if (CSrc.Num() > 0)
+				{
+					TArray<FGeneralPolygon2d> Cut;
+					if (RoadNetSurface::Difference(PieceRes, CSrc, Cut)) { PieceRes = MoveTemp(Cut); }
+				}
+				if (PieceRes.Num() > 0 && Emitted.Num() > 0)
+				{
+					Prior.Reset();
+					for (int32 i = 0; i < Emitted.Num(); ++i)
+					{
+						if (EmittedBoxes[i].bIsValid && SB.bIsValid && EmittedBoxes[i].Intersect(SB))
+						{
+							Prior.Add(Emitted[i]);
+						}
+					}
+					if (Prior.Num() > 0)
+					{
+						TArray<FGeneralPolygon2d> Cut;
+						if (RoadNetSurface::Difference(PieceRes, Prior, Cut)) { PieceRes = MoveTemp(Cut); }
+					}
+				}
+				Residual.Append(MoveTemp(PieceRes));
 			}
 			for (FGeneralPolygon2d& GP : Residual)
 			{
@@ -1049,8 +1149,8 @@ void URoadNetwork::BuildTilePartition(FRoadNetRebuildContext& Ctx)
 				Buckets.FindOrAdd(Key).Add(MoveTemp(GP));
 			}
 		};
-		SweepResidual(Merged, SurfEmitted, Surf[z]);
-		SweepResidual(Band, WalkEmitted, Walk[z]);
+		SweepResidual(MergedChop, MergedBoxes, SurfEmitted, SurfBoxes, Surf[z]);
+		SweepResidual(BandChop, BandBoxes, WalkEmitted, WalkBoxes, Walk[z]);
 	}
 
 	// ---- both-sides self-check: the exact invariant every v1 attempt violated.
@@ -6570,6 +6670,14 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 		tC = Now;
 	};
 
+	// Resolve every synchronously-loaded asset BEFORE the first tile actor is
+	// spawned. A sync load first drains the WHOLE pending async queue, so asking
+	// for the kerb mesh down in CommitCurbs made one small load pay to flush the
+	// 13k World Partition packages the spawned tiles had queued by then — most
+	// of a 27-minute kerb stage. Up here that queue is still empty.
+	ResolveCurbMesh();
+	CTrace(TEXT("preload"));
+
 	if (Ctx.bFullCommit)
 	{
 		SegKeyOf.Reset(); JunKeyOf.Reset(); SegAlias.Reset();
@@ -6773,22 +6881,28 @@ static void CloseRingInPlace(TArray<FVector>& Ring, double TolCm = 1.0)
 	Ring.Add(First);
 }
 
-void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
+UStaticMesh* URoadNetwork::ResolveCurbMesh()
 {
-	if (!WorldPtr.IsValid()) { return; }
+	if (CurbMesh) { return CurbMesh.Get(); }
+	if (ResolvedCurbMesh) { return ResolvedCurbMesh.Get(); }
 
 	// Default to the PCG kerb kit mesh; fall back to an engine cube only if that
 	// asset can't be found, so the kerb line is always visible.
-	UStaticMesh* Mesh = CurbMesh ? CurbMesh.Get() : nullptr;
-	const bool bUserMesh = (Mesh != nullptr);
-	if (!Mesh)
-	{
-		Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/PCG/Assets/Meshes/SM_Curb2.SM_Curb2"));
-	}
+	UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/PCG/Assets/Meshes/SM_Curb2.SM_Curb2"));
 	if (!Mesh)
 	{
 		Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
 	}
+	ResolvedCurbMesh = Mesh;
+	return Mesh;
+}
+
+void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
+{
+	if (!WorldPtr.IsValid()) { return; }
+
+	UStaticMesh* Mesh = ResolveCurbMesh();
+	const bool bUserMesh = (CurbMesh != nullptr);
 
 	// (Tiles were cleared in PrepareTilesForCommit, so an early return simply
 	// leaves the dirty cells with no kerb HISM this pass.)
@@ -6924,6 +7038,11 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 	const double MeshWide = FMath::Max(1.0, bLongIsX ? Size.Y : Size.X);
 	const double MeshTall = FMath::Max(1.0, Size.Z);
 
+	// Hoisted out of the per-instance loop below: with no paint materials set
+	// this was a synchronous load inside a 1.8-million-iteration loop.
+	UMaterialInterface* const FallbackPaintMat = LoadObject<UMaterialInterface>(
+		nullptr, TEXT("/Engine/EngineMaterials/DefaultWhiteGrid.DefaultWhiteGrid"));
+
 	int32 iCurb = 0, nA = 0, nB = 0;
 	// Batch instances per HISM: HISM rebuilds its cluster tree on every single
 	// AddInstance (O(n^2) for a big city). AddInstances() builds the tree ONCE.
@@ -6967,11 +7086,7 @@ void URoadNetwork::CommitCurbs(FRoadNetRebuildContext& Ctx)
 				(Paint == ERoadNetCurbPaintType::WhiteRed)   ? (CurbPaintWhiteRed ? CurbPaintWhiteRed.Get() : MarkingYellowMaterial.Get()) :
 				(Paint == ERoadNetCurbPaintType::WhiteBlue)  ? CurbPaintWhiteBlue.Get() :
 				(CurbPaintGray ? CurbPaintGray.Get() : CurbMaterial1.Get());
-			if (!PaintMat)
-			{
-				PaintMat = LoadObject<UMaterialInterface>(nullptr,
-					TEXT("/Engine/EngineMaterials/DefaultWhiteGrid.DefaultWhiteGrid"));
-			}
+			if (!PaintMat) { PaintMat = FallbackPaintMat; }
 			ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
 			H = Tile ? Tile->GetOrCreateHISM(CurbPaintHISMName(Paint), Mesh, PaintMat) : nullptr;
 			if (H && PaintMat)

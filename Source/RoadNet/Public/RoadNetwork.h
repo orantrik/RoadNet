@@ -566,6 +566,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Curbs")
 	TObjectPtr<UStaticMesh> CurbMesh;
 
+	// CurbMesh resolved to a real asset (the kit mesh, else a cube). Cached
+	// because resolving it needs a SYNCHRONOUS load, and a synchronous load
+	// first drains the WHOLE async queue — which by the kerb stage holds every
+	// World Partition package the freshly spawned tile actors queued (13k on a
+	// city). Resolved once up front instead, while that queue is still empty.
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMesh> ResolvedCurbMesh;
+
 	// Two material overrides applied to the kerb HISM (slot 0 + slot 1), so a
 	// two-slot kerb mesh (e.g. top vs. face) can be textured separately — like
 	// the RoadPCG kerb kit.
@@ -1460,6 +1468,7 @@ private:
 	void BuildFurniture(FRoadNetRebuildContext& Ctx) const;      // § street-furniture placement sampling
 	void CommitGeometry(FRoadNetRebuildContext& Ctx);            // §10.15 mesh + spawn
 	void CommitCurbs(FRoadNetRebuildContext& Ctx);               // §8.12 kerb-line HISM
+	UStaticMesh* ResolveCurbMesh();                              // cached; see ResolvedCurbMesh
 	// Same polygon banks as CommitLayer, drawn as projected decals instead of
 	// meshed ribbons. Returns how many decals were placed.
 	int32 CommitMarkingDecals(FName LayerName,

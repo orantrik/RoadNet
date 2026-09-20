@@ -78,16 +78,73 @@ namespace RoadNetSurface
 
 	// Morphological close (dilate +e then erode -e): rounds concave corners and
 	// bridges micro-gaps without changing the overall outer size. In-place on Io.
-	static void MorphClose(TArray<FGeneralPolygon2d>& Io, double e)
+	// Join defaults to Round for visual fillets; the 5 cm city weld should pass
+	// Square — Round is wasted there (it is not a fillet) and explodes vertex count.
+	static void MorphClose(TArray<FGeneralPolygon2d>& Io, double e,
+		EPolygonOffsetJoinType Join = EPolygonOffsetJoinType::Round)
 	{
 		if (e <= 0.0 || Io.Num() == 0) { return; }
 		TArray<FGeneralPolygon2d> Closed;
+		// The arc-density arguments are NOT optional in practice. Clipper's default
+		// steps-per-radian is, in the engine's own words, "extremely large", so a
+		// round join emits thousands of vertices where tens will do. Every other
+		// Round offset in this plugin already passes these two.
 		if (PolygonsOffsets(
 				+e, -e, Io, Closed, /*bCopyInputOnFailure*/true,
-				/*MiterLimit*/2.0, EPolygonOffsetJoinType::Round, EPolygonOffsetEndType::Polygon))
+				/*MiterLimit*/2.0, Join, EPolygonOffsetEndType::Polygon,
+				/*MaxStepsPerRadian*/16.0, /*DefaultStepsPerRadianScale*/1.0e-3))
 		{
 			Io = MoveTemp(Closed);
 		}
+	}
+
+	// Clipper's union of N non-overlapping subjects returns ~N polygons, so a
+	// single Execute() over 79k city-wide junction patches does not reduce and
+	// never returns. Union nearby patches first (they actually overlap), then
+	// the leftover count is ~occupied cells, which the final overlay can finish.
+	static bool UnionSpatial(TArray<FGeneralPolygon2d> In, TArray<FGeneralPolygon2d>& Out, double CellCm)
+	{
+		Out.Reset();
+		if (In.Num() == 0) { return true; }
+		if (In.Num() == 1) { Out = MoveTemp(In); return true; }
+		if (In.Num() <= 64)
+		{
+			return PolygonsUnion(In, Out, /*bCopyInputOnFailure*/true);
+		}
+
+		const int32 InN = In.Num();
+		TMap<FIntPoint, TArray<FGeneralPolygon2d>> Cells;
+		for (FGeneralPolygon2d& P : In)
+		{
+			const FAxisAlignedBox2d B = P.Bounds();
+			const FVector2d C = (B.Min + B.Max) * 0.5;
+			Cells.FindOrAdd(FIntPoint(
+				FMath::FloorToInt32(C.X / CellCm),
+				FMath::FloorToInt32(C.Y / CellCm))).Add(MoveTemp(P));
+		}
+		In.Reset();
+
+		TArray<FGeneralPolygon2d> Reduced;
+		Reduced.Reserve(Cells.Num());
+		for (auto& KV : Cells)
+		{
+			TArray<FGeneralPolygon2d>& Cell = KV.Value;
+			if (Cell.Num() == 1) { Reduced.Add(MoveTemp(Cell[0])); continue; }
+			TArray<FGeneralPolygon2d> U;
+			if (PolygonsUnion(Cell, U, /*bCopyInputOnFailure*/true)) { Reduced.Append(MoveTemp(U)); }
+			else { Reduced.Append(MoveTemp(Cell)); }
+		}
+
+		UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   surface: spatial union %d polys -> %d in %.0f m cells"),
+			InN, Reduced.Num(), CellCm / 100.0);
+
+		// Grow the cell until the leftover is a size Clipper can overlay, or the
+		// cell is a few km and further grouping stops helping.
+		if (Reduced.Num() > 512 && CellCm < 400000.0)
+		{
+			return UnionSpatial(MoveTemp(Reduced), Out, CellCm * 2.0);
+		}
+		return PolygonsUnion(Reduced, Out, /*bCopyInputOnFailure*/true);
 	}
 
 	// A fillet between two arms reaches (half-width + radius) / sin(angle/2)
@@ -133,21 +190,41 @@ namespace RoadNetSurface
 		OutMerged.Reset();
 
 		TArray<FGeneralPolygon2d> Outlines;
+		// 1:1 with Outlines — the centreline each outline was built around, null for
+		// ExtraPolys. The per-junction pass needs both views of a road: the centreline
+		// to size the work disc, the outline to clip against it.
+		TArray<const FRoadCurves*> OutlineCurve;
 		Outlines.Reserve(Curves.Num() + (ExtraPolys ? ExtraPolys->Num() : 0));
+		OutlineCurve.Reserve(Curves.Num() + (ExtraPolys ? ExtraPolys->Num() : 0));
 		for (const FRoadCurves* C : Curves)
 		{
 			if (!C) { continue; }
 			FGeneralPolygon2d GP;
-			if (BuildRoadOutline(*C, GP)) { Outlines.Add(MoveTemp(GP)); }
+			if (BuildRoadOutline(*C, GP)) { Outlines.Add(MoveTemp(GP)); OutlineCurve.Add(C); }
 		}
-		if (ExtraPolys) { Outlines.Append(*ExtraPolys); }
+		if (ExtraPolys)
+		{
+			Outlines.Append(*ExtraPolys);
+			OutlineCurve.AddZeroed(ExtraPolys->Num());
+		}
 		if (Outlines.Num() == 0) { return true; }
+
+		// A 35k-road import sat in this function for nine hours with nothing in the
+		// log; at city scale each phase gets a timestamped line so a stall names its
+		// phase itself.
+		const bool bTracePhases = Outlines.Num() >= 5000;
+		const double tUnion0 = FPlatformTime::Seconds();
 
 		// Boolean union of all arm outlines -> filled, seamless junctions (§10.9).
 		if (!PolygonsUnion(Outlines, OutMerged, /*bCopyInputOnFailure*/true))
 		{
 			UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet] Surface union failed; using unmerged outlines."));
 			return true; // OutMerged holds the copied input (bCopyInputOnFailure)
+		}
+		if (bTracePhases)
+		{
+			UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   surface: union of %d outlines -> %d ring(s) in %.1f s"),
+				Outlines.Num(), OutMerged.Num(), FPlatformTime::Seconds() - tUnion0);
 		}
 
 		const bool bPerJunction = (PerJunction && PerJunction->Num() > 0);
@@ -173,61 +250,155 @@ namespace RoadNetSurface
 		// pass that scales with ring count (offsets, sidewalk bands, kerbs) went
 		// with it. Sharp corners and connected pavement are separate requests.
 		constexpr double WeldCm = 5.0;
-		MorphClose(OutMerged, WeldCm);
+		const double tWeld0 = FPlatformTime::Seconds();
+		// Square: this weld only closes hairline gaps. Round here is not a fillet
+		// and is what bloated the 1115-ring city surface into a union that never
+		// returned.
+		MorphClose(OutMerged, WeldCm, EPolygonOffsetJoinType::Square);
+		if (bTracePhases)
+		{
+			UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   surface: %.0f cm weld in %.1f s"),
+				WeldCm, FPlatformTime::Seconds() - tWeld0);
+		}
 
+		// Each junction's region is computed from the PRE-union outlines near it, not
+		// from OutMerged. Union is pointwise — a point is inside the union iff it is
+		// inside some outline — so (union of everything) ∩ disc equals (union of the
+		// outlines touching the disc) ∩ disc, and Clipper computes that union
+		// implicitly when handed several subjects. The previous code clipped against
+		// the MERGED surface: a connected city zone welds into ONE ring whose
+		// bounding box spans the whole net, so its "reject rings by bbox" filter
+		// rejected nothing and all ~60k junctions paid a Clipper clip against a
+		// million-vertex polygon — while JunctionWorkRadius projected every junction
+		// onto every curve in the zone. Two O(junctions × zone) passes; a 35k-road
+		// import stalled in them for hours. One uniform grid over the outline bounds
+		// now serves both queries, making each junction's cost local.
+		// The only behavioural delta: hairline weld slivers inside the disc are not
+		// in the clipped region, but the region's own close (CloseCm > WeldCm)
+		// re-bridges anything the weld could have, and the patch is unioned onto the
+		// welded base anyway. The curb-smoothing automation test pins this.
 		auto BoxesOverlap = [](const FAxisAlignedBox2d& A, const FAxisAlignedBox2d& B)
 		{
 			return !(A.Max.X < B.Min.X || A.Min.X > B.Max.X ||
 			         A.Max.Y < B.Min.Y || A.Min.Y > B.Max.Y);
 		};
-		// OutMerged is fixed for the whole loop (patches land in Patches), and
-		// Bounds() is itself a full vertex scan, so compute the boxes once.
-		TArray<FAxisAlignedBox2d> MergedBounds;
-		MergedBounds.Reserve(OutMerged.Num());
-		for (const FGeneralPolygon2d& GP : OutMerged) { MergedBounds.Add(GP.Bounds()); }
+		constexpr double GridCellCm = 5000.0; // 50 m: a junction work disc spans a few cells
+		TArray<FAxisAlignedBox2d> OutlineBounds;
+		OutlineBounds.Reserve(Outlines.Num());
+		TMap<FIntPoint, TArray<int32>> Grid;
+		for (int32 i = 0; i < Outlines.Num(); ++i)
+		{
+			const FAxisAlignedBox2d B = Outlines[i].Bounds();
+			OutlineBounds.Add(B);
+			const int32 X0 = FMath::FloorToInt32(B.Min.X / GridCellCm);
+			const int32 X1 = FMath::FloorToInt32(B.Max.X / GridCellCm);
+			const int32 Y0 = FMath::FloorToInt32(B.Min.Y / GridCellCm);
+			const int32 Y1 = FMath::FloorToInt32(B.Max.Y / GridCellCm);
+			for (int32 y = Y0; y <= Y1; ++y)
+			{
+				for (int32 x = X0; x <= X1; ++x)
+				{
+					Grid.FindOrAdd(FIntPoint(x, y)).Add(i);
+				}
+			}
+		}
+		TBitArray<> Seen(false, Outlines.Num());
+		TArray<int32> Hits;
+		auto QueryBox = [&](const FAxisAlignedBox2d& Box)
+		{
+			Hits.Reset();
+			const int32 X0 = FMath::FloorToInt32(Box.Min.X / GridCellCm);
+			const int32 X1 = FMath::FloorToInt32(Box.Max.X / GridCellCm);
+			const int32 Y0 = FMath::FloorToInt32(Box.Min.Y / GridCellCm);
+			const int32 Y1 = FMath::FloorToInt32(Box.Max.Y / GridCellCm);
+			for (int32 y = Y0; y <= Y1; ++y)
+			{
+				for (int32 x = X0; x <= X1; ++x)
+				{
+					if (const TArray<int32>* Cell = Grid.Find(FIntPoint(x, y)))
+					{
+						for (int32 i : *Cell)
+						{
+							if (!Seen[i] && BoxesOverlap(OutlineBounds[i], Box))
+							{
+								Seen[i] = true;
+								Hits.Add(i);
+							}
+						}
+					}
+				}
+			}
+			for (int32 i : Hits) { Seen[i] = false; } // cheap stamp reset, no reallocation
+		};
 
+		const double tJunc0 = FPlatformTime::Seconds();
 		TArray<FGeneralPolygon2d> Patches;
 		Patches.Reserve(PerJunction->Num());
+		TArray<const FRoadCurves*> NearCurves;
 		for (const FJunctionClose& J : *PerJunction)
 		{
 			if (J.CloseCm <= WeldCm) { continue; } // no extra rounding at this junction
-			const double R = JunctionWorkRadius(J, Curves);
+
+			// Only arms whose centreline enters the fill disc can shape the work
+			// radius (JunctionWorkRadius discards the rest by exact distance), and
+			// an outline's bounds contain its centreline, so this box catches them.
+			const double Pad = J.FillRadiusCm + 5.0;
+			QueryBox(FAxisAlignedBox2d(
+				FVector2d(J.Center.X - Pad, J.Center.Y - Pad),
+				FVector2d(J.Center.X + Pad, J.Center.Y + Pad)));
+			NearCurves.Reset();
+			for (int32 i : Hits)
+			{
+				if (OutlineCurve[i]) { NearCurves.Add(OutlineCurve[i]); }
+			}
+
+			const double R = JunctionWorkRadius(J, NearCurves);
 			FGeneralPolygon2d Disc;
 			MakeDisc(J.Center, R, /*Segments*/48, Disc);
 			const TArray<FGeneralPolygon2d> DiscArr = { MoveTemp(Disc) };
 
-			// Clipping the WHOLE network against one junction's disc, once per
-			// junction, is the dominant cost of this stage on a city-sized net.
-			// A junction disc is a few metres across, so all but a handful of
-			// rings are rejected by their bounding box for free.
-			const FAxisAlignedBox2d DiscBox(
+			QueryBox(FAxisAlignedBox2d(
 				FVector2d(J.Center.X - R, J.Center.Y - R),
-				FVector2d(J.Center.X + R, J.Center.Y + R));
+				FVector2d(J.Center.X + R, J.Center.Y + R)));
+			if (Hits.Num() == 0) { continue; }
 			TArray<FGeneralPolygon2d> Near;
-			for (int32 i = 0; i < OutMerged.Num(); ++i)
-			{
-				if (BoxesOverlap(MergedBounds[i], DiscBox)) { Near.Add(OutMerged[i]); }
-			}
-			if (Near.Num() == 0) { continue; }
+			Near.Reserve(Hits.Num());
+			for (int32 i : Hits) { Near.Add(Outlines[i]); }
 
 			TArray<FGeneralPolygon2d> Region;
 			if (!PolygonsIntersection(Near, DiscArr, Region) || Region.Num() == 0) { continue; }
 			MorphClose(Region, J.CloseCm);
 			Patches.Append(MoveTemp(Region));
 		}
+		if (bTracePhases)
+		{
+			UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   surface: %d junction patch(es) from %d junction(s) in %.1f s"),
+				Patches.Num(), PerJunction->Num(), FPlatformTime::Seconds() - tJunc0);
+		}
 
 		if (Patches.Num() > 0)
 		{
-			TArray<FGeneralPolygon2d> All = MoveTemp(OutMerged);
-			All.Append(MoveTemp(Patches));
-			TArray<FGeneralPolygon2d> Merged2;
-			if (PolygonsUnion(All, Merged2, /*bCopyInputOnFailure*/true))
+			const double tFinal0 = FPlatformTime::Seconds();
+			TArray<FGeneralPolygon2d> PatchUnion;
+			UnionSpatial(MoveTemp(Patches), PatchUnion, /*CellCm=*/20000.0);
+			if (PatchUnion.Num() > 0)
 			{
-				OutMerged = MoveTemp(Merged2);
+				TArray<FGeneralPolygon2d> All = MoveTemp(OutMerged);
+				All.Append(MoveTemp(PatchUnion));
+				TArray<FGeneralPolygon2d> Merged2;
+				if (PolygonsUnion(All, Merged2, /*bCopyInputOnFailure*/true))
+				{
+					OutMerged = MoveTemp(Merged2);
+				}
+				else
+				{
+					OutMerged = MoveTemp(All);
+				}
 			}
-			else
+			if (bTracePhases)
 			{
-				OutMerged = MoveTemp(All); // union failed â†’ keep base + patches
+				UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   surface: patches unioned back in %.1f s"),
+					FPlatformTime::Seconds() - tFinal0);
 			}
 		}
 		return true;
