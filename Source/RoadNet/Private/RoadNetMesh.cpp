@@ -7,6 +7,7 @@
 #include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "DynamicMesh/MeshNormals.h"
 #include "HAL/IConsoleManager.h"
+#include "HAL/ThreadSafeCounter.h"
 
 using namespace UE::Geometry;
 
@@ -61,15 +62,26 @@ static TAutoConsoleVariable<int32> CVarRoadNetDrawAngleDeg(
 	TEXT("Curve-shape arc angle in degrees (how far the road bends between the two clicks). Typical: 90, 45, 25."),
 	ECVF_Default);
 
-// Automatic turn arrows off the lane graph. OFF by default: the derivation puts
-// arrows at a fixed setback from the joint rather than at the stop line, which
-// reads wrong, so manual placement is the supported path until the rules are
-// right. Turning this on changes nothing about hand-placed marks — the two
-// sources are independent and both commit.
+// Automatic turn arrows off the lane graph. ON by default: arrows are now
+// anchored on each approach's STOP LINE (URoadNetwork::CommitLaneMarks reads
+// Ctx.ApproachStops), which is what LOT"M 813 asks for — the arrow marks the
+// lane a driver enters the junction from. It was off while the derivation still
+// measured back from the joint centre, which read wrong on most approaches.
+// Switching it off changes nothing about hand-placed marks — the two sources are
+// independent and both commit.
 static TAutoConsoleVariable<int32> CVarRoadNetAutoTurnArrows(
 	TEXT("roadnet.AutoTurnArrows"),
-	0,
-	TEXT("1 = derive turn arrows automatically from the lane graph at junctions. 0 = hand-placed marks only (default). Hand-placed marks are unaffected either way."),
+	1,
+	TEXT("1 = derive turn arrows automatically from the lane graph at junctions (default). 0 = hand-placed marks only. Hand-placed marks are unaffected either way."),
+	ECVF_Default);
+
+// Dashed turn guides through a junction (LOT"M 809). ON by default; a switch
+// because a junction dense with movements can carry a lot of short dashes, and
+// a stylised or low-detail city may not want any of them.
+static TAutoConsoleVariable<int32> CVarRoadNetTurnGuides(
+	TEXT("roadnet.TurnGuides"),
+	1,
+	TEXT("1 = paint a dashed white guide line along each junction turn movement, LOT\"M 809 (default). 0 = none."),
 	ECVF_Default);
 
 // Which arrow the Markings tool places on click (see ERoadNetMarkKind), or -1
@@ -407,19 +419,24 @@ namespace RoadNetMesh
 		double UVUnitCm,
 		bool bGradientNormals,
 		bool bWorldUVs,
-		bool bSkirtToGround)
+		bool bSkirtToGround,
+		const FCenterlineHeightField* PrebuiltField)
 	{
 #if !UE_BUILD_SHIPPING
 		static const bool bProjOk = VerifyProjectNearest();
 		(void)bProjOk;
-		// Plain flag rather than a static initialiser, because the check calls
-		// back into this function and a static local would be re-entering its
-		// own guarded init. Setting it first makes the inner call a no-op.
-		static bool bSkirtChecked = false;
-		if (!bSkirtChecked) { bSkirtChecked = true; VerifySkirtWinding(); }
+		// Not a static initialiser, because the check calls back into this
+		// function and a static local would be re-entering its own guarded init.
+		// Counter rather than a plain bool so concurrent callers (the commit
+		// meshes tiles in parallel) cannot both see it unset: whoever increments
+		// to 1 runs the check, the re-entrant inner call sees 2 and skips.
+		static FThreadSafeCounter SkirtChecked;
+		if (SkirtChecked.Increment() == 1) { VerifySkirtWinding(); }
 #endif
-		FCenterlineHeightField Field;
-		Field.Build(CenterLines);
+		// Only build a field when the caller has not already got one.
+		FCenterlineHeightField LocalField;
+		if (!PrebuiltField) { LocalField.Build(CenterLines); }
+		const FCenterlineHeightField& Field = PrebuiltField ? *PrebuiltField : LocalField;
 		const double FallbackZ = Field.FirstZ();
 		int32 TriCount = 0;
 
@@ -650,5 +667,148 @@ namespace RoadNetMesh
 		if (Mesh.TriangleCount() == 0) { return; }
 		Mesh.EnableAttributes();
 		FMeshNormals::QuickComputeVertexNormals(Mesh);
+	}
+
+	int32 RepairNormals(FDynamicMesh3& Mesh)
+	{
+		if (Mesh.TriangleCount() == 0) { return 0; }
+		if (!Mesh.HasAttributes()) { Mesh.EnableAttributes(); }
+		FDynamicMeshNormalOverlay* Overlay = Mesh.Attributes()->PrimaryNormals();
+		if (!Overlay) { return 0; }
+
+		// Computed lazily: a healthy mesh never needs it, and this runs per tile.
+		FMeshNormals VertexNormals(&Mesh);
+		bool bComputed = false;
+		auto VertexNormal = [&](int32 Vid) -> FVector3f
+		{
+			if (!bComputed)
+			{
+				VertexNormals.ComputeVertexNormals();
+				bComputed = true;
+			}
+			return Mesh.IsVertex(Vid) ? (FVector3f)VertexNormals[Vid] : FVector3f::UnitZ();
+		};
+
+		int32 Fixed = 0;
+
+		// 1. Garbage elements: zero-length or non-finite.
+		for (const int32 Eid : Overlay->ElementIndicesItr())
+		{
+			const FVector3f N = Overlay->GetElement(Eid);
+			if (!FMath::IsFinite(N.X) || !FMath::IsFinite(N.Y) || !FMath::IsFinite(N.Z)
+				|| N.SquaredLength() < 0.25f)
+			{
+				Overlay->SetElement(Eid, VertexNormal(Overlay->GetParentVertex(Eid)));
+				++Fixed;
+			}
+		}
+
+		// 2. Unset triangles: give each corner a vertex-normal element.
+		// ponytail: adjacent unset triangles get separate (identical-valued)
+		// elements instead of shared ones — correct shading, a few extra
+		// elements. Merge via a per-vertex element cache if it ever matters.
+		for (const int32 Tid : Mesh.TriangleIndicesItr())
+		{
+			if (Overlay->IsSetTriangle(Tid)) { continue; }
+			const FIndex3i Tri = Mesh.GetTriangle(Tid);
+			const FIndex3i Elems(
+				Overlay->AppendElement(VertexNormal(Tri.A)),
+				Overlay->AppendElement(VertexNormal(Tri.B)),
+				Overlay->AppendElement(VertexNormal(Tri.C)));
+			Overlay->SetTriangle(Tid, Elems);
+			++Fixed;
+		}
+		return Fixed;
+	}
+
+	int32 RepairWinding(FDynamicMesh3& Mesh)
+	{
+		FDynamicMeshNormalOverlay* Overlay =
+			Mesh.HasAttributes() ? Mesh.Attributes()->PrimaryNormals() : nullptr;
+		if (!Overlay) { return 0; }
+
+		int32 Flipped = 0;
+		for (const int32 Tid : Mesh.TriangleIndicesItr())
+		{
+			if (!Overlay->IsSetTriangle(Tid)) { continue; }
+
+			FVector3d A, B, C;
+			Mesh.GetTriVertices(Tid, A, B, C);
+			// Un-normalised is fine: only the sign of the dot below is used, and a
+			// degenerate triangle gives ~0, which correctly leaves it alone.
+			const FVector3d WindingN = (B - A).Cross(C - A);
+
+			const FIndex3i El = Overlay->GetTriangle(Tid);
+			const FVector3f AuthoredN = Overlay->GetElement(El.A)
+				+ Overlay->GetElement(El.B) + Overlay->GetElement(El.C);
+
+			if (WindingN.Dot(FVector3d(AuthoredN)) < 0.0)
+			{
+				Mesh.ReverseTriOrientation(Tid);
+				++Flipped;
+			}
+		}
+		return Flipped;
+	}
+
+	bool RepairSelfCheck(FString& OutReport)
+	{
+		// A flat quad in the XY plane, wound CCW so both triangles face +Z.
+		FDynamicMesh3 M;
+		M.EnableAttributes();
+		const int32 V0 = M.AppendVertex(FVector3d(0,   0,   0));
+		const int32 V1 = M.AppendVertex(FVector3d(100, 0,   0));
+		const int32 V2 = M.AppendVertex(FVector3d(100, 100, 0));
+		const int32 V3 = M.AppendVertex(FVector3d(0,   100, 0));
+		const int32 T0 = M.AppendTriangle(V0, V1, V2);
+		const int32 T1 = M.AppendTriangle(V0, V2, V3);
+
+		FDynamicMeshNormalOverlay* Ov = M.Attributes()->PrimaryNormals();
+		const bool bHaveOverlay = (Ov != nullptr) && (T0 >= 0) && (T1 >= 0);
+
+		// Defect 2 — no normal elements at all. Both triangles start unset.
+		const int32 FixedUnset = RepairNormals(M);
+		const bool bUnsetFixed = bHaveOverlay && FixedUnset == 2
+			&& Ov->IsSetTriangle(T0) && Ov->IsSetTriangle(T1);
+
+		// Idempotent: a healthy mesh gives the repair nothing to do.
+		const bool bNoopNormals = (RepairNormals(M) == 0);
+
+		// Defect 1 — a zero-length element.
+		bool bZeroFixed = false;
+		if (bHaveOverlay)
+		{
+			const FIndex3i El = Ov->GetTriangle(T0);
+			Ov->SetElement(El.A, FVector3f::ZeroVector);
+			const int32 Fixed = RepairNormals(M);
+			bZeroFixed = (Fixed == 1) && (Ov->GetElement(El.A).SquaredLength() > 0.25f);
+		}
+
+		// Defect 3 — winding against the authored normal. Healthy first...
+		const bool bNoopWinding = (RepairWinding(M) == 0);
+		// ...then flip one triangle and confirm exactly that one comes back.
+		M.ReverseTriOrientation(T1);
+		const int32 Flipped = RepairWinding(M);
+		bool bWindingFixed = (Flipped == 1);
+		if (bWindingFixed)
+		{
+			FVector3d A, B, C;
+			M.GetTriVertices(T1, A, B, C);
+			// Restored orientation must face the same way as the authored normal.
+			bWindingFixed = ((B - A).Cross(C - A).Z > 0.0) && (RepairWinding(M) == 0);
+		}
+
+		const bool bOk = bHaveOverlay && bUnsetFixed && bNoopNormals && bZeroFixed
+			&& bNoopWinding && bWindingFixed;
+
+		OutReport = FString::Printf(
+			TEXT("MeshRepairSelfCheck: %s | unset-triangles %s | normals-idempotent %s | zero-element %s | winding-idempotent %s | winding-flip %s"),
+			bOk ? TEXT("PASS") : TEXT("FAIL"),
+			bUnsetFixed   ? TEXT("ok") : TEXT("FAILED"),
+			bNoopNormals  ? TEXT("ok") : TEXT("FAILED"),
+			bZeroFixed    ? TEXT("ok") : TEXT("FAILED"),
+			bNoopWinding  ? TEXT("ok") : TEXT("FAILED"),
+			bWindingFixed ? TEXT("ok") : TEXT("FAILED"));
+		return bOk;
 	}
 }

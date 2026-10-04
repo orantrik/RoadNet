@@ -4,14 +4,18 @@
 #include "RoadNetTypes.h"   // FRoadDef
 #include "RoadNetMath.h"
 #include "RoadNetJunctionMarks.h"   // EmitZebra / EmitStopBar, shared with junctions
+#include "RoadNetStandards.h"       // LOT"M paint specs
 #include "Polygon2.h"
 
 using namespace UE::Geometry;
 
 namespace
 {
-	constexpr double kDashLenCm     = 300.0;  // 3 m dash
-	constexpr double kGapLenCm      = 500.0;  // 5 m gap
+	// Lane divider (LOT"M 801) dash geometry. Sourced from RoadNetStandards so a
+	// junction turn guide (809) and the warning line (805) can have their own
+	// figures instead of everything sharing one pair of globals.
+	const double kDashLenCm = RoadNetStandards::Paint(RoadNetStandards::EMark::LaneDivider).DashLenCm;
+	const double kGapLenCm  = RoadNetStandards::Paint(RoadNetStandards::EMark::LaneDivider).GapLenCm;
 	// NOTE: the white EDGE line now comes from the eroded carriageway boundary in
 	// URoadNetwork::BuildSurfaceUnion (so it curves around corners); the inset +
 	// half-width used there mirror kEdgeInsetCm=38 / SolidHalfFor(3.5 m) here.
@@ -282,5 +286,77 @@ namespace RoadNetMarkings
 		// stroked from the merged carriageway boundary in BuildSurfaceUnion so
 		// they curve around junction/sidewalk corners (a straight per-road offset
 		// can't turn a corner). kEdgeInsetCm is kept in sync there.
+	}
+
+	void DashPolyline(const TArray<FVector>& Path, double DashLenCm, double GapLenCm,
+		double HalfWCm, TArray<FGeneralPolygon2d>& Out)
+	{
+		// A non-positive stride would loop forever; a non-positive dash would
+		// emit nothing but still walk the path. Both are caller bugs, and both
+		// are cheaper to refuse here than to debug in a hung editor.
+		if (Path.Num() < 2 || DashLenCm <= 0.0 || HalfWCm <= 0.0) { return; }
+		const double Stride = DashLenCm + FMath::Max(0.0, GapLenCm);
+		if (Stride <= 0.0) { return; }
+
+		const double Total = RoadNetMath::TotalLength(Path);
+		for (double S = 0.0; S < Total; S += Stride)
+		{
+			TArray<FVector> Dash;
+			ExtractByArcLength(Path, S, FMath::Min(S + DashLenCm, Total), Dash);
+			FGeneralPolygon2d Ribbon;
+			if (MakeRibbon(Dash, HalfWCm, Ribbon)) { Out.Add(MoveTemp(Ribbon)); }
+		}
+	}
+
+	bool DashSelfCheck(FString& OutReport)
+	{
+		// A 100 m straight run, dashed 1 m on / 1.5 m off at 12 cm wide — the
+		// junction turn guide's own spec.
+		const RoadNetStandards::FPaintSpec Spec =
+			RoadNetStandards::Paint(RoadNetStandards::EMark::JunctionTurn);
+		constexpr double kTotalCm = 10000.0;
+		TArray<FVector> Line = { FVector(0, 0, 0), FVector(kTotalCm, 0, 0) };
+
+		TArray<FGeneralPolygon2d> Out;
+		DashPolyline(Line, Spec.DashLenCm, Spec.GapLenCm, 0.5 * Spec.WidthCm, Out);
+
+		// One dash per stride, the last one truncated by the end of the line.
+		const double Stride = Spec.DashLenCm + Spec.GapLenCm;
+		const int32 Expect = FMath::CeilToInt(kTotalCm / Stride);
+		const bool bCount = (Out.Num() == Expect);
+
+		// Painted area is the duty cycle of the strip, give or take the
+		// truncated last dash and the ribbon's square ends.
+		double Area = 0.0;
+		for (const FGeneralPolygon2d& P : Out) { Area += FMath::Abs(P.GetOuter().SignedArea()); }
+		const double Ideal = kTotalCm * Spec.WidthCm * (Spec.DashLenCm / Stride);
+		const bool bArea = Area > 0.85 * Ideal && Area < 1.15 * Ideal;
+
+		// Degenerate inputs REFUSE rather than hang. A zero or negative stride is
+		// the one that matters: `for (S = 0; S < Total; S += Stride)` never
+		// terminates, and it would hang the editor mid-rebuild with no log line.
+		TArray<FGeneralPolygon2d> Junk;
+		DashPolyline(Line, 0.0,   500.0, 6.0, Junk);      // no dash
+		DashPolyline(Line, -100.0, 0.0,  6.0, Junk);      // negative dash => stride <= 0
+		DashPolyline(Line, 100.0, 150.0, 0.0, Junk);      // no width
+		DashPolyline({ FVector::ZeroVector }, 100.0, 150.0, 6.0, Junk);  // no path
+		const bool bRefuse = (Junk.Num() == 0);
+
+		// A solid-equivalent request (no gap) covers the whole strip.
+		TArray<FGeneralPolygon2d> Solid;
+		DashPolyline(Line, 500.0, 0.0, 6.0, Solid);
+		double SolidArea = 0.0;
+		for (const FGeneralPolygon2d& P : Solid) { SolidArea += FMath::Abs(P.GetOuter().SignedArea()); }
+		const bool bSolid = SolidArea > 0.95 * kTotalCm * 12.0;
+
+		const bool bOk = bCount && bArea && bRefuse && bSolid;
+		OutReport = FString::Printf(
+			TEXT("DashSelfCheck: %s | count %d/%d %s | area %.0f vs %.0f %s | degenerate refused %s | solid %s"),
+			bOk ? TEXT("PASS") : TEXT("FAIL"),
+			Out.Num(), Expect, bCount   ? TEXT("ok") : TEXT("FAILED"),
+			Area, Ideal,       bArea    ? TEXT("ok") : TEXT("FAILED"),
+			bRefuse ? TEXT("ok") : TEXT("FAILED"),
+			bSolid  ? TEXT("ok") : TEXT("FAILED"));
+		return bOk;
 	}
 }

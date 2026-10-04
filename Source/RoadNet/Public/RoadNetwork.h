@@ -253,6 +253,17 @@ struct FRoadNetRebuildContext
 	// § junction traffic-signal placeholder placements (location, yawDeg) for
 	// this rebuild — committed as a HISM.
 	TArray<TPair<FVector, float>> Signals;
+
+	// § where each junction approach's paint STARTS, recorded by
+	// BuildJunctionMarkings so CommitLaneMarks can place turn arrows relative to
+	// the stop line instead of guessing a fixed distance from the joint centre.
+	// Recorded for EVERY junction, including presets that paint nothing, because
+	// an unmarked junction still has a place the arrows belong.
+	struct FApproachStop
+	{
+		FVector2D StopPos = FVector2D::ZeroVector;
+	};
+	TArray<FApproachStop> ApproachStops;
 	// § street-furniture placements for this rebuild (one bucket per enabled
 	// FurnitureTypes entry). Committed as HISMs / spawned actors.
 	TArray<FRoadNetFurnitureBucket> FurnitureBuckets;
@@ -1006,6 +1017,23 @@ public:
 	// sides on first widening. Returns the new width. Caller triggers Rebuild().
 	float AdjustSidewalkWidth(int32 RoadIdx, float DeltaCm);
 
+	// Nudge the sidewalk width at ONE arc position on one side, writing a knot
+	// into FRoadNetLaneSpec::SidewalkKnotsLeft/Right instead of resizing the
+	// whole road. The first call on an un-knotted side seeds a flat profile at
+	// the current uniform width (so only the edited stretch moves), then adds or
+	// updates a knot at ArcCm. Widths clamp to [0, 2000] cm.
+	//
+	// BlendCm is how far either side of ArcCm the change tapers back to the
+	// surrounding width; 0 gives a step. Returns the new width at ArcCm, or -1
+	// on a bad index. Caller triggers Rebuild().
+	float AdjustSidewalkWidthAt(int32 RoadIdx, ERoadNetSide Side, double ArcCm,
+		float DeltaCm, double BlendCm = 500.0);
+
+	// Drop every per-point sidewalk knot on one side (or both when Side is
+	// Center), returning the road to its uniform SidewalkWidth. Returns true if
+	// anything was cleared. Caller triggers Rebuild().
+	bool ClearSidewalkKnots(int32 RoadIdx, ERoadNetSide Side);
+
 	// Toggle the outboard cycle track on one road (both sides). Turning it on
 	// also turns a sidewalk on if the road has none: the track is DEFINED as the
 	// band beyond the footway, so without one there is nothing for it to be
@@ -1151,6 +1179,36 @@ public:
 	const TArray<FVector>& GetConformVerts() const { return ConformVerts; }
 	const TArray<int32>&   GetConformTris()  const { return ConformTris;  }
 
+	// World-XY footprint of the cells the LAST rebuild actually touched, or false
+	// after a full rebuild (nothing to narrow to) or a load with cold caches.
+	//
+	// The soup above stays whole on purpose — the sculpt has to see neighbouring
+	// road surfaces to protect them and to keep embankments from tenting across a
+	// window edge. But the expensive half of conforming is the heightmap
+	// read-modify-write and the landscape layer update, and those only need to
+	// cover the edited region. A caller that honours this writes an eighth of the
+	// map instead of all of it while still reading the whole network for context.
+	bool GetWindowedConformBoundsXY(FBox2D& Out) const
+	{
+		if (!bLastConformWindowed || !LastConformBoundsXY.bIsValid) { return false; }
+		Out = LastConformBoundsXY;
+		return true;
+	}
+
+	// Verify the surface-plan cache's fingerprint honours the three properties
+	// the reuse depends on: stable for identical inputs, BLIND to Z (the grade
+	// stage rewrites it between the two passes), and sensitive to XY. Getting the
+	// Z-blindness wrong makes the cache useless; getting the XY-sensitivity wrong
+	// makes it serve a stale road surface. Run via RoadNet.SurfaceCacheSelfCheck.
+	bool SurfaceCacheSelfCheck(FString& OutReport) const;
+
+	// Verify per-point sidewalk widths: that SidewalkWidthAt interpolates and
+	// clamps, that MaxSidewalkWidth covers a knotted bulge (every bounds/mask
+	// call site depends on that, or the widened walk falls outside the mask
+	// meant to contain it), and that the surface-plan cache notices a knot edit.
+	// Builds its own transient network. Run via RoadNet.SidewalkKnotSelfCheck.
+	static bool SidewalkKnotSelfCheck(FString& OutReport);
+
 	// § street validation — walk the COMMITTED street (conform triangle soup,
 	// junction plates, plan sidewalk edges) and report every place the built
 	// geometry violates the plan's slope contract: lateral slope past
@@ -1262,6 +1320,24 @@ public:
 	// junction edits so a change re-commits only the junction's tiles.
 	void Rebuild(TArrayView<const int32> Modified = TArrayView<const int32>(),
 		const FBox2D& DirtyRegionWorld = FBox2D(ForceInit));
+
+	// ---- district scope (§ scale) -----------------------------------------
+	// A standing "I am only working on this part of the map" window. When valid,
+	// any rebuild that did not name its own region is scoped to it: only the tile
+	// actors over this box are cleared and re-committed, and the terrain conform
+	// only rewrites this part of the heightmap. Every other district keeps the
+	// actors and terrain it already has.
+	//
+	// This is the same mechanism a junction edit uses, just held across rebuilds
+	// so the panel's whole-network buttons honour it too. Set it via
+	// RoadNet.EditRegion. An invalid box (the default) means the whole network.
+	//
+	// One exception: a rebuild that names specific roads while the conform caches
+	// are still cold (first edit after a level load) is promoted to a full pass,
+	// because a windowed conform then has no cached terrain for anywhere else.
+	// A whole-network rebuild — what the panel buttons do — keeps the scope.
+	UPROPERTY(EditAnywhere, Category = "RoadNet|Scale")
+	FBox2D EditRegion = FBox2D(ForceInit);
 
 	// Bind a target world for the (future) commit stage that spawns geometry.
 	void SetWorld(UWorld* InWorld) { WorldPtr = InWorld; }
@@ -1424,6 +1500,48 @@ private:
 	TArray<FVector> ConformVerts;
 	TArray<int32>   ConformTris;
 
+	// See GetWindowedConformBoundsXY. Recomputed every rebuild. Not serialized.
+	FBox2D LastConformBoundsXY = FBox2D(ForceInit);
+	bool   bLastConformWindowed = false;
+
+	// ---- cached surface plan (§ scale) --------------------------------------
+	// BuildSurfaceUnion is pure 2D: it reads centreline and edge XY, lane widths
+	// and junction geometry, and none of those move when the landscape is
+	// conformed. Build Street computes it TWICE all the same — once in the latent
+	// plan pass and again in the meshing pass, either side of the conform — and
+	// on a city that stage is five minutes each time.
+	//
+	// This holds the first pass's result so the second can restore it instead.
+	// Heights are deliberately NOT cached: the grade stage re-runs every pass and
+	// the commit samples Z from the freshly graded centrelines, so a conform that
+	// moved the ground still lands. Only the XY footprint is reused.
+	//
+	// Keyed by a hash of everything the stage reads, which makes the reuse
+	// self-checking — if any road, width or zone differs from the pass that filled
+	// the cache, the hash misses and the stage simply recomputes. Nothing here is
+	// serialized; a fresh load starts cold and pays one full pass.
+	struct FSurfacePlanCache
+	{
+		TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneSurface;
+		TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneSidewalk;
+		TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneBikePath;
+		TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMedian;
+		TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMedianWalk;
+		TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMarkingWhite;
+		TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneMarkingYellow;
+		TArray<TArray<UE::Geometry::FGeneralPolygon2d>> ZoneJunctionClip;
+		TArray<UE::Geometry::FGeneralPolygon2d>         Surface;
+		TArray<UE::Geometry::FGeneralPolygon2d>         Sidewalk;
+		uint32 InputHash = 0;
+		bool   bValid    = false;
+	};
+	FSurfacePlanCache SurfacePlan;
+
+	// Fingerprint of every input BuildSurfaceUnion reads (XY only — see above).
+	uint32 ComputeSurfacePlanHash(const FRoadNetRebuildContext& Ctx) const;
+	void   StoreSurfacePlan(const FRoadNetRebuildContext& Ctx, uint32 InputHash);
+	void   RestoreSurfacePlan(FRoadNetRebuildContext& Ctx) const;
+
 	// See GetRebuildSerial. Not serialized.
 	uint32 RebuildSerial = 0;
 
@@ -1460,6 +1578,7 @@ private:
 	void ApplyPlanEditPins(FRoadNetRebuildContext& Ctx);         // § re-apply pinned centreline Z + ease heights along every curve
 	void BuildPerimeterLoops(FRoadNetRebuildContext& Ctx) const; // §10.11 loops for PCG export
 	void BuildLaneGraph(FRoadNetRebuildContext& Ctx) const;      // §12.2 lane connectivity
+	void BuildTurnGuides(FRoadNetRebuildContext& Ctx) const;     // LOT"M 809 dashed turn guides through junctions
 	void BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const;    // §12.1 per-lane ribbon polys
 	void BuildJunctionMarkings(FRoadNetRebuildContext& Ctx);     // §2 junction paint + signals
 	void BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const;// § corner channelizing grass islands

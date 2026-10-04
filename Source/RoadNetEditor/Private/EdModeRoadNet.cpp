@@ -91,6 +91,74 @@ namespace
 		default:                                       return FColor(150, 150, 160); // None
 		}
 	}
+
+	// ---- draft width stepping (Draw tool, +/- during a draft) --------------
+	// Free functions so the self-check below exercises the same arithmetic the
+	// key handler runs, rather than a re-typed copy of it.
+
+	// One lane step. Upper bound is generous rather than physical — it only has
+	// to stop a key-repeat from running the ghost off to absurd widths.
+	int32 StepDraftLanes(int32 Current, bool bUp)
+	{
+		return FMath::Clamp(Current + (bUp ? 1 : -1), 1, 12);
+	}
+
+	// One sidewalk step, in cm. Floors at 0 rather than the 50cm minimum so '-'
+	// can walk the sidewalk off entirely; DraftSidewalksOn reports the resulting
+	// on/off state, which mirrors the >= 50 test the ghost and FinalizeDraft use.
+	constexpr float kDraftWalkStepCm = 25.f;
+	float StepDraftWalkCm(float CurrentCm, bool bUp)
+	{
+		return FMath::Clamp(CurrentCm + (bUp ? kDraftWalkStepCm : -kDraftWalkStepCm), 0.f, 1000.f);
+	}
+	bool DraftSidewalksOn(float WidthCm) { return WidthCm >= 50.f; }
+
+	// Walks the draft width controls across their whole range and asserts the
+	// ghost's lane ladder stays well-formed at every count the keys can reach —
+	// the invariant DrawRoadGhost ensures on, checked here without a viewport.
+	void DraftWidthSelfCheck()
+	{
+		bool bOk = true;
+
+		// Lane stepping saturates at both ends rather than running away on
+		// key-repeat or inverting past a single lane.
+		int32 N = 2;
+		for (int32 i = 0; i < 40; ++i) { N = StepDraftLanes(N, true); }
+		bOk &= ensureMsgf(N == 12, TEXT("[RoadNet] draft lanes did not clamp up (got %d)"), N);
+		for (int32 i = 0; i < 40; ++i) { N = StepDraftLanes(N, false); }
+		bOk &= ensureMsgf(N == 1, TEXT("[RoadNet] draft lanes did not clamp down (got %d)"), N);
+
+		// Every reachable count yields a symmetric ladder with one more boundary
+		// than lanes (same construction as DrawRoadGhost).
+		for (int32 Lanes = 1; Lanes <= 12; ++Lanes)
+		{
+			constexpr double Width = 350.0;
+			const double Half = 0.5 * Lanes * Width;
+			TArray<double> Bounds;
+			for (int32 k = 0; k <= Lanes; ++k) { Bounds.Add(-Half + k * Width); }
+			bOk &= ensureMsgf(Bounds.Num() == Lanes + 1,
+				TEXT("[RoadNet] ghost ladder %d boundaries for %d lanes"), Bounds.Num(), Lanes);
+			bOk &= ensureMsgf(FMath::IsNearlyEqual(Bounds[0], -Bounds[Lanes], 0.01),
+				TEXT("[RoadNet] ghost ladder asymmetric at %d lanes"), Lanes);
+		}
+
+		// Sidewalk stepping saturates, and the on/off threshold sits between two
+		// adjacent steps so '-' can actually switch sidewalks off.
+		bOk &= ensureMsgf(DraftSidewalksOn(50.f) && !DraftSidewalksOn(StepDraftWalkCm(50.f, false)),
+			TEXT("[RoadNet] draft sidewalk on/off threshold does not straddle a step"));
+		float W = 200.f;
+		for (int32 i = 0; i < 80; ++i) { W = StepDraftWalkCm(W, false); }
+		bOk &= ensureMsgf(W == 0.f, TEXT("[RoadNet] draft sidewalk did not clamp to 0 (got %.1f)"), W);
+		for (int32 i = 0; i < 100; ++i) { W = StepDraftWalkCm(W, true); }
+		bOk &= ensureMsgf(W == 1000.f, TEXT("[RoadNet] draft sidewalk did not clamp to 1000 (got %.1f)"), W);
+
+		UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] DraftWidthSelfCheck: %s"), bOk ? TEXT("PASS") : TEXT("FAIL"));
+	}
+
+	FAutoConsoleCommand GDraftWidthSelfCheck(
+		TEXT("RoadNet.DraftWidthSelfCheck"),
+		TEXT("Verify the Draw-tool +/- draft lane/sidewalk stepping clamps correctly and keeps the ghost lane ladder well-formed."),
+		FConsoleCommandDelegate::CreateStatic(&DraftWidthSelfCheck));
 }
 
 void FEdModeRoadNet::Enter()
@@ -1637,6 +1705,55 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 			return true;
 		}
 
+		// Draft width editing (Draw tool, draft IN progress):
+		//   '=' / '+' / NumpadAdd      → one more lane   (Shift = wider sidewalk)
+		//   '-' / '_' / NumpadSubtract → one fewer lane  (Shift = narrower sidewalk)
+		// Retargets the draft settings the ghost already reads every Render(), so
+		// the preview follows the key immediately and Enter commits what you see.
+		// Must run BEFORE the DraftPoints.Num() == 0 gate below, which owns the
+		// same keys for editing an existing road's lanes.
+		if (Tool == ERoadNetDrawTool::Draw && DraftPoints.Num() > 0)
+		{
+			const bool bWider  = (Key == EKeys::Equals || Key == EKeys::Add);
+			const bool bNarrow = (Key == EKeys::Hyphen || Key == EKeys::Subtract);
+			if (bWider || bNarrow)
+			{
+				// Spawn on demand: the ghost falls back to defaults without an
+				// actor, so there would be nothing to edit until the first commit.
+				if (ARoadNetActor* A = GetOrSpawnNetActor())
+				{
+					const bool bShift = Viewport &&
+						(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
+
+					if (bShift)
+					{
+						const float NewW = StepDraftWalkCm(A->DraftSidewalkWidthCm, bWider);
+						A->DraftSidewalkWidthCm = NewW;
+						A->bDraftSidewalks      = DraftSidewalksOn(NewW);
+						if (GEngine)
+						{
+							GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Cyan,
+								A->bDraftSidewalks
+									? FString::Printf(TEXT("RoadNet: draft sidewalk %.0f cm"), NewW)
+									: FString(TEXT("RoadNet: draft sidewalks OFF")));
+						}
+					}
+					else
+					{
+						A->DraftLaneCount = StepDraftLanes(A->DraftLaneCount, bWider);
+						if (GEngine)
+						{
+							GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Cyan,
+								FString::Printf(TEXT("RoadNet: draft %d lane%s (Enter to commit)"),
+									A->DraftLaneCount, A->DraftLaneCount == 1 ? TEXT("") : TEXT("s")));
+						}
+					}
+				}
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
+		}
+
 		// Lane editing (draft not in progress):
 		//   '=' / '+' / NumpadAdd      → add a lane        (Shift = left side)
 		//   '-' / '_' / NumpadSubtract → remove outer lane (Shift = left side)
@@ -2345,7 +2462,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					if (GEngine)
 					{
 						GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
-							TEXT("RoadNet: no road under cursor — hover a road, then , . to size the sidewalk, K for a cycle track"));
+							TEXT("RoadNet: no road under cursor — hover a road, then , . to size the sidewalk (pick an edge handle first to size one point), K for a cycle track"));
 					}
 					return true;
 				}
@@ -2354,22 +2471,59 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 					(Viewport->KeyState(EKeys::LeftShift) || Viewport->KeyState(EKeys::RightShift));
 				const float Step = (bShift ? 100.f : 20.f) * (Key == EKeys::Period ? 1.f : -1.f);
 
-				const bool bTrack = (Key == EKeys::K);
+				// Shift+K flattens the per-point profile back to one width — the
+				// way out of a profile you no longer want, without nudging every
+				// knot back by hand.
+				const bool bClearProfile = (Key == EKeys::K) && bShift;
+				const bool bTrack = (Key == EKeys::K) && !bShift;
 				const FScopedTransaction Transaction(bTrack
 					? LOCTEXT("RoadNetBikePath", "Toggle RoadNet Cycle Track")
-					: LOCTEXT("RoadNetSidewalk", "Edit RoadNet Sidewalk"));
+					: bClearProfile
+						? LOCTEXT("RoadNetClearWalkProfile", "Clear RoadNet Sidewalk Profile")
+						: LOCTEXT("RoadNetSidewalk", "Edit RoadNet Sidewalk"));
 				ModifyForEdit();
 				FString Msg;
-				if (bTrack)
+				if (bClearProfile)
+				{
+					Msg = Net->ClearSidewalkKnots(Target, ERoadNetSide::Center)
+						? TEXT("RoadNet: per-point sidewalk profile cleared — back to one width for the road")
+						: TEXT("RoadNet: this road has no per-point sidewalk profile");
+				}
+				else if (bTrack)
 				{
 					const bool bOn = Net->ToggleBikePath(Target);
 					Msg = bOn
 						? TEXT("RoadNet: cycle track ON (outboard of the sidewalk)")
 						: TEXT("RoadNet: cycle track OFF");
 				}
+				else if (Target == SelRoad && SelEdgeKnot != INDEX_NONE)
+				{
+					// An edge handle is picked, so size the walk AT THAT POINT
+					// rather than resizing the whole road. bSelEdgeRight names the
+					// +offset side, which is the side bSidewalkLeft controls (see
+					// the tile emitter's EmitSide calls).
+					TArray<FRoadNetEdgeKnot> Profile;
+					Net->GetOuterEdgeForDisplay(Target,
+						bSelEdgeRight ? ERoadNetSide::Right : ERoadNetSide::Left, Profile);
+					if (Profile.IsValidIndex(SelEdgeKnot))
+					{
+						const ERoadNetSide WalkSide = bSelEdgeRight ? ERoadNetSide::Left : ERoadNetSide::Right;
+						const float NewW = Net->AdjustSidewalkWidthAt(
+							Target, WalkSide, Profile[SelEdgeKnot].Distance, Step);
+						Msg = FString::Printf(
+							TEXT("RoadNet: sidewalk %.0f cm at this point (%s side) — Shift+, / Shift+. for a bigger step, Shift+K clears the profile"),
+							NewW, bSelEdgeRight ? TEXT("right") : TEXT("left"));
+					}
+					else
+					{
+						Msg = FString::Printf(TEXT("RoadNet: sidewalk width = %.0f cm"),
+							Net->AdjustSidewalkWidth(Target, Step));
+					}
+				}
 				else
 				{
-					Msg = FString::Printf(TEXT("RoadNet: sidewalk width = %.0f cm"),
+					// No handle picked: whole-road behaviour, unchanged.
+					Msg = FString::Printf(TEXT("RoadNet: sidewalk width = %.0f cm (whole road — pick an edge handle to size one point)"),
 						Net->AdjustSidewalkWidth(Target, Step));
 				}
 				SelRoad = Target;
@@ -2951,10 +3105,26 @@ void FEdModeRoadNet::DrawHUD(FEditorViewportClient* ViewportClient, FViewport* V
 					GEngine->GetSmallFont(), FLinearColor(1.f, 0.75f, 0.35f));
 				Y += 16.f;
 				Canvas->DrawShadowedString(12.f, Y,
-					TEXT("Automatic arrows are OFF by default (Roads > Auto turn arrows). Pick an arrow in the Road Mark dropdown to place them by hand."),
+					TEXT("Automatic arrows are ON (Roads > Auto turn arrows) and sit behind each stop line. Pick an arrow in the Road Mark dropdown to add one by hand."),
 					GEngine->GetSmallFont(), FLinearColor(0.85f, 0.7f, 0.4f));
 				Y += 16.f;
 			}
+		}
+
+		// Draw tool mid-draft: the +/- width keys only exist while a draft is
+		// open, so advertise them there along with the values they are editing.
+		if (Ti == (int32)ERoadNetDrawTool::Draw && DraftPoints.Num() > 0)
+		{
+			const ARoadNetActor* A = NetActorPtr.Get();
+			const int32 Lanes = A ? FMath::Max(1, A->DraftLaneCount) : 2;
+			const bool  bWalk = A ? A->bDraftSidewalks : true;
+			const float WalkW = A ? A->DraftSidewalkWidthCm : 200.f;
+			Canvas->DrawShadowedString(12.f, Y,
+				*FString::Printf(TEXT("%d lane%s  ·  sidewalk %s  ·  +/- lanes, Shift +/- sidewalk  ·  Enter commits, Backspace undoes a point"),
+					Lanes, Lanes == 1 ? TEXT("") : TEXT("s"),
+					bWalk ? *FString::Printf(TEXT("%.0f cm"), WalkW) : TEXT("off")),
+				GEngine->GetSmallFont(), FLinearColor(0.4f, 1.f, 0.4f));
+			Y += 16.f;
 		}
 
 		// Which surface a click would land on, resolved from the cursor ray. The

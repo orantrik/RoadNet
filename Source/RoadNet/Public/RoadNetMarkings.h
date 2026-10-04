@@ -32,4 +32,22 @@ namespace RoadNetMarkings
 		bool bJointAtEnd,
 		TArray<UE::Geometry::FGeneralPolygon2d>& OutWhite,
 		TArray<UE::Geometry::FGeneralPolygon2d>& OutYellow);
+
+	// Dash an arbitrary polyline into ribbon polygons of total width 2*HalfWCm,
+	// cutting DashLenCm of paint every DashLenCm+GapLenCm. Appends to Out.
+	//
+	// The road markings above dash lines they derive themselves from a lane
+	// offset; this takes a path somebody else built. The junction turn guide
+	// (LOT"M 809) is the reason it exists: its path is a lane-graph turn
+	// movement, which has no lane offset to be derived from.
+	ROADNET_API void DashPolyline(
+		const TArray<FVector>& Path,
+		double DashLenCm, double GapLenCm, double HalfWCm,
+		TArray<UE::Geometry::FGeneralPolygon2d>& Out);
+
+	// Drive DashPolyline over the cases that would break a junction turn guide:
+	// degenerate inputs that must refuse rather than hang, the dash count over a
+	// known length, and paint area roughly matching dash/(dash+gap) of the strip.
+	// Run via RoadNet.DashSelfCheck.
+	ROADNET_API bool DashSelfCheck(FString& OutReport);
 }

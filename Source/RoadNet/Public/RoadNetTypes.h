@@ -398,6 +398,64 @@ struct ROADNET_API FRoadNetLaneSpec
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
 	float SidewalkWidth = 200.f;      // 2 m
 
+	// Per-point sidewalk width overrides (Edge tool). Reuses FRoadNetEdgeKnot's
+	// (distance → value) shape, but Offset carries a WIDTH in cm here, never a
+	// lateral position, so it is always >= 0. Distances are arc length along the
+	// reference centreline. Empty ⇒ the uniform SidewalkWidth applies to that
+	// side, so an un-edited road behaves exactly as before.
+	//
+	// Widening one stretch of footway makes the walk's own width mask wider only
+	// where the knots say so; anything that needs a BOUND (band dilation, deform
+	// corridor, zone extents) must use MaxSidewalkWidth() instead, or the bulge
+	// falls outside the mask that is supposed to contain it.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	TArray<FRoadNetEdgeKnot> SidewalkKnotsLeft;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Lanes")
+	TArray<FRoadNetEdgeKnot> SidewalkKnotsRight;
+
+	// Linear sample of a sorted (distance → value) knot list, clamped outside the
+	// authored range. Empty list returns Fallback.
+	static double SampleKnots(const TArray<FRoadNetEdgeKnot>& K, double DistCm, double Fallback)
+	{
+		const int32 N = K.Num();
+		if (N == 0) { return Fallback; }
+		if (N == 1 || DistCm <= K[0].Distance) { return K[0].Offset; }
+		if (DistCm >= K[N - 1].Distance)       { return K[N - 1].Offset; }
+		for (int32 i = 0; i + 1 < N; ++i)
+		{
+			const double A = K[i].Distance;
+			const double B = K[i + 1].Distance;
+			if (DistCm >= A && DistCm <= B)
+			{
+				const double Span = B - A;
+				const double t = (Span > KINDA_SMALL_NUMBER) ? (DistCm - A) / Span : 0.0;
+				return FMath::Lerp(K[i].Offset, K[i + 1].Offset, t);
+			}
+		}
+		return K[N - 1].Offset;
+	}
+
+	// Sidewalk width on one side at arc length DistCm. Geometry call sites want
+	// this; bounds call sites want MaxSidewalkWidth().
+	double SidewalkWidthAt(double DistCm, bool bLeft) const
+	{
+		const TArray<FRoadNetEdgeKnot>& K = bLeft ? SidewalkKnotsLeft : SidewalkKnotsRight;
+		return FMath::Max(0.0, SampleKnots(K, DistCm, (double)SidewalkWidth));
+	}
+
+	// Widest the footway ever gets on either side. A side with no knots still
+	// uses the uniform width, so that stays the floor unless BOTH sides are
+	// knotted — otherwise a road knotted on one side only would under-report.
+	double MaxSidewalkWidth() const
+	{
+		double W = (SidewalkKnotsLeft.Num() > 0 && SidewalkKnotsRight.Num() > 0)
+			? 0.0 : (double)SidewalkWidth;
+		for (const FRoadNetEdgeKnot& K : SidewalkKnotsLeft)  { W = FMath::Max(W, K.Offset); }
+		for (const FRoadNetEdgeKnot& K : SidewalkKnotsRight) { W = FMath::Max(W, K.Offset); }
+		return FMath::Max(0.0, W);
+	}
+
 	// ---- outboard cycle track (separated cycling) -------------------------
 	// A bike path built OUTSIDE the footway, so the sidewalk is what stands
 	// between riders and moving traffic. This is a different thing from

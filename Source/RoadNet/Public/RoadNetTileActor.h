@@ -89,6 +89,26 @@ public:
 	// HISMs instance-less, no splines, no child actors) — safe to retire.
 	bool IsEmptyTile() const;
 
+	// ---- authoring-time streaming (§ scale) -------------------------------
+	// Release/restore this tile's RENDER STATE. Unregistering a primitive frees
+	// its render proxy and the GPU resource views behind it; hiding it or giving
+	// it a cull distance frees neither, which is why neither can cure the D3D12
+	// descriptor-heap exhaustion a city's worth of resident tiles causes. The
+	// geometry itself is never touched, so streaming a tile back in restores it
+	// pixel-for-pixel — this costs no visual fidelity, it only stops paying for
+	// tiles that are kilometres away.
+	//
+	// World Partition cannot do this job for us here: these tiles are RF_Transient
+	// authoring output, and WP only streams saved (OFPA) actors.
+	void SetStreamedIn(bool bIn);
+	bool IsStreamedIn() const { return bStreamedIn; }
+
+	// Where this tile is, for the streamer to measure against the camera. Cached
+	// while the render state exists because an unregistered component reports no
+	// bounds — a streamed-out tile must still know where it is to come back.
+	FBox GetStreamBounds() const { return CachedBounds; }
+	void RefreshStreamBounds();
+
 private:
 	UPROPERTY()
 	TMap<FName, TObjectPtr<UDynamicMeshComponent>> MeshLayers;
@@ -112,4 +132,10 @@ private:
 
 	UPROPERTY()
 	TArray<TWeakObjectPtr<AActor>> ChildActors;
+
+	UPROPERTY(Transient)
+	bool bStreamedIn = true;
+
+	UPROPERTY(Transient)
+	FBox CachedBounds = FBox(ForceInit);
 };

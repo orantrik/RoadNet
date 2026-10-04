@@ -108,6 +108,12 @@ namespace OSMRoadNetBridge
 		}
 		Network->SetWorld(World);
 
+		// Capture the pre-import road list for undo. The caller owns the
+		// transaction so the roads and the terrain conform land in ONE step.
+		// Roads live on the network sub-object, so BOTH objects need marking.
+		NetActor->Modify();
+		Network->Modify();
+
 		// Refresh ONLY the OSM-sourced roads; hand-drawn roads are preserved (§9.4).
 		Network->RemoveRoadsBySource(ERoadNetSource::OSM);
 

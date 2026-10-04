@@ -124,7 +124,10 @@ void URoadNetwork::BuildFurniture(FRoadNetRebuildContext& Ctx) const
 			// mapping (see BuildSurfaceUnion): the +RightAxis side is driven by
 			// bSidewalkLeft, the −RightAxis side by bSidewalkRight. Combine that
 			// with the type's own side selection (bRight = +RightAxis side here).
-			const bool bHasWalk = (LS.SidewalkWidth > 0.f);
+			// Max, not the uniform width: this only asks "is there a walk at all".
+			// Placement is guarded exactly by the sidewalk polygons below, which
+			// already carry the per-point width.
+			const bool bHasWalk = (LS.MaxSidewalkWidth() > 0.0);
 			const bool bDoPlus  = FT.bRight && bHasWalk && LS.bSidewalkLeft;   // +RightAxis
 			const bool bDoMinus = FT.bLeft  && bHasWalk && LS.bSidewalkRight;  // −RightAxis
 			if (!bDoPlus && !bDoMinus) { continue; }

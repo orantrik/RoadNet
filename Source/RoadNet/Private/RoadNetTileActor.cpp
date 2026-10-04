@@ -160,6 +160,11 @@ void ARoadNetTileActor::TrackChildActor(AActor* Child)
 
 void ARoadNetTileActor::ClearForRebuild()
 {
+	// The tile is about to be repopulated, so whatever extent the streamer
+	// measured is stale. Invalidating makes it re-measure once the new geometry
+	// is in, instead of deciding distance against the previous build's footprint.
+	CachedBounds = FBox(ForceInit);
+
 	// Empty every dynamic-mesh layer (component reused; content dropped).
 	for (TPair<FName, TObjectPtr<UDynamicMeshComponent>>& KV : MeshLayers)
 	{
@@ -194,6 +199,38 @@ void ARoadNetTileActor::ClearForRebuild()
 		if (AActor* A = C.Get()) { A->Destroy(); }
 	}
 	ChildActors.Reset();
+}
+
+void ARoadNetTileActor::RefreshStreamBounds()
+{
+	// Only meaningful while registered; a streamed-out tile keeps the last value.
+	if (!bStreamedIn) { return; }
+	const FBox B = GetComponentsBoundingBox(/*bNonColliding*/true, /*bIncludeFromChildActors*/false);
+	if (B.IsValid) { CachedBounds = B; }
+}
+
+void ARoadNetTileActor::SetStreamedIn(bool bIn)
+{
+	if (bIn == bStreamedIn) { return; }
+
+	// Capture position BEFORE the render state goes away.
+	if (!bIn) { RefreshStreamBounds(); }
+
+	auto Apply = [bIn](UActorComponent* C)
+	{
+		if (!C) { return; }
+		if (bIn) { if (!C->IsRegistered()) { C->RegisterComponent();   } }
+		else     { if ( C->IsRegistered()) { C->UnregisterComponent(); } }
+	};
+
+	for (TPair<FName, TObjectPtr<UDynamicMeshComponent>>& KV : MeshLayers) { Apply(KV.Value.Get()); }
+	for (TPair<FName, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>>& KV : HISMs) { Apply(KV.Value.Get()); }
+	for (TObjectPtr<UDecalComponent>& D : Decals) { Apply(D.Get()); }
+	// Splines are deliberately left registered: they carry no material, texture
+	// or instance buffer (so they are not what exhausts the descriptor heap) and
+	// PCG reads them as DATA, which unregistering would hide from the graph.
+
+	bStreamedIn = bIn;
 }
 
 bool ARoadNetTileActor::IsEmptyTile() const

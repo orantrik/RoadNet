@@ -91,11 +91,43 @@ namespace RoadNetMesh
 		double UVUnitCm = 100.0,
 		bool bGradientNormals = false,
 		bool bWorldUVs = false,
-		bool bSkirtToGround = false);
+		bool bSkirtToGround = false,
+		// A height field already built from these same CenterLines. Building one
+		// costs O(all centreline points), so a caller that meshes MANY pieces
+		// against one zone's centrelines (the per-tile commit does, thousands of
+		// times) must build it once and pass it here — otherwise every piece
+		// silently rebuilds the whole zone's field. Must be built from
+		// CenterLines, or vertices will take their Z from the wrong roads.
+		const FCenterlineHeightField* PrebuiltField = nullptr);
 
 	// Enable attributes and compute per-vertex normals (call once, after all
 	// zones have been appended). No-op on an empty mesh.
 	ROADNET_API void FinalizeNormals(UE::Geometry::FDynamicMesh3& Mesh);
+
+	// ---- normal / winding repair ------------------------------------------
+	// Shared by the live tile commit and the static-mesh bake, so what you see
+	// in the viewport is what gets baked. Both are conservative: healthy data is
+	// left byte-identical, and neither recomputes RoadNet's gradient normals.
+
+	// Replace only DEFECTIVE normals — zero-length, non-finite, or triangles
+	// with no normal elements at all — with an angle-weighted vertex normal.
+	// Returns how many defects were repaired.
+	ROADNET_API int32 RepairNormals(UE::Geometry::FDynamicMesh3& Mesh);
+
+	// Reverse any triangle whose winding disagrees with its own authored
+	// normals. The dynamic-mesh renderer hides a flipped winding; a baked static
+	// mesh does not, and back-face culling eats those triangles, which is the
+	// streak/trace artifact that otherwise needs Modeling > Normals > "Fix
+	// Inconsistent Normals" + "Invert" by hand. Normal VALUES are untouched, so
+	// shading is unchanged — only the culling side moves. Run AFTER
+	// RepairNormals so every triangle has normals to compare against. Returns
+	// how many triangles were reversed.
+	ROADNET_API int32 RepairWinding(UE::Geometry::FDynamicMesh3& Mesh);
+
+	// Drive both repairs over a quad with each defect deliberately injected, and
+	// verify they fix exactly what they should and leave a healthy mesh alone.
+	// Run via RoadNet.MeshRepairSelfCheck.
+	ROADNET_API bool RepairSelfCheck(FString& OutReport);
 
 	// Z of the first centerline point (a sane Fallback for SampleHeight).
 	ROADNET_API double FirstCenterlineZ(const TArray<const TArray<FVector>*>& CenterLines);

@@ -369,8 +369,10 @@ void URoadNetwork::BindParcelsToStreet(FRoadNetRebuildContext& Ctx)
 	auto BandOuterOf = [this](int32 RoadIdx) -> double
 	{
 		const FRoadNetLaneSpec& RL = Roads[RoadIdx].Lanes;
+		// Widest walk: this is an outer BOUND for "is this vertex on the street",
+		// so a knotted bulge must fall inside it.
 		return FMath::Max(50.0, (double)RL.HalfWidthCm())
-			+ ((RL.bSidewalkLeft || RL.bSidewalkRight) ? (double)FMath::Max(0.f, RL.SidewalkWidth) : 0.0);
+			+ ((RL.bSidewalkLeft || RL.bSidewalkRight) ? RL.MaxSidewalkWidth() : 0.0);
 	};
 
 	// A vertex "belongs to the street" within the pavement plus a margin.
@@ -869,6 +871,40 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 		RoadBox.Add(KV.Key, B);
 	}
 
+	// Roads bucketed by the cells their SAMPLED POINTS fall in, so a parcel only
+	// considers roads that actually run past it.
+	//
+	// This replaces the ponytail note above: the bounding-box guard alone does not
+	// hold at city scale, because a 5 km road's box covers a large part of the map
+	// and most parcels pass it — then pay two full polyline walks of that road.
+	// 2554 parcels x 6653 roads was what remained of this stage after the obstacle
+	// union was fixed. A road's box is one blunt rectangle; its cells are its
+	// actual path.
+	constexpr double kRoadGridCm = 20000.0; // 200 m
+	TMultiMap<FIntPoint, int32> RoadGrid;
+	double MaxRoadBandCm = 0.0;
+	{
+		TSet<TPair<FIntPoint, int32>> Seen;
+		for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+		{
+			if (KV.Value.Sampled.Num() < 2) { continue; }
+			if (Roads.IsValidIndex(KV.Key))
+			{
+				const FRoadNetLaneSpec& RL = Roads[KV.Key].Lanes;
+				MaxRoadBandCm = FMath::Max(MaxRoadBandCm,
+					FMath::Max(50.0, (double)RL.HalfWidthCm())
+					+ ((RL.bSidewalkLeft || RL.bSidewalkRight) ? RL.MaxSidewalkWidth() : 0.0));
+			}
+			for (const FVector& P : KV.Value.Sampled)
+			{
+				const FIntPoint C(FMath::FloorToInt32(P.X / kRoadGridCm),
+				                  FMath::FloorToInt32(P.Y / kRoadGridCm));
+				const TPair<FIntPoint, int32> Key(C, KV.Key);
+				if (!Seen.Contains(Key)) { Seen.Add(Key); RoadGrid.Add(C, KV.Key); }
+			}
+		}
+	}
+
 	// Everything a path must not cover, unioned once rather than per parcel: the plots themselves
 	// (the path stops AT a boundary, and a seated pad must stay untouched) and the carriageway
 	// (a footpath may reach the kerb, never cross it). Built AFTER the binding pass above, so
@@ -880,10 +916,46 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 		if (RingToPolygon(P.Pts, GP)) { Obstacles.Add(MoveTemp(GP)); }
 	}
 	for (const TArray<FGeneralPolygon2d>& ZoneSurf : Ctx.ZoneSurfacePolys) { Obstacles.Append(ZoneSurf); }
+	const double tObs0 = FPlatformTime::Seconds();
+	const int32 ObsIn = Obstacles.Num();
 	{
 		TArray<FGeneralPolygon2d> Merged;
 		if (RoadNetSurface::Union(Obstacles, Merged)) { Obstacles = MoveTemp(Merged); }
 	}
+	// Chop the merged obstacles into cells before anything measures them.
+	//
+	// The union above leaves the carriageway as a handful of CITY-SPANNING
+	// polygons — the road network is one connected thing — so the per-parcel
+	// bounding-box narrowing below could never reject any of them, and every one
+	// of 2554 plots paid the whole city's vertex count to trim a spur a few
+	// metres long. Chopping is the only thing that helps: a box test cannot
+	// discard a polygon that covers the map, but after the chop the pieces are
+	// local and almost all of them are discarded.
+	{
+		const double tChop = FPlatformTime::Seconds();
+		const int32 Before = Obstacles.Num();
+		TArray<FGeneralPolygon2d> Chopped;
+		RoadNetSurface::ChopToCells(Obstacles, /*CellCm=*/20000.0, Chopped);
+		Obstacles = MoveTemp(Chopped);
+		UE_LOG(LogRoadNet, Log,
+			TEXT("[RoadNet] ParcelAccess: chopped obstacles %d -> %d piece(s) in %.1f s."),
+			Before, Obstacles.Num(), FPlatformTime::Seconds() - tChop);
+	}
+
+	// Cached once for the per-parcel narrowing below.
+	TArray<FBox2D> ObstacleBoxes;
+	ObstacleBoxes.Reserve(Obstacles.Num());
+	for (const FGeneralPolygon2d& O : Obstacles)
+	{
+		const FAxisAlignedBox2d B = O.Bounds();
+		FBox2D Box(ForceInit);
+		Box += FVector2D(B.Min.X, B.Min.Y);
+		Box += FVector2D(B.Max.X, B.Max.Y);
+		ObstacleBoxes.Add(Box);
+	}
+	UE_LOG(LogRoadNet, Log,
+		TEXT("[RoadNet] ParcelAccess: %d parcel(s), obstacle union %d -> %d in %.1f s."),
+		Parcels.Num(), ObsIn, Obstacles.Num(), FPlatformTime::Seconds() - tObs0);
 
 	int32 Built = 0, TooFar = 0, AlreadyReached = 0, Degenerate = 0;
 
@@ -897,10 +969,30 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 		FVector2D BestEdgeDir = FVector2D(1.0, 0.0);
 		RoadNetMath::FProjectResult BestPR;
 
-		for (const TPair<int32, FRoadCurves>& KV : Ctx.Curves)
+		// Only the roads whose cells the plot's reach touches (see RoadGrid).
+		TSet<int32> Candidates;
 		{
-			const int32 r = KV.Key;
-			if (!Roads.IsValidIndex(r) || KV.Value.Sampled.Num() < 2) { continue; }
+			const FBox2D Q = Parcel.Box.ExpandBy(ReachCm + MaxRoadBandCm);
+			const int32 X0 = FMath::FloorToInt32(Q.Min.X / kRoadGridCm);
+			const int32 X1 = FMath::FloorToInt32(Q.Max.X / kRoadGridCm);
+			const int32 Y0 = FMath::FloorToInt32(Q.Min.Y / kRoadGridCm);
+			const int32 Y1 = FMath::FloorToInt32(Q.Max.Y / kRoadGridCm);
+			TArray<int32> Cell;
+			for (int32 y = Y0; y <= Y1; ++y)
+			{
+				for (int32 x = X0; x <= X1; ++x)
+				{
+					Cell.Reset();
+					RoadGrid.MultiFind(FIntPoint(x, y), Cell);
+					for (int32 r : Cell) { Candidates.Add(r); }
+				}
+			}
+		}
+
+		for (int32 r : Candidates)
+		{
+			const FRoadCurves* Cur = Ctx.Curves.Find(r);
+			if (!Cur || !Roads.IsValidIndex(r) || Cur->Sampled.Num() < 2) { continue; }
 			if (!RoadZone.Contains(r)) { continue; }
 			// A bridge deck or a tunnel bore has no kerb at ground level to branch from.
 			if (Roads[r].bBridge || Roads[r].bTunnel || Roads[r].Layer != 0) { continue; }
@@ -910,7 +1002,7 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 			// one box: expanding both would quietly double the setting.
 			const FRoadNetLaneSpec& RL = Roads[r].Lanes;
 			const double RBandOuter = FMath::Max(50.0, (double)RL.HalfWidthCm())
-				+ ((RL.bSidewalkLeft || RL.bSidewalkRight) ? (double)FMath::Max(0.f, RL.SidewalkWidth) : 0.0);
+				+ ((RL.bSidewalkLeft || RL.bSidewalkRight) ? RL.MaxSidewalkWidth() : 0.0);
 			if (const FBox2D* B = RoadBox.Find(r))
 			{
 				if (!B->ExpandBy(ReachCm + RBandOuter).Intersect(Parcel.Box)) { continue; }
@@ -920,11 +1012,11 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 			// the ring point nearest THAT, then re-project. Two cheap steps instead of testing
 			// every ring vertex against every road.
 			const RoadNetMath::FProjectResult Coarse =
-				RoadNetMath::ProjectToPolyline(KV.Value.Sampled, Parcel.Centroid);
+				RoadNetMath::ProjectToPolyline(Cur->Sampled, Parcel.Centroid);
 			FVector2D EdgeDir;
 			const FVector2D OnRing = ClosestOnRing(Parcel.Pts, Coarse.Point, EdgeDir);
 			const RoadNetMath::FProjectResult PR =
-				RoadNetMath::ProjectToPolyline(KV.Value.Sampled, OnRing);
+				RoadNetMath::ProjectToPolyline(Cur->Sampled, OnRing);
 			if (PR.Distance < BestDist)
 			{
 				BestDist = PR.Distance; BestRoad = r;
@@ -979,8 +1071,13 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 		// the centreline, so it starts where the pavement actually ends.
 		const FRoadNetLaneSpec& L = Roads[BestRoad].Lanes;
 		const double Half = FMath::Max(50.0, (double)L.HalfWidthCm());
+		// Per-point width, not the max: the spur leaves from where the pavement
+		// ends AT THIS FRONTAGE, so a narrow stretch must not push it out to the
+		// width of a bulge somewhere else on the road. The +offset side is the
+		// one bSidewalkLeft controls (see the tile emitter's EmitSide calls).
+		const bool bWalkLeft = (BestPR.Offset >= 0.0);
 		const double WalkW = (L.bSidewalkLeft || L.bSidewalkRight)
-			? (double)FMath::Max(0.f, L.SidewalkWidth) : 0.0;
+			? L.SidewalkWidthAt(BestPR.AlongDist, bWalkLeft) : 0.0;
 		const double BandOuter = Half + WalkW;
 
 		if (BestDist - BandOuter > ReachCm) { ++TooFar; continue; }
@@ -1018,8 +1115,29 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 		TArray<FGeneralPolygon2d> Shape;
 		if (!RoadNetSurface::Union(Pieces, Shape) || Shape.Num() == 0) { ++Degenerate; continue; }
 
+		// Cut only against the obstacles that can actually reach this spur. A spur
+		// is a few metres long and the obstacle set is every plot plus the whole
+		// carriageway, so the unnarrowed difference made each parcel pay the city's
+		// vertex count.
+		FBox2D ShapeBox(ForceInit);
+		for (const FGeneralPolygon2d& S : Shape)
+		{
+			const FAxisAlignedBox2d B = S.Bounds();
+			ShapeBox += FVector2D(B.Min.X, B.Min.Y);
+			ShapeBox += FVector2D(B.Max.X, B.Max.Y);
+		}
+		TArray<FGeneralPolygon2d> NearObstacles;
+		for (int32 oi = 0; oi < Obstacles.Num(); ++oi)
+		{
+			if (ObstacleBoxes[oi].Intersect(ShapeBox)) { NearObstacles.Add(Obstacles[oi]); }
+		}
+
 		TArray<FGeneralPolygon2d> Trimmed;
-		if (!RoadNetSurface::Difference(Shape, Obstacles, Trimmed) || Trimmed.Num() == 0)
+		if (NearObstacles.Num() == 0)
+		{
+			Trimmed = Shape; // nothing nearby to cut against
+		}
+		else if (!RoadNetSurface::Difference(Shape, NearObstacles, Trimmed) || Trimmed.Num() == 0)
 		{
 			++AlreadyReached; // entirely swallowed by pavement or plots: nothing left to add
 			continue;

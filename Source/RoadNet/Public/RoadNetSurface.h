@@ -64,6 +64,15 @@ namespace RoadNetSurface
 		double InnerOff, double OuterOff,
 		UE::Geometry::FGeneralPolygon2d& Out);
 
+	// As BuildSideRibbon, but the OUTER rail carries a per-vertex offset so the
+	// ribbon can widen and narrow along the road (per-point sidewalk widths).
+	// OuterOffs must have Sampled.Num() entries, each signed to the same side as
+	// InnerOff and larger in magnitude. Returns false if degenerate or mismatched.
+	ROADNET_API bool BuildSideRibbonVariable(
+		const TArray<FVector>& Sampled,
+		double InnerOff, const TArray<double>& OuterOffs,
+		UE::Geometry::FGeneralPolygon2d& Out);
+
 	// Build clean strip polygon(s) by thickening an (open) centreline by HalfWidth
 	// on each side through Clipper (round joins, butt ends). Unlike BuildSideRibbon
 	// — which loops two raw miter offsets and can self-cross on the inside of a
@@ -99,6 +108,22 @@ namespace RoadNetSurface
 	// band) as a single ring so kerbs wrap only the outside, never an inner seam.
 	ROADNET_API bool Union(
 		const TArray<UE::Geometry::FGeneralPolygon2d>& Polys,
+		TArray<UE::Geometry::FGeneralPolygon2d>& Out);
+
+	// Recursively bisect polygons until each piece's bounding box fits CellCm.
+	//
+	// A city-wide union leaves a FEW enormous polygons (10^5+ vertices each), and
+	// every later boolean pays the full vertex count of whichever operand it
+	// touches. Bounding-box narrowing cannot rescue that — it can never reject a
+	// polygon that covers everything — so the only fix is to make the operands
+	// local. Chopping once makes every subsequent boolean cheap.
+	//
+	// Region-exact: the two half-rectangles tile the bounding box, so the pieces
+	// tile the input. The only change is seam vertices along the chop lines, which
+	// triangulate as coplanar (invisible) edges.
+	ROADNET_API void ChopToCells(
+		const TArray<UE::Geometry::FGeneralPolygon2d>& In,
+		double CellCm,
 		TArray<UE::Geometry::FGeneralPolygon2d>& Out);
 
 	// Sum of |outer area| across polygons (cm^2) — for logging/QA.

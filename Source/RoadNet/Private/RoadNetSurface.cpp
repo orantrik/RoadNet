@@ -3,6 +3,7 @@
 #include "RoadNetwork.h"
 #include "RoadNetMath.h"
 #include "RoadNetLog.h"
+#include "Async/ParallelFor.h"
 #include "Polygon2.h"
 #include "CompGeom/ConvexHull2.h"
 #include "Curve/PolygonIntersectionUtils.h"
@@ -124,16 +125,28 @@ namespace RoadNetSurface
 		}
 		In.Reset();
 
-		TArray<FGeneralPolygon2d> Reduced;
-		Reduced.Reserve(Cells.Num());
-		for (auto& KV : Cells)
+		// One cell's union cannot see another's — that is the whole point of the
+		// spatial split — so run them in parallel. Flattened to an array first
+		// because a TMap cannot be indexed, and each cell writes only its own
+		// output slot.
+		TArray<TArray<FGeneralPolygon2d>*> CellList;
+		CellList.Reserve(Cells.Num());
+		for (auto& KV : Cells) { CellList.Add(&KV.Value); }
+
+		TArray<TArray<FGeneralPolygon2d>> CellOut;
+		CellOut.SetNum(CellList.Num());
+		ParallelFor(CellList.Num(), [&CellList, &CellOut](int32 i)
 		{
-			TArray<FGeneralPolygon2d>& Cell = KV.Value;
-			if (Cell.Num() == 1) { Reduced.Add(MoveTemp(Cell[0])); continue; }
+			TArray<FGeneralPolygon2d>& Cell = *CellList[i];
+			if (Cell.Num() == 1) { CellOut[i].Add(MoveTemp(Cell[0])); return; }
 			TArray<FGeneralPolygon2d> U;
-			if (PolygonsUnion(Cell, U, /*bCopyInputOnFailure*/true)) { Reduced.Append(MoveTemp(U)); }
-			else { Reduced.Append(MoveTemp(Cell)); }
-		}
+			if (PolygonsUnion(Cell, U, /*bCopyInputOnFailure*/true)) { CellOut[i] = MoveTemp(U); }
+			else { CellOut[i] = MoveTemp(Cell); }
+		});
+
+		TArray<FGeneralPolygon2d> Reduced;
+		Reduced.Reserve(CellList.Num());
+		for (TArray<FGeneralPolygon2d>& C : CellOut) { Reduced.Append(MoveTemp(C)); }
 
 		UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   surface: spatial union %d polys -> %d in %.0f m cells"),
 			InN, Reduced.Num(), CellCm / 100.0);
@@ -212,11 +225,35 @@ namespace RoadNetSurface
 		// A 35k-road import sat in this function for nine hours with nothing in the
 		// log; at city scale each phase gets a timestamped line so a stall names its
 		// phase itself.
-		const bool bTracePhases = Outlines.Num() >= 5000;
+		// Threshold was 5000, which is above what the sidewalk pass feeds in — so
+		// the slowest phases of a city import logged nothing at all. A few lines
+		// on a medium network is a far smaller cost than a silent stall.
+		const bool bTracePhases = Outlines.Num() >= 1000;
 		const double tUnion0 = FPlatformTime::Seconds();
 
+		// Announce the phase BEFORE the work, not after. Every line below reports
+		// a phase that has already finished, so a slow one is indistinguishable
+		// from a hang — which is exactly how this function kept being reported as
+		// frozen. The sidewalk-band pass in particular starts here in silence.
+		if (bTracePhases)
+		{
+			UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   surface: starting union of %d outline(s)..."),
+				Outlines.Num());
+		}
+
 		// Boolean union of all arm outlines -> filled, seamless junctions (§10.9).
-		if (!PolygonsUnion(Outlines, OutMerged, /*bCopyInputOnFailure*/true))
+		//
+		// Spatially, for the same reason the junction patches are: Clipper's cost
+		// on one global Execute() over thousands of overlapping city-wide ribbons
+		// is superlinear, and the band pass (wider outlines, far more mutual
+		// overlap than the carriageway) is where that bites. UnionSpatial unions
+		// neighbours first and finishes with a small overlay, giving the identical
+		// region. Outlines is COPIED because the per-junction pass below still
+		// needs the individual arms.
+		const bool bUnionOk = (Outlines.Num() > 64)
+			? UnionSpatial(Outlines, OutMerged, /*CellCm=*/20000.0)
+			: PolygonsUnion(Outlines, OutMerged, /*bCopyInputOnFailure*/true);
+		if (!bUnionOk)
 		{
 			UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet] Surface union failed; using unmerged outlines."));
 			return true; // OutMerged holds the copied input (bCopyInputOnFailure)
@@ -302,42 +339,57 @@ namespace RoadNetSurface
 				}
 			}
 		}
-		TBitArray<> Seen(false, Outlines.Num());
-		TArray<int32> Hits;
-		auto QueryBox = [&](const FAxisAlignedBox2d& Box)
+		// Junctions are independent of each other: Grid, OutlineBounds, Outlines
+		// and OutlineCurve are all read-only from here on, and each junction
+		// produces its own patches. The only mutable state is the query scratch,
+		// so every worker gets its own — one bit per outline, allocated once per
+		// worker rather than once per junction.
+		struct FJunctionScratch
 		{
-			Hits.Reset();
-			const int32 X0 = FMath::FloorToInt32(Box.Min.X / GridCellCm);
-			const int32 X1 = FMath::FloorToInt32(Box.Max.X / GridCellCm);
-			const int32 Y0 = FMath::FloorToInt32(Box.Min.Y / GridCellCm);
-			const int32 Y1 = FMath::FloorToInt32(Box.Max.Y / GridCellCm);
-			for (int32 y = Y0; y <= Y1; ++y)
+			TBitArray<>                Seen;
+			TArray<int32>              Hits;
+			TArray<const FRoadCurves*> NearCurves;
+			TArray<FGeneralPolygon2d>  Out;
+		};
+
+		const double tJunc0 = FPlatformTime::Seconds();
+		TArray<FJunctionScratch> Scratch;
+		// Capture by reference: ParallelFor is synchronous, so every captured local
+		// outlives the call, and all of them are read-only inside it.
+		ParallelForWithTaskContext(Scratch, PerJunction->Num(),
+			[&](FJunctionScratch& S, int32 ji)
+		{
+			const FJunctionClose& J = (*PerJunction)[ji];
+			if (J.CloseCm <= WeldCm) { return; } // no extra rounding at this junction
+
+			if (S.Seen.Num() != Outlines.Num()) { S.Seen.Init(false, Outlines.Num()); }
+
+			auto QueryBox = [&](const FAxisAlignedBox2d& Box)
 			{
-				for (int32 x = X0; x <= X1; ++x)
+				S.Hits.Reset();
+				const int32 X0 = FMath::FloorToInt32(Box.Min.X / GridCellCm);
+				const int32 X1 = FMath::FloorToInt32(Box.Max.X / GridCellCm);
+				const int32 Y0 = FMath::FloorToInt32(Box.Min.Y / GridCellCm);
+				const int32 Y1 = FMath::FloorToInt32(Box.Max.Y / GridCellCm);
+				for (int32 y = Y0; y <= Y1; ++y)
 				{
-					if (const TArray<int32>* Cell = Grid.Find(FIntPoint(x, y)))
+					for (int32 x = X0; x <= X1; ++x)
 					{
-						for (int32 i : *Cell)
+						if (const TArray<int32>* Cell = Grid.Find(FIntPoint(x, y)))
 						{
-							if (!Seen[i] && BoxesOverlap(OutlineBounds[i], Box))
+							for (int32 i : *Cell)
 							{
-								Seen[i] = true;
-								Hits.Add(i);
+								if (!S.Seen[i] && BoxesOverlap(OutlineBounds[i], Box))
+								{
+									S.Seen[i] = true;
+									S.Hits.Add(i);
+								}
 							}
 						}
 					}
 				}
-			}
-			for (int32 i : Hits) { Seen[i] = false; } // cheap stamp reset, no reallocation
-		};
-
-		const double tJunc0 = FPlatformTime::Seconds();
-		TArray<FGeneralPolygon2d> Patches;
-		Patches.Reserve(PerJunction->Num());
-		TArray<const FRoadCurves*> NearCurves;
-		for (const FJunctionClose& J : *PerJunction)
-		{
-			if (J.CloseCm <= WeldCm) { continue; } // no extra rounding at this junction
+				for (int32 i : S.Hits) { S.Seen[i] = false; } // stamp reset, no reallocation
+			};
 
 			// Only arms whose centreline enters the fill disc can shape the work
 			// radius (JunctionWorkRadius discards the rest by exact distance), and
@@ -346,13 +398,13 @@ namespace RoadNetSurface
 			QueryBox(FAxisAlignedBox2d(
 				FVector2d(J.Center.X - Pad, J.Center.Y - Pad),
 				FVector2d(J.Center.X + Pad, J.Center.Y + Pad)));
-			NearCurves.Reset();
-			for (int32 i : Hits)
+			S.NearCurves.Reset();
+			for (int32 i : S.Hits)
 			{
-				if (OutlineCurve[i]) { NearCurves.Add(OutlineCurve[i]); }
+				if (OutlineCurve[i]) { S.NearCurves.Add(OutlineCurve[i]); }
 			}
 
-			const double R = JunctionWorkRadius(J, NearCurves);
+			const double R = JunctionWorkRadius(J, S.NearCurves);
 			FGeneralPolygon2d Disc;
 			MakeDisc(J.Center, R, /*Segments*/48, Disc);
 			const TArray<FGeneralPolygon2d> DiscArr = { MoveTemp(Disc) };
@@ -360,16 +412,20 @@ namespace RoadNetSurface
 			QueryBox(FAxisAlignedBox2d(
 				FVector2d(J.Center.X - R, J.Center.Y - R),
 				FVector2d(J.Center.X + R, J.Center.Y + R)));
-			if (Hits.Num() == 0) { continue; }
+			if (S.Hits.Num() == 0) { return; }
 			TArray<FGeneralPolygon2d> Near;
-			Near.Reserve(Hits.Num());
-			for (int32 i : Hits) { Near.Add(Outlines[i]); }
+			Near.Reserve(S.Hits.Num());
+			for (int32 i : S.Hits) { Near.Add(Outlines[i]); }
 
 			TArray<FGeneralPolygon2d> Region;
-			if (!PolygonsIntersection(Near, DiscArr, Region) || Region.Num() == 0) { continue; }
+			if (!PolygonsIntersection(Near, DiscArr, Region) || Region.Num() == 0) { return; }
 			MorphClose(Region, J.CloseCm);
-			Patches.Append(MoveTemp(Region));
-		}
+			S.Out.Append(MoveTemp(Region));
+		});
+
+		TArray<FGeneralPolygon2d> Patches;
+		for (FJunctionScratch& S : Scratch) { Patches.Append(MoveTemp(S.Out)); }
+
 		if (bTracePhases)
 		{
 			UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   surface: %d junction patch(es) from %d junction(s) in %.1f s"),
@@ -404,13 +460,11 @@ namespace RoadNetSurface
 		return true;
 	}
 
-	bool BuildSideRibbon(const TArray<FVector>& Sampled, double InnerOff, double OuterOff,
+	// Close two already-offset rails into one ribbon loop. Shared by the fixed-
+	// and variable-width entry points so they cannot drift apart.
+	static bool CloseRibbon(const TArray<FVector>& Inner, const TArray<FVector>& Outer,
 		FGeneralPolygon2d& Out)
 	{
-		if (Sampled.Num() < 2) { return false; }
-		TArray<FVector> Inner, Outer;
-		RoadNetMath::OffsetPolyline(Sampled, InnerOff, Inner);
-		RoadNetMath::OffsetPolyline(Sampled, OuterOff, Outer);
 		if (Inner.Num() < 2 || Outer.Num() != Inner.Num()) { return false; }
 
 		TArray<FVector2d> Loop;
@@ -423,6 +477,26 @@ namespace RoadNetSurface
 		if (Poly.IsClockwise()) { Poly.Reverse(); }
 		Out.SetOuter(Poly);
 		return true;
+	}
+
+	bool BuildSideRibbon(const TArray<FVector>& Sampled, double InnerOff, double OuterOff,
+		FGeneralPolygon2d& Out)
+	{
+		if (Sampled.Num() < 2) { return false; }
+		TArray<FVector> Inner, Outer;
+		RoadNetMath::OffsetPolyline(Sampled, InnerOff, Inner);
+		RoadNetMath::OffsetPolyline(Sampled, OuterOff, Outer);
+		return CloseRibbon(Inner, Outer, Out);
+	}
+
+	bool BuildSideRibbonVariable(const TArray<FVector>& Sampled, double InnerOff,
+		const TArray<double>& OuterOffs, FGeneralPolygon2d& Out)
+	{
+		if (Sampled.Num() < 2 || OuterOffs.Num() != Sampled.Num()) { return false; }
+		TArray<FVector> Inner, Outer;
+		RoadNetMath::OffsetPolyline(Sampled, InnerOff, Inner);
+		RoadNetMath::OffsetPolylineVariable(Sampled, OuterOffs, Outer);
+		return CloseRibbon(Inner, Outer, Out);
 	}
 
 	bool BuildPathRibbon(const TArray<FVector>& Center, double HalfWidth,
@@ -469,18 +543,65 @@ namespace RoadNetSurface
 		OutBands.Reset();
 		if (SideRibbons.Num() == 0) { return true; }
 
+		// This function was completely silent and, on a city, accounted for five
+		// of a seven-minute import — the carriageway pass above at least named its
+		// phases. Both halves get a line now.
+		const bool bTrace = SideRibbons.Num() >= 1000;
+
 		// Union the per-road side strips so co-linear neighbours merge cleanly.
+		// Spatially, for the same reason the carriageway union is: one global
+		// Execute() over ~13k overlapping city-wide ribbons is superlinear.
+		const double tUnion0 = FPlatformTime::Seconds();
 		TArray<FGeneralPolygon2d> Merged;
-		if (!PolygonsUnion(SideRibbons, Merged, /*bCopyInputOnFailure*/true))
+		const bool bUnionOk = (SideRibbons.Num() > 64)
+			? UnionSpatial(SideRibbons, Merged, /*CellCm=*/20000.0)
+			: PolygonsUnion(SideRibbons, Merged, /*bCopyInputOnFailure*/true);
+		if (!bUnionOk && Merged.Num() == 0)
 		{
 			Merged = SideRibbons;
+		}
+		if (bTrace)
+		{
+			UE_LOG(LogRoadNet, Log, TEXT("[RoadNet]   bands: union of %d side ribbon(s) -> %d in %.1f s"),
+				SideRibbons.Num(), Merged.Num(), FPlatformTime::Seconds() - tUnion0);
 		}
 		if (Merged.Num() == 0) { return true; }
 
 		// Subtract the carriageway so a sidewalk never overlaps the road or a
 		// junction fill (the discs are already part of RoadPolys).
 		if (RoadPolys.Num() == 0) { OutBands = MoveTemp(Merged); return true; }
-		return PolygonsDifference(Merged, RoadPolys, OutBands);
+
+		// Per band, in parallel, against only the road polygons that can actually
+		// cut it. A single global difference makes every band pay the vertex count
+		// of the whole carriageway.
+		const double tDiff0 = FPlatformTime::Seconds();
+		TArray<FAxisAlignedBox2d> RoadBounds;
+		RoadBounds.Reserve(RoadPolys.Num());
+		for (const FGeneralPolygon2d& R : RoadPolys) { RoadBounds.Add(R.Bounds()); }
+
+		TArray<TArray<FGeneralPolygon2d>> PerBand;
+		PerBand.SetNum(Merged.Num());
+		ParallelFor(Merged.Num(), [&](int32 i)
+		{
+			const FAxisAlignedBox2d B = Merged[i].Bounds();
+			TArray<FGeneralPolygon2d> Cutters;
+			for (int32 j = 0; j < RoadPolys.Num(); ++j)
+			{
+				if (RoadBounds[j].Intersects(B)) { Cutters.Add(RoadPolys[j]); }
+			}
+			TArray<FGeneralPolygon2d> Subject = { Merged[i] };
+			if (Cutters.Num() == 0) { PerBand[i] = MoveTemp(Subject); return; }
+			if (!PolygonsDifference(Subject, Cutters, PerBand[i])) { PerBand[i] = MoveTemp(Subject); }
+		});
+		for (TArray<FGeneralPolygon2d>& P : PerBand) { OutBands.Append(MoveTemp(P)); }
+
+		if (bTrace)
+		{
+			UE_LOG(LogRoadNet, Log,
+				TEXT("[RoadNet]   bands: carriageway subtracted from %d band(s) -> %d in %.1f s"),
+				Merged.Num(), OutBands.Num(), FPlatformTime::Seconds() - tDiff0);
+		}
+		return true;
 	}
 
 	bool Difference(
@@ -499,7 +620,68 @@ namespace RoadNetSurface
 		Out.Reset();
 		if (Polys.Num() == 0) { return true; }
 		if (Polys.Num() == 1) { Out = Polys; return true; }
+		// Same spatial split the carriageway and sidewalk unions use, for the same
+		// reason: one global Execute() over thousands of overlapping city-wide
+		// polygons is superlinear. It matters HERE because the parcel stage unions
+		// every plot with the entire carriageway to build its obstacle set — the
+		// callers with a handful of pieces fall through to the plain union below,
+		// since UnionSpatial only splits above 64.
+		if (Polys.Num() > 64) { return UnionSpatial(Polys, Out, /*CellCm=*/20000.0); }
 		return PolygonsUnion(Polys, Out, /*bCopyInputOnFailure*/true);
+	}
+
+	// See the header for why chopping is the only thing that helps here.
+	static void ChopPolyToCell(FGeneralPolygon2d&& Poly, double CellCm,
+		TArray<FGeneralPolygon2d>& Out, int32 Depth = 0)
+	{
+		const FAxisAlignedBox2d B = Poly.Bounds();
+		const double W = B.Max.X - B.Min.X;
+		const double H = B.Max.Y - B.Min.Y;
+		// ponytail: depth 12 caps a pathological input at 4096 pieces; real input
+		// bottoms out far earlier (an 8 km zone needs ~6 splits per axis to 200 m).
+		if ((W <= CellCm && H <= CellCm) || Depth >= 12)
+		{
+			Out.Add(MoveTemp(Poly));
+			return;
+		}
+		const bool bSplitX = W >= H;
+		const double Mid = bSplitX ? 0.5 * (B.Min.X + B.Max.X) : 0.5 * (B.Min.Y + B.Max.Y);
+		auto HalfRect = [&](bool bLow) -> FGeneralPolygon2d
+		{
+			double x0 = B.Min.X - 10.0, x1 = B.Max.X + 10.0;
+			double y0 = B.Min.Y - 10.0, y1 = B.Max.Y + 10.0;
+			if (bSplitX) { (bLow ? x1 : x0) = Mid; }
+			else         { (bLow ? y1 : y0) = Mid; }
+			FPolygon2d R;
+			R.AppendVertex(FVector2d(x0, y0)); R.AppendVertex(FVector2d(x1, y0));
+			R.AppendVertex(FVector2d(x1, y1)); R.AppendVertex(FVector2d(x0, y1));
+			return FGeneralPolygon2d(R);
+		};
+		const TArray<FGeneralPolygon2d> Subject = { Poly };
+		const TArray<FGeneralPolygon2d> ClipLo  = { HalfRect(true) };
+		const TArray<FGeneralPolygon2d> ClipHi  = { HalfRect(false) };
+		TArray<FGeneralPolygon2d> Lo, Hi;
+		// BOTH halves must clip cleanly or the piece is kept whole — losing half
+		// the asphalt to a Clipper failure is worse than one slow polygon.
+		if (!PolygonsIntersection(Subject, ClipLo, Lo) ||
+			!PolygonsIntersection(Subject, ClipHi, Hi))
+		{
+			Out.Add(MoveTemp(Poly));
+			return;
+		}
+		for (FGeneralPolygon2d& P : Lo) { ChopPolyToCell(MoveTemp(P), CellCm, Out, Depth + 1); }
+		for (FGeneralPolygon2d& P : Hi) { ChopPolyToCell(MoveTemp(P), CellCm, Out, Depth + 1); }
+	}
+
+	void ChopToCells(const TArray<FGeneralPolygon2d>& In, double CellCm,
+		TArray<FGeneralPolygon2d>& Out)
+	{
+		Out.Reset();
+		Out.Reserve(In.Num());
+		for (const FGeneralPolygon2d& P : In)
+		{
+			ChopPolyToCell(FGeneralPolygon2d(P), CellCm, Out);
+		}
 	}
 
 	double TotalArea(const TArray<FGeneralPolygon2d>& Polys)
