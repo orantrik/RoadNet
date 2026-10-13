@@ -126,6 +126,22 @@ namespace RoadNetSurface
 		double CellCm,
 		TArray<UE::Geometry::FGeneralPolygon2d>& Out);
 
+	// One decal's footprint: a rectangle of 2*HalfLen along Axis by 2*HalfWide.
+	struct FPaintRect
+	{
+		FVector2d Center = FVector2d::ZeroVector;
+		FVector2d Axis = FVector2d(1.0, 0.0);
+		double HalfLen = 0.0, HalfWide = 0.0;
+	};
+
+	// Rectangles a decal can paint for one marking polygon. The booleans that
+	// build the banks merge touching paint (bars into their stop line) and a
+	// solid line follows its road's curve, so a polygon's box can be metres
+	// wider than its paint; any piece that does not nearly fill its box is
+	// bisected until it does.
+	ROADNET_API void SplitToPaintRects(const UE::Geometry::FGeneralPolygon2d& Mark,
+		TArray<FPaintRect>& Out);
+
 	// Sum of |outer area| across polygons (cm^2) — for logging/QA.
 	ROADNET_API double TotalArea(const TArray<UE::Geometry::FGeneralPolygon2d>& Polys);
 }

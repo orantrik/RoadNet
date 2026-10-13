@@ -397,8 +397,8 @@ public:
 	// Draw every painted mark as a projected decal instead of a meshed ribbon.
 	// Decals conform to whatever they land on — a resurfaced or resculpted road
 	// keeps its paint glued down, where a ribbon meshed at a fixed lift can float
-	// or sink. Requires the two decal materials below; without them the meshed
-	// ribbons are used, because a marking layer with no material is invisible.
+	// or sink. A slot that is empty or not a Deferred Decal material paints with
+	// /RoadNet/Materials/MI_RoadNetPaintWhite or MI_RoadNetPaintYellow.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Materials")
 	bool bMarkingsAsDecals = false;
 
@@ -1262,6 +1262,15 @@ public:
 	// so cached selections/indices are invalid afterwards. Returns false if
 	// fewer than two valid distinct roads were given. Caller triggers Rebuild().
 	bool MergeRoads(TArrayView<const int32> RoadIndices);
+
+	// Weld two control points (X = road, Y = point) into one: Snap moves onto
+	// Keep. On two roads, an interior point first splits its road there, so
+	// both meet as road ends and BuildEndpointJoints joins them into one
+	// junction; the moved ends adopt Keep's OSM node id. On one road, neighbours
+	// collapse to one point and the two ends close a loop. Road indices only
+	// grow, except a one-road merge that empties its road. False (OutMsg says
+	// why) when nothing changed. Caller triggers Rebuild().
+	bool MergeRoadPoints(FIntPoint Keep, FIntPoint Snap, FString& OutMsg);
 
 	// Replace the selected roads with one closed circular ring (Kåsa fit of
 	// their points), delete the sources, and retrim nearby approach endpoints

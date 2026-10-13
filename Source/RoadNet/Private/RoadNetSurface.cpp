@@ -684,6 +684,79 @@ namespace RoadNetSurface
 		}
 	}
 
+	// Box aligned with the longest outer edge: for a thin mark that edge is its length.
+	static bool PaintBox(const FGeneralPolygon2d& P, FPaintRect& R)
+	{
+		const TArray<FVector2d>& V = P.GetOuter().GetVertices();
+		if (V.Num() < 3) { return false; }
+		int32 Longest = 0;
+		double LongestLen2 = -1.0;
+		for (int32 i = 0; i < V.Num(); ++i)
+		{
+			const double L2 = (V[(i + 1) % V.Num()] - V[i]).SizeSquared();
+			if (L2 > LongestLen2) { LongestLen2 = L2; Longest = i; }
+		}
+		FVector2d Axis = V[(Longest + 1) % V.Num()] - V[Longest];
+		if (!Axis.Normalize()) { return false; }
+		const FVector2d Perp(-Axis.Y, Axis.X);
+		double LoA = TNumericLimits<double>::Max(), HiA = -LoA;
+		double LoP = TNumericLimits<double>::Max(), HiP = -LoP;
+		for (const FVector2d& Q : V)
+		{
+			const double A = Q.Dot(Axis), B = Q.Dot(Perp);
+			LoA = FMath::Min(LoA, A); HiA = FMath::Max(HiA, A);
+			LoP = FMath::Min(LoP, B); HiP = FMath::Max(HiP, B);
+		}
+		R.Axis = Axis;
+		R.HalfLen = 0.5 * (HiA - LoA);
+		R.HalfWide = 0.5 * (HiP - LoP);
+		R.Center = Axis * (0.5 * (LoA + HiA)) + Perp * (0.5 * (LoP + HiP));
+		return true;
+	}
+
+	static void SplitPaintRec(const FGeneralPolygon2d& P, TArray<FPaintRect>& Out, int32 Depth)
+	{
+		// 85% fill leaves a 15 cm line at most ~2.6 cm of overspray across a curve.
+		constexpr double kFill = 0.85, kMinHalfCm = 8.0;
+		FPaintRect R;
+		if (!PaintBox(P, R)) { return; }
+		const double Area = FMath::Abs(P.SignedArea());
+		const double Long = FMath::Max(R.HalfLen, R.HalfWide);
+		// ponytail: depth 12 like ChopPolyToCell; kMinHalfCm stops it far earlier on real paint.
+		if (Area >= kFill * 4.0 * R.HalfLen * R.HalfWide || Long <= kMinHalfCm || Depth >= 12)
+		{
+			if (R.HalfLen >= 1.0 && R.HalfWide >= 1.0) { Out.Add(R); }
+			return;
+		}
+		// Halve the box across its longer side.
+		const FVector2d Cut = R.HalfLen >= R.HalfWide ? R.Axis : FVector2d(-R.Axis.Y, R.Axis.X);
+		const FVector2d Side(-Cut.Y, Cut.X);
+		const double Across = FMath::Min(R.HalfLen, R.HalfWide) + 10.0, Along = Long + 10.0;
+		auto Half = [&](double From, double To)
+		{
+			FPolygon2d Q;
+			Q.AppendVertex(R.Center + Cut * From - Side * Across);
+			Q.AppendVertex(R.Center + Cut * To   - Side * Across);
+			Q.AppendVertex(R.Center + Cut * To   + Side * Across);
+			Q.AppendVertex(R.Center + Cut * From + Side * Across);
+			return TArray<FGeneralPolygon2d>{ FGeneralPolygon2d(Q) };
+		};
+		const TArray<FGeneralPolygon2d> Subject = { P };
+		TArray<FGeneralPolygon2d> Lo, Hi;
+		if (!PolygonsIntersection(Subject, Half(-Along, 0.0), Lo) || !PolygonsIntersection(Subject, Half(0.0, Along), Hi))
+		{
+			Out.Add(R);
+			return;
+		}
+		for (const FGeneralPolygon2d& Piece : Lo) { SplitPaintRec(Piece, Out, Depth + 1); }
+		for (const FGeneralPolygon2d& Piece : Hi) { SplitPaintRec(Piece, Out, Depth + 1); }
+	}
+
+	void SplitToPaintRects(const FGeneralPolygon2d& Mark, TArray<FPaintRect>& Out)
+	{
+		SplitPaintRec(Mark, Out, 0);
+	}
+
 	double TotalArea(const TArray<FGeneralPolygon2d>& Polys)
 	{
 		double A = 0.0;

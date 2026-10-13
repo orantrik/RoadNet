@@ -1,7 +1,11 @@
 #include "RoadNetCurbs.h"
 #include "RoadNetMath.h"
+#include "RoadNetMesh.h"
+#include "DynamicMesh/DynamicMesh3.h"
+#include "DynamicMesh/DynamicMeshAttributeSet.h"
 #include "RoadNetSurface.h"
 #include "RoadNetwork.h"
+#include "Materials/Material.h"
 #include "Misc/AutomationTest.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -363,6 +367,233 @@ bool FRoadNetFitCircleTest::RunTest(const FString& Parameters)
 		FVector2D::Distance(C, TrueC) < 80.0);
 	TestTrue(FString::Printf(TEXT("Radius within 80 cm (got %.1f)"), R),
 		FMath::Abs(R - TrueR) < 80.0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoadNetSurfaceMeshInsideTest, "RoadNet.Mesh.TrianglesStayInsidePolygon",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadNetSurfaceMeshInsideTest::RunTest(const FString& Parameters)
+{
+	using namespace UE::Geometry;
+	// A 14 cm paint strip bent into a 100 m x 30 m U: thin and concave, so its convex hull
+	// is almost all outside it.
+	const FPolygon2d Strip(TArray<FVector2d>{
+		{0, -7}, {10007, -7}, {10007, 3007}, {0, 3007},
+		{0, 2993}, {9993, 2993}, {9993, 7}, {0, 7}});
+	const TArray<FVector> Centre = {FVector(0, 0, 0), FVector(10000, 0, 0), FVector(10000, 3000, 0)};
+	FDynamicMesh3 Mesh;
+	RoadNetMesh::AppendSurfaceMesh({FGeneralPolygon2d(Strip)}, {&Centre}, 0.0, Mesh);
+
+	const FGeneralPolygon2d GP(Strip);
+	double Area = 0.0;
+	for (const int32 Tid : Mesh.TriangleIndicesItr())
+	{
+		const FIndex3i T = Mesh.GetTriangle(Tid);
+		const FVector2d A(Mesh.GetVertex(T.A)), B(Mesh.GetVertex(T.B)), C(Mesh.GetVertex(T.C));
+		TestTrue(TEXT("Triangle centroid is inside the strip"), GP.Contains((A + B + C) / 3.0));
+		Area += 0.5 * FMath::Abs((B.X - A.X) * (C.Y - A.Y) - (B.Y - A.Y) * (C.X - A.X));
+	}
+	TestTrue(FString::Printf(TEXT("Triangles cover the strip exactly (%.0f vs %.0f cm^2)"), Area, Strip.Area()),
+		FMath::IsNearlyEqual(Area, Strip.Area(), 1.0));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoadNetSurfaceUVTest, "RoadNet.Mesh.UVsNonDegenerate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRoadNetSurfaceUVTest::RunTest(const FString& Parameters)
+{
+	using namespace UE::Geometry;
+	const double Unit = 100.0, S = 1.0 / Unit;
+	// Every triangle, top or wall, must map to UV space at close to its true size: a
+	// collapsed or smeared one has no tangent basis and shades wrong once normal-mapped.
+	auto Check = [&](const TCHAR* Label, const TArray<FGeneralPolygon2d>& Polys, const TArray<FVector>& Centre)
+	{
+		FDynamicMesh3 Mesh;
+		RoadNetMesh::AppendSurfaceMesh(Polys, {&Centre}, 15.0, Mesh, nullptr, true, Unit, true, false, true);
+		const FDynamicMeshUVOverlay* UVs = Mesh.Attributes()->PrimaryUV();
+		const FDynamicMeshNormalOverlay* Ns = Mesh.Attributes()->PrimaryNormals();
+		int32 Bad = 0, Checked = 0;
+		for (const int32 Tid : Mesh.TriangleIndicesItr())
+		{
+			const FIndex3i T = Mesh.GetTriangle(Tid);
+			const double A3 = 0.5 * (Mesh.GetVertex(T.B) - Mesh.GetVertex(T.A)).Cross(Mesh.GetVertex(T.C) - Mesh.GetVertex(T.A)).Length();
+			if (A3 < 1.0) { continue; }
+			FVector2f U[3]; FVector3f N[3];
+			UVs->GetTriElements(Tid, U[0], U[1], U[2]);
+			Ns->GetTriElements(Tid, N[0], N[1], N[2]);
+			const double AUV = 0.5 * FMath::Abs((double)((U[1].X - U[0].X) * (U[2].Y - U[0].Y) - (U[1].Y - U[0].Y) * (U[2].X - U[0].X)));
+			const double Q = AUV / (A3 * S * S);
+			++Checked;
+			if (Q < 0.25 || Q > 4.0 || !FMath::IsNearlyEqual(N[0].Length(), 1.f, 0.01f)) { ++Bad; }
+		}
+		TestTrue(FString::Printf(TEXT("%s: meshed (%d triangles)"), Label, Checked), Checked > 0);
+		TestEqual(FString::Printf(TEXT("%s: triangles with degenerate UVs or normals"), Label), Bad, 0);
+		// Front faces must match the authored normals, or a baked static mesh culls them.
+		TestEqual(FString::Printf(TEXT("%s: triangles wound against their normals"), Label), RoadNetMesh::RepairWinding(Mesh), 0);
+	};
+
+	// A road slab running 10 m past both ends of its centreline: end caps where every
+	// corner clamps to the same station.
+	const FPolygon2d Slab(TArray<FVector2d>{{0, -500}, {10000, -500}, {10000, 500}, {0, 500}});
+	Check(TEXT("End caps"), {FGeneralPolygon2d(Slab)}, {FVector(1000, 0, 0), FVector(9000, 0, 0)});
+
+	// A roundabout ring: a closed centreline whose stations jump from L back to 0.
+	TArray<FVector> Ring, Outer, Inner;
+	RoadNetMath::SampleCircle(FVector2D::ZeroVector, 1650.0, 0.0, 64, Ring);
+	RoadNetMath::SampleCircle(FVector2D::ZeroVector, 2000.0, 0.0, 64, Outer);
+	RoadNetMath::SampleCircle(FVector2D::ZeroVector, 1300.0, 0.0, 64, Inner);
+	auto ToPoly = [](const TArray<FVector>& P)
+	{
+		FPolygon2d Out;
+		for (const FVector& V : P) { if (Out.VertexCount() == 0 || FVector2d(V) != Out.GetVertices().Last()) { Out.AppendVertex(FVector2d(V)); } }
+		if (Out.VertexCount() > 1 && Out.GetVertices()[0] == Out.GetVertices().Last()) { Out.RemoveVertex(Out.VertexCount() - 1); }
+		return Out;
+	};
+	FGeneralPolygon2d Annulus(ToPoly(Outer));
+	FPolygon2d Hole = ToPoly(Inner);
+	Hole.Reverse();
+	Annulus.AddHole(Hole, false, false);
+	Check(TEXT("Roundabout"), {Annulus}, Ring);
+	return true;
+}
+
+// Merge Points: the second point snaps onto the first and they become one node -
+// a junction on two roads, imported (node ids) or drawn (weld only).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoadNetMergePointsTest, "RoadNet.Edit.MergePoints",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRoadNetMergePointsTest::RunTest(const FString&)
+{
+	auto Road = [](TArray<FVector> Ref, TArray<int64> Ids = {})
+	{
+		FRoadDef R;
+		R.Ref = MoveTemp(Ref);
+		R.NodeIds = MoveTemp(Ids);
+		return R;
+	};
+	FString Msg;
+
+	// A drawn road's end onto an imported road's interior node: a T junction.
+	{
+		URoadNetwork* Net = NewObject<URoadNetwork>(GetTransientPackage());
+		Net->AddRoad(Road({ {0, 0, 0}, {5000, 0, 0}, {10000, 0, 0} }, { 1, 2, 3 }));
+		Net->AddRoad(Road({ {5000, 3000, 0}, {5000, 800, 0} }));
+		TestTrue(TEXT("T: merges"), Net->MergeRoadPoints(FIntPoint(0, 1), FIntPoint(1, 1), Msg));
+		const TArray<FRoadDef>& R = Net->GetRoads();
+		if (TestEqual(TEXT("T: the interior point split its road"), R.Num(), 3))
+		{
+			TestTrue(TEXT("T: the drawn end snapped onto the kept point"), R[1].Ref.Last().Equals(FVector(5000, 0, 0)));
+			TestEqual(TEXT("T: no doubled vertex at the cut"), R[0].Ref.Num(), 2);
+			TestTrue(TEXT("T: the far half starts at the junction"), R[2].Ref[0].Equals(FVector(5000, 0, 0)));
+			bool bStart = false, bEnd = false;
+			Net->GetJunctionEnds(1, bStart, bEnd);
+			TestTrue(TEXT("T: the drawn road now ends in a junction"), bEnd);
+		}
+	}
+
+	// An imported end leaving its own junction for another: it takes the kept node id.
+	{
+		URoadNetwork* Net = NewObject<URoadNetwork>(GetTransientPackage());
+		Net->AddRoad(Road({ {0, 0, 0}, {1000, 0, 0} }, { 10, 11 }));
+		FRoadDef Linked = Road({ {1000, 900, 0}, {3000, 900, 0} }, { 20, 21 });
+		Linked.StartLinks.AddDefaulted();
+		Net->AddRoad(Linked);
+		Net->AddRoad(Road({ {1000, 900, 0}, {1000, 3000, 0} }, { 20, 30 }));
+		TestTrue(TEXT("node: merges"), Net->MergeRoadPoints(FIntPoint(0, 1), FIntPoint(1, 0), Msg));
+		const TArray<FRoadDef>& R = Net->GetRoads();
+		TestTrue(TEXT("node: the end moved"), R[1].Ref[0].Equals(FVector(1000, 0, 0)));
+		TestEqual(TEXT("node: it adopts the kept node id"), R[1].NodeIds[0], (int64)11);
+		TestEqual(TEXT("node: its links to the old junction are gone"), R[1].StartLinks.Num(), 0);
+		TestTrue(TEXT("node: the old junction's other road is untouched"), R[2].Ref[0].Equals(FVector(1000, 900, 0)));
+	}
+
+	// One road: neighbours collapse, the two ends close a loop, interior pairs refuse.
+	{
+		URoadNetwork* Net = NewObject<URoadNetwork>(GetTransientPackage());
+		Net->AddRoad(Road({ {0, 0, 0}, {100, 0, 0}, {5000, 0, 0}, {9000, 0, 0}, {9000, 5000, 0} }));
+		TestTrue(TEXT("one road: neighbours merge"), Net->MergeRoadPoints(FIntPoint(0, 1), FIntPoint(0, 0), Msg));
+		TestEqual(TEXT("one road: one point fewer"), Net->GetRoads()[0].Ref.Num(), 4);
+		TestFalse(TEXT("one road: two interior points apart are refused"),
+			Net->MergeRoadPoints(FIntPoint(0, 1), FIntPoint(0, 3), Msg));
+		TestTrue(TEXT("one road: the ends close a loop"), Net->MergeRoadPoints(FIntPoint(0, 0), FIntPoint(0, 3), Msg));
+		TestTrue(TEXT("one road: loop end on its start"), Net->GetRoads()[0].Ref.Last().Equals(FVector(100, 0, 0)));
+	}
+	return true;
+}
+
+// A decal paints its whole box, so merged or curved marks must split until each
+// piece nearly fills its box - else a curved edge line washes the lane white.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoadNetPaintRectsTest, "RoadNet.Markings.DecalsHugPaint",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRoadNetPaintRectsTest::RunTest(const FString&)
+{
+	using namespace UE::Geometry;
+	auto Poly = [](const TArray<FVector2d>& Pts)
+	{
+		FPolygon2d P;
+		for (const FVector2d& Q : Pts) { P.AppendVertex(Q); }
+		if (P.IsClockwise()) { P.Reverse(); }
+		return FGeneralPolygon2d(P);
+	};
+	auto Check = [this](const TCHAR* What, const FGeneralPolygon2d& Mark, double MaxHalfWide)
+	{
+		TArray<RoadNetSurface::FPaintRect> Rects;
+		RoadNetSurface::SplitToPaintRects(Mark, Rects);
+		double Painted = 0.0, Widest = 0.0;
+		for (const RoadNetSurface::FPaintRect& R : Rects)
+		{
+			Painted += 4.0 * R.HalfLen * R.HalfWide;
+			Widest = FMath::Max(Widest, FMath::Min(R.HalfLen, R.HalfWide));
+		}
+		const double Area = FMath::Abs(Mark.SignedArea());
+		TestTrue(FString::Printf(TEXT("%s: decals cover the paint (%.0f of %.0f cm2)"), What, Painted, Area), Painted >= 0.99 * Area);
+		TestTrue(FString::Printf(TEXT("%s: overspray %.0f%%"), What, 100.0 * (Painted / Area - 1.0)), Painted <= 1.2 * Area);
+		TestTrue(FString::Printf(TEXT("%s: widest decal half-width %.1f cm"), What, Widest), Widest <= MaxHalfWide);
+		return Rects.Num();
+	};
+
+	TestEqual(TEXT("a straight dash is one decal"),
+		Check(TEXT("dash"), Poly({ {0, 0}, {300, 0}, {300, 15}, {0, 15} }), 7.6), 1);
+
+	TArray<FVector2d> Arc;
+	for (int32 i = 0; i <= 64; ++i)
+	{
+		const double A = HALF_PI * i / 64.0;
+		Arc.Add(FVector2d(FMath::Cos(A), FMath::Sin(A)) * 5007.5);
+	}
+	for (int32 i = 64; i >= 0; --i)
+	{
+		const double A = HALF_PI * i / 64.0;
+		Arc.Add(FVector2d(FMath::Cos(A), FMath::Sin(A)) * 4992.5);
+	}
+	Check(TEXT("curved edge line"), Poly(Arc), 9.0);
+
+	// A stop bar with five zebra bars fused to it.
+	TArray<FVector2d> Comb = { {0, 0}, {450, 0}, {450, 40} };
+	for (int32 b = 4; b >= 0; --b)
+	{
+		const double X = 50.0 + 80.0 * b;
+		Comb.Append({ {X + 50, 40}, {X + 50, 340}, {X, 340}, {X, 40} });
+	}
+	Comb.Add({ 0, 40 });
+	Check(TEXT("bars fused to a stop line"), Poly(Comb), 26.0);
+	return true;
+}
+
+// Markings As Decals falls back to these; a decal component cannot draw anything else.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRoadNetPaintDecalTest, "RoadNet.Markings.PaintDecalsAreDecals",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FRoadNetPaintDecalTest::RunTest(const FString&)
+{
+	for (const TCHAR* Path : { TEXT("/RoadNet/Materials/MI_RoadNetPaintWhite.MI_RoadNetPaintWhite"),
+		TEXT("/RoadNet/Materials/MI_RoadNetPaintYellow.MI_RoadNetPaintYellow") })
+	{
+		const UMaterialInterface* M = LoadObject<UMaterialInterface>(nullptr, Path);
+		const UMaterial* Base = M ? M->GetMaterial() : nullptr;
+		TestTrue(FString::Printf(TEXT("%s loads"), Path), Base != nullptr);
+		TestTrue(FString::Printf(TEXT("%s is a Deferred Decal"), Path), Base && Base->MaterialDomain == MD_DeferredDecal);
+	}
 	return true;
 }
 

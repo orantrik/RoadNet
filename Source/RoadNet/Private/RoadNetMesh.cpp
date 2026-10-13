@@ -157,11 +157,42 @@ namespace RoadNetMesh
 	RoadNetMath::FProjectResult FCenterlineHeightField::ProjectNearest(double X, double Y) const
 	{
 		RoadNetMath::FProjectResult Best;
-		if (Segs.Num() == 0) { return Best; }
+		double T = 0.0;
+		const int32 s = NearestSeg(X, Y, T);
+		if (s == INDEX_NONE) { return Best; }
+		const FSeg& G = Segs[s];
+		const FVector2D Q(X, Y);
+		Best.Point     = G.A + (G.B - G.A) * T;
+		Best.Distance  = FVector2D::Distance(Q, Best.Point);
+		Best.AlongDist = G.AlongA + T * G.Len;
+		Best.Offset    = (G.Len > KINDA_SMALL_NUMBER)
+			? RoadNetMath::Cross2D((G.B - G.A) / G.Len, Q - G.A) : 0.0;
+		Best.Segment   = G.Local;
+		return Best;
+	}
+
+	bool FCenterlineHeightField::NearestFrame(double X, double Y, FVector2D& OutOrigin, FVector2D& OutDir, double& OutAlongAtOrigin) const
+	{
+		double T = 0.0;
+		const int32 s = NearestSeg(X, Y, T);
+		if (s == INDEX_NONE || Segs[s].Len <= KINDA_SMALL_NUMBER) { return false; }
+		const FSeg& G = Segs[s];
+		OutOrigin = G.A;
+		OutDir = (G.B - G.A) / G.Len;
+		OutAlongAtOrigin = G.AlongA;
+		return true;
+	}
+
+	int32 FCenterlineHeightField::NearestSeg(double X, double Y, double& OutT) const
+	{
+		OutT = 0.0;
+		if (Segs.Num() == 0) { return INDEX_NONE; }
 		const FVector2D Q(X, Y);
 		const int32 CX = (int32)FMath::FloorToInt(X / CellCm);
 		const int32 CY = (int32)FMath::FloorToInt(Y / CellCm);
 
+		int32 BestSeg = INDEX_NONE;
+		double BestD = TNumericLimits<double>::Max(), BestAlong = 0.0;
 		TArray<int32, TInlineAllocator<32>> Bucket;
 		auto TestSeg = [&](int32 s)
 		{
@@ -172,15 +203,9 @@ namespace RoadNetMesh
 			const double Along = G.AlongA + T * G.Len;
 			// Same seam-safe tie-break as ProjectToPolyline so UVs don't flip
 			// between two segments sharing a vertex.
-			if (D < Best.Distance - 1e-4 ||
-				(FMath::Abs(D - Best.Distance) <= 1e-4 && Along < Best.AlongDist))
+			if (D < BestD - 1e-4 || (FMath::Abs(D - BestD) <= 1e-4 && Along < BestAlong))
 			{
-				Best.Distance  = D;
-				Best.AlongDist = Along;
-				Best.Offset    = (G.Len > KINDA_SMALL_NUMBER)
-					? RoadNetMath::Cross2D((G.B - G.A) / G.Len, Q - G.A) : 0.0;
-				Best.Segment   = G.Local;
-				Best.Point     = C;
+				BestD = D; BestAlong = Along; BestSeg = s; OutT = T;
 			}
 		};
 
@@ -201,15 +226,15 @@ namespace RoadNetMesh
 					for (int32 s : Bucket) { TestSeg(s); }
 				}
 			}
-			if (Best.Segment != INDEX_NONE && Best.Distance <= (double)Ring * CellCm) { break; }
+			if (BestSeg != INDEX_NONE && BestD <= (double)Ring * CellCm) { break; }
 		}
 		// Nothing within the capped neighbourhood (isolated island far from any
 		// centreline): fall back to the exhaustive scan so the answer is exact.
-		if (Best.Segment == INDEX_NONE)
+		if (BestSeg == INDEX_NONE)
 		{
 			for (int32 s = 0; s < Segs.Num(); ++s) { TestSeg(s); }
 		}
-		return Best;
+		return BestSeg;
 	}
 
 	double FCenterlineHeightField::SampleHeight(double X, double Y, double Fallback) const
@@ -501,15 +526,26 @@ namespace RoadNetMesh
 				GP.AddHole(CleanRing(Hole), /*bCheckContainment*/false, /*bCheckOrientation*/false);
 			}
 
-			TArray<FVector2d> Verts2D;
-			const TArray<FIndex3i> Tris = ConstrainedDelaunayTriangulateWithVertices<double>(GP, Verts2D);
+			// Keep a triangle only if it lies inside GP. The winding flood the convenience
+			// wrapper uses leaks through any constraint edge the triangulator failed to insert,
+			// and every convex-hull triangle behind the leak came back as a spike across the map.
+			// ponytail: Contains is O(ring size) per triangle; fine at tile-chopped polygon sizes.
+			TConstrainedDelaunay2<double> CDT;
+			CDT.Add(GP);
+			CDT.Triangulate([&GP](const TArray<FVector2d>& V, const FIndex3i& T)
+			{
+				return GP.Contains((V[T.A] + V[T.B] + V[T.C]) / 3.0);
+			});
+			const TArray<FVector2d>& Verts2D = CDT.Vertices;
+			const TArray<FIndex3i>& Tris = CDT.Triangles;
 			if (Tris.Num() == 0 || Verts2D.Num() < 3) { continue; }
 
 			// Append this polygon's vertices with re-projected elevation, plus a
 			// UV element and normal element per vertex (kept in parallel arrays).
 			TArray<int32> VMap, UVMap, NMap;
+			TArray<FVector2f> UVVal;
 			VMap.SetNumUninitialized(Verts2D.Num());
-			if (UVo) { UVMap.SetNumUninitialized(Verts2D.Num()); }
+			if (UVo) { UVMap.SetNumUninitialized(Verts2D.Num()); UVVal.SetNumUninitialized(Verts2D.Num()); }
 			if (No)  { NMap.SetNumUninitialized(Verts2D.Num()); }
 
 			for (int32 i = 0; i < Verts2D.Num(); ++i)
@@ -525,21 +561,67 @@ namespace RoadNetMesh
 					if (bWorldUVs)
 					{
 						// World-planar tiling (grass islands): no centreline mirror seam.
-						UVMap[i] = UVo->AppendElement(FVector2f(
-							(float)(P.X * UVScale), (float)(P.Y * UVScale)));
+						UVVal[i] = FVector2f((float)(P.X * UVScale), (float)(P.Y * UVScale));
 					}
 					else
 					{
 						const RoadNetMath::FProjectResult PR = ProjectNearest(FVector2D(P.X, P.Y));
-						UVMap[i] = UVo->AppendElement(FVector2f(
-							(float)(PR.Offset * UVScale), (float)(PR.AlongDist * UVScale)));
+						UVVal[i] = FVector2f((float)(PR.Offset * UVScale), (float)(PR.AlongDist * UVScale));
 					}
+					UVMap[i] = UVo->AppendElement(UVVal[i]);
 				}
 				if (No) { NMap[i] = No->AppendElement(GradientNormal(P.X, P.Y)); }
 			}
 
-			// Append triangles, forcing an upward (+Z) facing winding, and mirror
-			// that winding into the UV/normal overlays so corners line up.
+			// The nearest-centreline mapping is a near-isometry along a road, but it collapses
+			// to a line past a centreline end (end caps, corner arcs, junction cores: every
+			// corner clamps to the same station) and smears across a station jump (corners on
+			// two different roads, or either side of a closed loop's 0/L seam). A collapsed
+			// triangle has no tangent basis, which is the "nearly zero tangents/bi-normals" of
+			// the baked mesh and the wrong normal-map shading of the live tile. Such a triangle
+			// takes UVs from the straight frame of the segment nearest its centroid instead:
+			// the same mapping extended linearly, exact for every triangle. Corners shared by
+			// triangles on the same frame share one element, so a junction core is continuous
+			// wherever one segment rules it.
+			TMap<TTuple<int32, FVector2D, FVector2D>, int32> FrameElem;
+			auto FramedUV = [&](int32 i, const FVector2D& O, const FVector2D& Dir, double AlongO) -> int32
+			{
+				const TTuple<int32, FVector2D, FVector2D> Key(i, O, Dir);
+				if (const int32* E = FrameElem.Find(Key)) { return *E; }
+				const FVector2D V(Verts2D[i].X - O.X, Verts2D[i].Y - O.Y);
+				const int32 E = UVo->AppendElement(FVector2f(
+					(float)(RoadNetMath::Cross2D(Dir, V) * UVScale),
+					(float)((AlongO + FVector2D::DotProduct(Dir, V)) * UVScale)));
+				FrameElem.Add(Key, E);
+				return E;
+			};
+			// Mapped (Offset, Along) is a mirror of the plane: UV area = -XY area * UVScale^2.
+			auto IsIsometric = [&](int32 I0, int32 I1, int32 I2) -> bool
+			{
+				const FVector2d& A = Verts2D[I0];
+				const FVector2d& B = Verts2D[I1];
+				const FVector2d& C = Verts2D[I2];
+				const double XY = (B.X - A.X) * (C.Y - A.Y) - (B.Y - A.Y) * (C.X - A.X);
+				const FVector2f UA = UVVal[I0], UB = UVVal[I1], UC = UVVal[I2];
+				const double UV = (double)((UB.X - UA.X) * (UC.Y - UA.Y) - (UB.Y - UA.Y) * (UC.X - UA.X));
+				const double S2 = UVScale * UVScale;
+				if (FMath::Abs(XY) < KINDA_SMALL_NUMBER) { return true; }   // nothing better to give it
+				const double Q = -UV / (XY * S2);
+				if (Q < 0.5 || Q > 2.0) { return false; }
+				const int32 Ix[3] = { I0, I1, I2 };
+				for (int32 e = 0; e < 3; ++e)
+				{
+					const int32 P = Ix[e], R = Ix[(e + 1) % 3];
+					const double LXY = FVector2d::Distance(Verts2D[P], Verts2D[R]) * UVScale;
+					const double LUV = (double)FVector2f::Distance(UVVal[P], UVVal[R]);
+					if (LXY > KINDA_SMALL_NUMBER && (LUV < 0.5 * LXY || LUV > 2.0 * LXY)) { return false; }
+				}
+				return true;
+			};
+
+			// Append triangles front-facing up, and mirror that winding into the
+			// UV/normal overlays so corners line up. Unreal is left-handed: a
+			// triangle faces +Z when it runs clockwise in plan (GetTriNormal).
 			for (const FIndex3i& T : Tris)
 			{
 				const FVector2d& A = Verts2D[T.A];
@@ -547,12 +629,22 @@ namespace RoadNetMesh
 				const FVector2d& C = Verts2D[T.C];
 				const double Cross = (B.X - A.X) * (C.Y - A.Y) - (B.Y - A.Y) * (C.X - A.X);
 				const bool bCCW = (Cross >= 0.0);
-				const int32 I0 = T.A, I1 = bCCW ? T.B : T.C, I2 = bCCW ? T.C : T.B;
+				const int32 I0 = T.A, I1 = bCCW ? T.C : T.B, I2 = bCCW ? T.B : T.C;
 				const int32 Tid = OutMesh.AppendTriangle(FIndex3i(VMap[I0], VMap[I1], VMap[I2]));
 				if (Tid >= 0)
 				{
 					++TriCount;
-					if (UVo) { UVo->SetTriangle(Tid, FIndex3i(UVMap[I0], UVMap[I1], UVMap[I2])); }
+					if (UVo)
+					{
+						FIndex3i UT(UVMap[I0], UVMap[I1], UVMap[I2]);
+						FVector2D O, Dir; double AlongO = 0.0;
+						const FVector2d Cen = (A + B + C) / 3.0;
+						if (!bWorldUVs && !IsIsometric(I0, I1, I2) && Field.NearestFrame(Cen.X, Cen.Y, O, Dir, AlongO))
+						{
+							UT = FIndex3i(FramedUV(I0, O, Dir, AlongO), FramedUV(I1, O, Dir, AlongO), FramedUV(I2, O, Dir, AlongO));
+						}
+						UVo->SetTriangle(Tid, UT);
+					}
 					if (No)  { No->SetTriangle(Tid, FIndex3i(NMap[I0], NMap[I1], NMap[I2])); }
 				}
 			}
@@ -584,13 +676,17 @@ namespace RoadNetMesh
 				// CW and faces inward. Reading it from the winding keeps both right
 				// without the caller having to say which loop is which.
 				const bool bCCW = (Loop.SignedArea() >= 0.0);
+				double LoopAcc = 0.0;
 
 				for (int32 i = 0; i < N; ++i)
 				{
 					const FVector2d& P0 = LV[i];
 					const FVector2d& P1 = LV[(i + 1) % N];
 					FVector2d E = P1 - P0;
+					const double EdgeLen = E.Length();
 					if (!E.Normalize()) { continue; } // duplicate vertex: no wall to build
+					const double A0 = LoopAcc, A1 = LoopAcc + EdgeLen;
+					LoopAcc = A1;
 
 					const double G0 = Field.SampleHeight(P0.X, P0.Y, FallbackZ);
 					const double G1 = Field.SampleHeight(P1.X, P1.Y, FallbackZ);
@@ -610,15 +706,13 @@ namespace RoadNetMesh
 						OutMesh.SetVertexColor(T1, C1); OutMesh.SetVertexColor(B1, C1);
 					}
 
-					// Wall UVs run along the edge and up its face, so a kerb texture
-					// tiles by real length instead of stretching over the footprint.
+					// Wall UVs run along the loop and up its face, so a kerb texture tiles
+					// by real length. U is the distance walked round the loop, never a
+					// centreline station: a wall across an end cap or a corner arc has both
+					// ends at the same station, and a quad with one U has no tangent basis.
 					int32 UT0 = 0, UT1 = 0, UB0 = 0, UB1 = 0;
 					if (UVo)
 					{
-						const double A0 = bWorldUVs ? P0.X
-							: ProjectNearest(FVector2D(P0.X, P0.Y)).AlongDist;
-						const double A1 = bWorldUVs ? P1.X
-							: ProjectNearest(FVector2D(P1.X, P1.Y)).AlongDist;
 						UT0 = UVo->AppendElement(FVector2f((float)(A0 * UVScale), (float)(Top0 * UVScale)));
 						UT1 = UVo->AppendElement(FVector2f((float)(A1 * UVScale), (float)(Top1 * UVScale)));
 						UB0 = UVo->AppendElement(FVector2f((float)(A0 * UVScale), (float)(Bot0 * UVScale)));
@@ -638,8 +732,8 @@ namespace RoadNetMesh
 					}
 
 					// Outward winding, derived above from the loop direction.
-					const FIndex3i Q1 = bCCW ? FIndex3i(0, 2, 3) : FIndex3i(0, 3, 2); // T0,B0,B1
-					const FIndex3i Q2 = bCCW ? FIndex3i(0, 3, 1) : FIndex3i(0, 1, 3); // T0,B1,T1
+					const FIndex3i Q1 = bCCW ? FIndex3i(0, 3, 2) : FIndex3i(0, 2, 3); // T0,B1,B0
+					const FIndex3i Q2 = bCCW ? FIndex3i(0, 1, 3) : FIndex3i(0, 3, 1); // T0,T1,B1
 					const int32  V[4] = { T0, T1, B0, B1 };
 					const int32  U[4] = { UT0, UT1, UB0, UB1 };
 					const int32  Nn[4] = { NT0, NT1, NB0, NB1 };
@@ -686,7 +780,10 @@ namespace RoadNetMesh
 				VertexNormals.ComputeVertexNormals();
 				bComputed = true;
 			}
-			return Mesh.IsVertex(Vid) ? (FVector3f)VertexNormals[Vid] : FVector3f::UnitZ();
+			// A vertex whose triangles are all degenerate averages to zero; writing that back
+			// would leave the defect in place. Road layers face up, so up is the safe answer.
+			const FVector3f N = Mesh.IsVertex(Vid) ? (FVector3f)VertexNormals[Vid] : FVector3f::UnitZ();
+			return N.SquaredLength() >= 0.25f ? N : FVector3f::UnitZ();
 		};
 
 		int32 Fixed = 0;
@@ -734,9 +831,10 @@ namespace RoadNetMesh
 
 			FVector3d A, B, C;
 			Mesh.GetTriVertices(Tid, A, B, C);
-			// Un-normalised is fine: only the sign of the dot below is used, and a
-			// degenerate triangle gives ~0, which correctly leaves it alone.
-			const FVector3d WindingN = (B - A).Cross(C - A);
+			// Left-handed, as GetTriNormal and FMeshNormals: this is the side the
+			// static-mesh renderer treats as front. Un-normalised is fine: only the
+			// sign of the dot below is used, and a degenerate triangle gives ~0.
+			const FVector3d WindingN = (C - A).Cross(B - A);
 
 			const FIndex3i El = Overlay->GetTriangle(Tid);
 			const FVector3f AuthoredN = Overlay->GetElement(El.A)
@@ -753,7 +851,7 @@ namespace RoadNetMesh
 
 	bool RepairSelfCheck(FString& OutReport)
 	{
-		// A flat quad in the XY plane, wound CCW so both triangles face +Z.
+		// A flat quad in the XY plane; RepairNormals gives it normals matching its winding.
 		FDynamicMesh3 M;
 		M.EnableAttributes();
 		const int32 V0 = M.AppendVertex(FVector3d(0,   0,   0));

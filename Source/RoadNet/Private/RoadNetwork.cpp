@@ -27,6 +27,7 @@
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Actor.h"
+#include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
@@ -1318,6 +1319,95 @@ int32 URoadNetwork::DeleteRoadPointsSplitting(int32 RoadIdx, const TArray<int32>
 	UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet][DEL] SplitDelete road=%d: %d pts removed -> %d piece(s) (%s)"),
 		RoadIdx, Rem.Num(), Pieces.Num(), Pieces.Num() > 1 ? TEXT("SPLIT with gap") : TEXT("trimmed"));
 	return Pieces.Num();
+}
+
+bool URoadNetwork::MergeRoadPoints(FIntPoint Keep, FIntPoint Snap, FString& OutMsg)
+{
+	auto Valid = [this](FIntPoint P) { return Roads.IsValidIndex(P.X) && Roads[P.X].Ref.IsValidIndex(P.Y); };
+	if (!Valid(Keep) || !Valid(Snap) || Keep == Snap)
+	{
+		OutMsg = TEXT("Select two different control points.");
+		return false;
+	}
+	const FVector Target = Roads[Keep.X].Ref[Keep.Y];
+
+	// The moved ends leave their old junction: an OSM node id would pull them
+	// back to it, so they take Keep's id (or none), and their links go stale.
+	auto Reattach = [this](FIntPoint End, int64 Node)
+	{
+		FRoadDef& R = Roads[End.X];
+		if (R.NodeIds.IsValidIndex(End.Y)) { R.NodeIds[End.Y] = Node; }
+		(End.Y == 0 ? R.StartLinks : R.EndLinks).Reset();
+	};
+
+	if (Keep.X == Snap.X)
+	{
+		const int32 Last = Roads[Keep.X].Ref.Num() - 1;
+		if (FMath::Abs(Keep.Y - Snap.Y) == 1)
+		{
+			bool bRemoved = false;
+			DeleteRoadPoint(Snap.X, Snap.Y, bRemoved);
+			OutMsg = bRemoved ? TEXT("Merged the road's only two points; the road was removed.")
+				: TEXT("Merged two neighbouring points into one.");
+			return true;
+		}
+		if (FMath::Min(Keep.Y, Snap.Y) == 0 && FMath::Max(Keep.Y, Snap.Y) == Last)
+		{
+			const TArray<int64>& Ids = Roads[Keep.X].NodeIds;
+			MoveRoadPoint(Snap.X, Snap.Y, Target);
+			Reattach(Snap, Ids.IsValidIndex(Keep.Y) ? Ids[Keep.Y] : -1);
+			OutMsg = TEXT("Joined the road's two ends into a loop.");
+			return true;
+		}
+		OutMsg = TEXT("Two points on one road merge only when they are neighbours or the road's two ends.");
+		return false;
+	}
+
+	// Turns (Road, Point) into road end(s) at that point: itself when it is an
+	// end, both halves when an interior point splits the road there, and the
+	// point itself when it is too near an end to split, by trimming that stub.
+	auto MakeEnds = [this](FIntPoint P, TArray<FIntPoint>& OutEnds)
+	{
+		const int32 Last = Roads[P.X].Ref.Num() - 1;
+		if (P.Y == 0 || P.Y == Last) { OutEnds.Add(P); return; }
+		TArray<double> CL;
+		RoadNetMath::CumulativeLength(Roads[P.X].Ref, CL);
+		const double Arc = CL[P.Y];
+		if (Arc <= kEndpointWeldCm || Arc >= CL.Last() - kEndpointWeldCm)
+		{
+			const bool bNearStart = Arc <= kEndpointWeldCm;
+			TArray<int32> Stub;
+			for (int32 i = bNearStart ? 0 : P.Y + 1; i < (bNearStart ? P.Y : Last + 1); ++i) { Stub.Add(i); }
+			DeleteRoadPointsSplitting(P.X, Stub);
+			OutEnds.Add(FIntPoint(P.X, bNearStart ? 0 : Roads[P.X].Ref.Num() - 1));
+			return;
+		}
+		const int32 Tail = SplitRoadAt(P.X, Arc);
+		// Cut exactly on a vertex, the head ends on that vertex twice.
+		FRoadDef& Head = Roads[P.X];
+		const int32 N = Head.Ref.Num();
+		if (N >= 3 && Head.Ref[N - 1].Equals(Head.Ref[N - 2], 0.01))
+		{
+			Head.Ref.RemoveAt(N - 2);
+			if (Head.Elev.Num() == N) { Head.Elev.RemoveAt(N - 2); }
+		}
+		OutEnds.Add(FIntPoint(P.X, Head.Ref.Num() - 1));
+		if (Tail != INDEX_NONE) { OutEnds.Add(FIntPoint(Tail, 0)); }
+	};
+
+	TArray<FIntPoint> KeepEnds, SnapEnds;
+	MakeEnds(Keep, KeepEnds);
+	MakeEnds(Snap, SnapEnds);
+	const TArray<int64>& KeepIds = Roads[KeepEnds[0].X].NodeIds;
+	const int64 Node = KeepIds.IsValidIndex(KeepEnds[0].Y) ? KeepIds[KeepEnds[0].Y] : -1;
+	for (const FIntPoint& E : SnapEnds)
+	{
+		MoveRoadPoint(E.X, E.Y, Target);
+		Reattach(E, Node);
+	}
+	OutMsg = FString::Printf(TEXT("Merged two points into one junction of %d road end(s)."),
+		KeepEnds.Num() + SnapEnds.Num());
+	return true;
 }
 
 bool URoadNetwork::RemoveRoad(int32 RoadIdx)
@@ -6820,7 +6910,8 @@ int32 URoadNetwork::CommitMarkingDecals(
 	// an underpass roof passing overhead.
 	constexpr double kDecalHalfDepthCm = 60.0;
 
-	int32 Placed = 0;
+	int32 Placed = 0, Dropped = 0;
+	TArray<RoadNetSurface::FPaintRect> Rects;
 	for (int32 z = 0; z < ZonePolys.Num(); ++z)
 	{
 		if (ZonePolys[z].Num() == 0 || !Ctx.Zones.IsValidIndex(z)) { continue; }
@@ -6836,60 +6927,40 @@ int32 URoadNetwork::CommitMarkingDecals(
 
 		for (const UE::Geometry::FGeneralPolygon2d& GP : ZonePolys[z])
 		{
-			const TArray<FVector2d>& V = GP.GetOuter().GetVertices();
-			if (V.Num() < 3) { continue; }
-
-			// Oriented box from the longest edge. Every mark in these banks is a
-			// thin quad (a line, a dash, a bar, a zebra stripe), so the longest
-			// edge IS the mark's length and this is exact.
-			// ponytail: a non-convex mark (an arrow head) gets its bounding box
-			// instead, which is the right footprint for a decal anyway — the
-			// material's alpha carries the shape.
-			int32 Longest = 0;
-			double LongestLen2 = -1.0;
-			for (int32 i = 0; i < V.Num(); ++i)
+			Rects.Reset();
+			RoadNetSurface::SplitToPaintRects(GP, Rects);
+			for (const RoadNetSurface::FPaintRect& R : Rects)
 			{
-				const double L2 = (V[(i + 1) % V.Num()] - V[i]).SizeSquared();
-				if (L2 > LongestLen2) { LongestLen2 = L2; Longest = i; }
-			}
-			FVector2d Axis = V[(Longest + 1) % V.Num()] - V[Longest];
-			if (!Axis.Normalize()) { continue; }
-			const FVector2d Perp(-Axis.Y, Axis.X);
+				const FVector Loc(R.Center.X, R.Center.Y,
+					Field.SampleHeight(R.Center.X, R.Center.Y, FallbackZ) + kRoadZLiftCm + kMarkingLiftCm);
 
-			double LoA = TNumericLimits<double>::Max(), HiA = -LoA;
-			double LoP = TNumericLimits<double>::Max(), HiP = -LoP;
-			for (const FVector2d& P : V)
-			{
-				const double A = P.Dot(Axis), B = P.Dot(Perp);
-				LoA = FMath::Min(LoA, A); HiA = FMath::Max(HiA, A);
-				LoP = FMath::Min(LoP, B); HiP = FMath::Max(HiP, B);
-			}
-			const double HalfLen  = 0.5 * (HiA - LoA);
-			const double HalfWide = 0.5 * (HiP - LoP);
-			if (HalfLen < 1.0 || HalfWide < 1.0) { continue; }   // sub-centimetre sliver
+				const FIntPoint Coord = TopoKeyOf(Loc, Ctx);
+				if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
+				ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
+				if (!Tile) { continue; }
 
-			const FVector2d C =
-				Axis * (0.5 * (LoA + HiA)) + Perp * (0.5 * (LoP + HiP));
-			const FVector Loc(C.X, C.Y,
-				Field.SampleHeight(C.X, C.Y, FallbackZ) + kRoadZLiftCm + kMarkingLiftCm);
-
-			const FIntPoint Coord = TopoKeyOf(Loc, Ctx);
-			if (Coord.X == INDEX_NONE || !IsTileInCommitScope(Coord, Ctx)) { continue; }
-			ARoadNetTileActor* Tile = GetOrCreateTile(Coord);
-			if (!Tile) { continue; }
-
-			// DecalSize is (depth, half-width across the yaw, half-length along it).
-			if (Tile->AddRoadDecal(DecalMaterial, Loc,
-				(float)FMath::RadiansToDegrees(FMath::Atan2(Axis.Y, Axis.X)),
-				FVector(kDecalHalfDepthCm, HalfWide, HalfLen)))
-			{
-				++Placed;
+				// DecalSize is (depth, half-width across the yaw, half-length along it).
+				if (Tile->AddRoadDecal(DecalMaterial, Loc,
+					(float)FMath::RadiansToDegrees(FMath::Atan2(R.Axis.Y, R.Axis.X)),
+					FVector(kDecalHalfDepthCm, R.HalfWide, R.HalfLen)))
+				{
+					++Placed;
+				}
+				else
+				{
+					++Dropped;
+				}
 			}
 		}
 	}
 
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] CommitMarkingDecals(%s): %d decals."),
 		*LayerName.ToString(), Placed);
+	if (Dropped > 0)
+	{
+		UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet] CommitMarkingDecals(%s): %d decals dropped at the per-tile cap."),
+			*LayerName.ToString(), Dropped);
+	}
 	return Placed;
 }
 
@@ -7499,10 +7570,24 @@ void URoadNetwork::CommitGeometry(FRoadNetRebuildContext& Ctx)
 	int32 WhiteTris = 0, YellowTris = 0;
 	if (bMarkingsAsDecals)
 	{
+		// A decal component draws only Deferred Decal materials; a surface one
+		// renders as dark patches, so any other slot falls back to the plugin paint.
+		auto DecalMaterial = [](const TSoftObjectPtr<UMaterialInterface>& Chosen, const TCHAR* Paint)
+		{
+			UMaterialInterface* M = Chosen.LoadSynchronous();
+			const UMaterial* Base = M ? M->GetMaterial() : nullptr;
+			if (Base && Base->MaterialDomain == MD_DeferredDecal) { return M; }
+			if (M)
+			{
+				UE_LOG(LogRoadNet, Warning, TEXT("[RoadNet] %s is not a Deferred Decal material; painting with %s instead."),
+					*M->GetPathName(), Paint);
+			}
+			return LoadObject<UMaterialInterface>(nullptr, Paint);
+		};
 		CommitMarkingDecals(TEXT("MarkingsWhite"), Ctx.ZoneMarkingWhitePolys,
-			MarkingWhiteDecal.LoadSynchronous(), Ctx);
+			DecalMaterial(MarkingWhiteDecal, TEXT("/RoadNet/Materials/MI_RoadNetPaintWhite.MI_RoadNetPaintWhite")), Ctx);
 		CommitMarkingDecals(TEXT("MarkingsYellow"), Ctx.ZoneMarkingYellowPolys,
-			MarkingYellowDecal.LoadSynchronous(), Ctx);
+			DecalMaterial(MarkingYellowDecal, TEXT("/RoadNet/Materials/MI_RoadNetPaintYellow.MI_RoadNetPaintYellow")), Ctx);
 	}
 	else
 	{

@@ -19,6 +19,9 @@ namespace RoadNetEditorBridge
 	// (same as the Points-tool U hotkey). Returns true on success.
 	ROADNETEDITOR_API bool MergeSelectedRoads(FString& OutMsg);
 
+	// Weld the two selected control points into one (Points-tool M hotkey).
+	ROADNETEDITOR_API bool MergeSelectedPoints(FString& OutMsg);
+
 	// Fit a circle to the selected roads and replace them with one clean ring.
 	ROADNETEDITOR_API bool CleanSelectedRoundabout(FString& OutMsg);
 

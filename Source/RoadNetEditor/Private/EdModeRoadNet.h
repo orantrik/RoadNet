@@ -123,6 +123,10 @@ public:
 	// multi-lane road. Returns true on success; OutMsg is a toast string.
 	bool MergeSelectedRoads(FString& OutMsg);
 
+	// Panel / hotkey 'M': weld exactly two selected points into one; the first
+	// picked stays and the second snaps onto it. OutMsg is a toast string.
+	bool MergeSelectedPoints(FString& OutMsg);
+
 	// Panel / Clean Roundabouts: fit a circle to the selected roads, replace
 	// them with one ring, retrim approaches. Returns true on success.
 	bool CleanSelectedRoundabout(FString& OutMsg);

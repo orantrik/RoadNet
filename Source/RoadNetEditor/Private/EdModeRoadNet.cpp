@@ -1792,6 +1792,18 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				return true;
 			}
 
+			if (Tool == ERoadNetDrawTool::Points && Key == EKeys::M)
+			{
+				FString Msg;
+				const bool bOk = MergeSelectedPoints(Msg);
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 3.0f, bOk ? FColor::Cyan : FColor::Orange, Msg);
+				}
+				if (ViewportClient) { ViewportClient->Invalidate(); }
+				return true;
+			}
+
 			const bool bAdd = (Key == EKeys::Equals || Key == EKeys::Add);
 			const bool bRem = (Key == EKeys::Hyphen || Key == EKeys::Subtract);
 			if ((bAdd || bRem) && Tool == ERoadNetDrawTool::Lanes)
@@ -3427,6 +3439,30 @@ bool FEdModeRoadNet::MergeSelectedRoads(FString& OutMsg)
 	return bOk;
 }
 
+bool FEdModeRoadNet::MergeSelectedPoints(FString& OutMsg)
+{
+	URoadNetwork* Net = GetNetwork();
+	if (!Net)
+	{
+		OutMsg = TEXT("No RoadNet network in the level — import or draw a road first.");
+		return false;
+	}
+	if (SelPoints.Num() != 2)
+	{
+		OutMsg = FString::Printf(TEXT("Select exactly 2 points (click the one to keep, Shift+click the one to snap onto it) — %d selected."),
+			SelPoints.Num());
+		return false;
+	}
+
+	FScopedTransaction Transaction(LOCTEXT("RoadNetMergePoints", "Merge RoadNet Points"));
+	ModifyForEdit();
+	const bool bOk = Net->MergeRoadPoints(SelPoints[0], SelPoints[1], OutMsg);
+	if (bOk) { Net->Rebuild(); }
+	else { Transaction.Cancel(); }
+	ClearSelection();
+	return bOk;
+}
+
 bool FEdModeRoadNet::CleanSelectedRoundabout(FString& OutMsg)
 {
 	URoadNetwork* Net = GetNetwork();
@@ -3604,6 +3640,17 @@ bool RoadNetEditorBridge::MergeSelectedRoads(FString& OutMsg)
 		return false;
 	}
 	return Mode->MergeSelectedRoads(OutMsg);
+}
+
+bool RoadNetEditorBridge::MergeSelectedPoints(FString& OutMsg)
+{
+	FEdModeRoadNet* Mode = ActiveRoadNetMode();
+	if (!Mode)
+	{
+		OutMsg = TEXT("Activate the RoadNet edit mode and select 2 points first.");
+		return false;
+	}
+	return Mode->MergeSelectedPoints(OutMsg);
 }
 
 bool RoadNetEditorBridge::CleanSelectedRoundabout(FString& OutMsg)

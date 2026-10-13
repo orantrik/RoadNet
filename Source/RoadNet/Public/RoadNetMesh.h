@@ -38,10 +38,19 @@ namespace RoadNetMesh
 		// TNumericLimits<double>::Max() if the field is empty.
 		RoadNetMath::FProjectResult ProjectNearest(double X, double Y) const;
 
+		// The straight frame of the segment nearest (X,Y): its start, unit direction and the
+		// arc length at its start. Offset = Cross2D(Dir, P - Origin) and
+		// Along = AlongAtOrigin + Dot(Dir, P - Origin) is the mapping ProjectNearest makes on
+		// that segment, extended linearly, so it never collapses past a segment end.
+		bool NearestFrame(double X, double Y, FVector2D& OutOrigin, FVector2D& OutDir, double& OutAlongAtOrigin) const;
+
 		double FirstZ() const { return FallbackZ; }
 		bool IsEmpty() const { return Segs.Num() == 0; }
 
 	private:
+		// Index into Segs of the nearest segment (INDEX_NONE if empty), with its clamped parameter.
+		int32 NearestSeg(double X, double Y, double& OutT) const;
+
 		// AlongA/Len carry the arc length so a projection can be answered from a
 		// single segment without walking its whole polyline.
 		struct FSeg { FVector2D A, B; double Za, Zb; int32 Road; double AlongA; double Len; int32 Local; };

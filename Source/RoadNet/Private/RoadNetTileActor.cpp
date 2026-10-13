@@ -50,6 +50,12 @@ UDynamicMeshComponent* ARoadNetTileActor::GetOrCreateMeshLayer(FName LayerName, 
 	// Two-sided so thin ribbons / island edges never cull to a hole.
 	Comp->SetTwoSided(true);
 
+	// The default ("From Dynamic Mesh") reads tangents from the mesh, and RoadNet writes none,
+	// so the proxy falls back to an arbitrary basis around each normal and every normal-mapped
+	// road material shades in random directions. MikkT from the layer's UVs is what the
+	// static-mesh bake computes too, so the live tile and the converted asset agree.
+	Comp->SetTangentsType(EDynamicMeshComponentTangentsMode::AutoCalculated);
+
 	// Only road-level surfaces take marking decals. A decal is a box projected
 	// down, so without this a stop bar at a kerb also paints itself across the
 	// sidewalk and up the median next to it.
