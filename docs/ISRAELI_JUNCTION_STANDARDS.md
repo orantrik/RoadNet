@@ -417,6 +417,8 @@ Caption: *אפשרויות לתכן שפות המיסעה לפנייה ימינ�
 
 **Footnotes:** the angle is the central angle between the outer radii of the turn arc; other angles require a check against vehicle tracking diagrams. Angles in the 70°–110° band outside those tabulated are not illustrated and must be verified by tracking. Vehicle definitions are in §2.6.
 
+**Urban street corners (not in this digest's sources; user instruction, 2026-10-16):** the kerb return radius at an Israeli urban corner is usually **3–5 m**. The generator uses **3 m** (`URoadNetwork::JunctionSmoothingCm`) where only tertiary-or-smaller streets meet and **5 m** where a secondary or bigger road is an arm (generator choice within the user's range). Tangential merges and exits are not corners and keep a 1.5 m close so the gore stays open past its 3.6 m nose. Table 6.1 above is for interurban turns and is not applied to urban corners.
+
 **Rule for acute turns (§6.2):** «אם זווית הפנייה קטנה מ-90° … רדיוסים גדולים יותר … מומלץ פחות שימוש בעקומים מורכבים» — for angles below 90°, prefer a **larger simple radius** over a compound curve.
 
 **Figure 6.1** gives the four 90° options concretely: (א) simple **R = 15 m** on the bus path; (ב) **R = 12 m** with a **1:10** taper of **12.6 m** each side; (ג) symmetric **40-12-40** with **12.6 m** offset; (ד) asymmetric **40-12-60** with **12.6 m** entry and **15 m** exit for an articulated truck. All four use a **0.5 m** offset from the straight edge to the curve start.
@@ -1639,6 +1641,60 @@ Climbing-lane tapers are given as ratios instead (§3.9.3.5א): **1:50** minimum
 > **Do not apply these to junctions.** The junction lane-drop taper is `1:V_d` from כרך 2 Table 5.1, which at 80 km/h and 3.6 m gives **144 m** — not the 172.8 m that `L_M` would give. The two rules serve different situations.
 
 Emergency lay-by (§3.10.3): widen the shoulder from **3.0 m to 4.5 m** over **30 m** at a **1:20** taper, spaced **2.0 km** apart.
+
+### 8.10 Lane-count change on a road — how lanes expand and contract (תקו"ה 2020, 801-809 and 813-814)
+
+Source: *תקנות והנחיות להצבת תמרורים, תקו"ה 2020* (Ministry of Transport; the marking part Netivei Israel designs to), sections 801-809 and 813-814. Read from the text of the official PDF, not the PDF itself.
+
+Geometry, combined with כרך 1 §3.9 and כרך 2 §5.2.4:
+
+| Rule | Source | Content |
+|---|---|---|
+| Which lane | כרך 2 §5.2.4 | The lane added or dropped is the **rightmost** (kerb) lane of that direction |
+| Edge taper, drop | כרך 1 §3.9 | `L_M = 0.6·V·W` (merge) |
+| Edge taper, gain | כרך 1 §3.9 | `L_D = 0.4·V·W` (diverge) |
+| Gradual, no jumps | 803 rule ד | «סימון קטעי המעבר בין קטעים במספר נתיבים שונה ייעשה באופן הדרגתי וללא קפיצות חדות» — fig. 9 shows 803 moving across in a 2 → 4 transition |
+| Lateral shift length | 803 Table 4 | `L = (L/W)·W`, W = lateral width difference. L/W: 60 → **40**, 70 → **45**, 80 → **50**, 90 → **60**, 100 → **65**, 110 → **75**; urban junctions **10**. Empirical formula in the text: L/W ≈ 2V/3 |
+| Symmetric widening | fig. 15 (805-806) | «סימון 806 במעבר מ-2 ל-3 נתיבים בהתרחבות סימטרית» — a 2 → 3 transition widens on both sides; the centre line moves |
+| Edge line | 807 rule ג | «סימון הרחבות והצרות למיניהן בתחום המיסעה המיועדת לנסיעה יש לבצע בהדרגה ובשיפוע מתון» (fig. 20) |
+
+Markings:
+
+| Rule | Source | Content |
+|---|---|---|
+| Line hierarchy | 801-809 §1 | (ג) **808** separates diverging or merging traffic in the same direction; (ד) **801** is the basic division between same-direction lanes |
+| 808 long | 808 rule ג, figs. 25-26 | Deceleration, acceleration and merge (השתזרות) lanes |
+| 814 meaning | 813-814 table | «נתיב נסיעה העומד להסתיים - עבור לנתיב הסמוך בכוון החץ», diagonal toward the road centre, into the adjacent continuing lane |
+| 814 warrant | 813-814 rule 2א-ב | A lane that ends without enough length to merge. **Not** for a properly built acceleration lane |
+| 814 layout | 813-814 rule 3ג, fig. 5 | **3 clusters of 3 arrows**. The first cluster, nearest the lane end, is **15 m from where the lane is still full width**, then **15 m between clusters**, **3 m between arrows** (9 m per cluster). Sign 301 at the lane end may be considered |
+| Beside 814 | 813-814 rule 3ב | Guide lines (801/802/804/808) along the whole stretch between the first and last arrow |
+| 814 size | 813-814 rule 4א | 75 % in a lane narrower than **3.20 m** |
+| Added-lane arrows | 813 rule ה | A double arrow before a lane added in the travel direction is marked only up to where the lane is actually added |
+
+**Implementation (RoadNet, 2026-10-15):**
+- At a 2-arm seam the narrower road's reference line shifts by the offset between its lanes and the lanes they continue into (`FRoadNetSeamShift`, length from `LaneCountShiftLengthCm`, Table 4). Every offset stage follows the reference, so the continuing lanes meet end to end. The kerb widening (`Gain`, `Drop`) supplies the added or dropped lane's width.
+- The same applies across a junction (user, 2026-10-16: "lanes should snap to lanes, not centre line to centre line"): for each pair of arms that run straight on (geometric Through, not a T stem's elected turn), the narrower road shifts by the mean offset of its through-lane pairs. The shift is held at full value up to that arm's stop line (`FRoadNetSeamShift::HoldCm`) before the Table 4 taper. The stop line sits on the junction clip, which is built from the shifted curves, so `Rebuild` measures it (`MeasureShiftHolds`) and re-runs the plan stages with the measured hold until they agree within 1 cm (a warning names the road if four passes do not settle). A shift or a drop widening that outruns a short road carries on through plain seams (both roads with the same lanes) at the same rate, so no road end steps sideways or in width.
+- Seam between equally wide carriageways (two-way 1+1 against one-way 2, 2+1 against 1+2; drivable widths within 50 cm, `SeamKeepsWidth`): the width of the lane that ends in one direction serves the lane added in the other. Nothing widens or shifts. Lanes pair from the kerb in place, and the added or dropped lane is the inner one, which forks off or merges into the innermost through lane at the seam. Generator choice: the digest has no figure for this case. Widening here made the S05 notch (10.5 m meeting 7 m).
+- Tangential merge (on-ramp; one-way roads joining within 45°, `PlanMerge`). Sources in the תקו"ה 2020 text:
+  - 301 guidance: «על מנת שלא לגרום להאטת המהירות בהתמזגות אין לסמן קו עצירה ליד תמרור 301». No stop line at a tangential merge.
+  - 808 rule ג: 808 also marks merge lanes (נתיבי השתזרות) and merging into or out of the continuing lanes, on exit from or entry to the road. Fig. 22: 808 long in an acceleration lane.
+  - 815 fig. 7: «שילוב 815 בכניסה של מחלף», a painted gore at an interchange entry.
+  - Implementation: the leaving lanes are shared side by side, median side first. The straightest approach keeps all its lanes. The kerb-side ramp's leftover lanes run on as an acceleration lane on the leaving road: full width for Table 6.5 at the main road's design speed (`AccelLaneLengthCm`, 100/140/170/210 m at 70/80/90/100+ km/h), then a 1:30 closing taper (§6.4.2ב gives 1:20-1:35; 1:30 is a generator choice). 808 long, no 814 (813-814 rule 2). Each entering road shifts so its lanes meet theirs (Table 4 length). Leaving lanes that no approach feeds open off the kerb-most lane.
+- Tangential exit (one-way road splitting within 45°, the mirror case of `PlanMerge`). 808 rule ג fig. 21: 808 long in a deceleration lane; 815 fig. 6: a painted gore at an interchange exit.
+  - Implementation: the branches share the entering lanes side by side, median side first, and the straightest branch keeps all its lanes, so the main road never gives a through lane to the exit. Each branch road shifts so its lanes start where the lanes feeding them end (Table 4 length). Kerb-branch lanes no entering lane feeds open as a parallel deceleration lane on the entering road: full width for Table 6.2 to 25 km/h at the entering road's design speed, opened over 1:10 below 80 km/h and 1:15 at or above (§6.3.4). 808 long, no 814. Entering kerb lanes no branch takes merge into the exit's kerb lane. No stop line (the same tangential rule as merges).
+- Markings at a tangential merge or exit. Sources in the תקו"ה 2020 text:
+  - 815 rule 3ב: white frame, internal lines at 45° to the travel direction forming arrows pointing along it. Frame 10/15 cm, stripes 20/30 cm, gaps 50/100 cm (urban/interurban).
+  - 801-809 Table 10, note (*) on 808 long in speed-change lanes: «הסימון ימשך עד לנקודה שבה מגיע רוחב הנתיב בין "האף" ובין הנתיב הסמוך מצד שני ל – 200 ס"מ». The 808 runs into the tip until the gap is 2 m.
+  - 801-809 hierarchy note: «מלבנים ארוכים (808) יבואו בהמשך לאי תנועה מסומן (815) ויפריד בין הממשיכים בנתיבים הראשיים ובין הפונים בנתיבים היוצאים. מלבנים ארוכים לא יסומנו בין הנתיבים היוצאים עצמם.»
+  - 801-809 Table 11 (808 on a lane changing purpose): 50 m urban, 150 m interurban single carriageway, 250 m interurban dual carriageway.
+  - 813-814 Table 1 note: «ביציאות מדרכים ממוחלפות, במקום: "קו עצירה", יבוא: "האף המסומן"». Arrow tails are measured from the marked nose.
+  - 807 rule א: the edge line is not marked where the edge is 815.
+  - Not in the digest: the nose width where the paved gore ends. User choice (2026-10-15): one lane, 3.6 m between the branch edges.
+  - Implementation (`FTangentialGap`, `RoadNetwork.cpp`): the wedge between neighbouring branches is paved up to the 3.6 m point. 808 long down its middle up to the 2 m point, then 815 from 2 m to 3.6 m. Before an exit, a lane of the entering road that becomes the exit lane is set off by 808 long over Table 11's length (250 m on Motorway/Trunk, else 50 m). Lane lines and 807 are not stopped at the junction area, 807 is removed inside the gore, and the generic 815 hatch and the 809 fork lines are skipped there. 813: the exit lane gets a right arrow (a left arrow for a median-side exit) and the main lanes straight arrows (user choice 2026-10-15), with tails from the nose. A deceleration bay is usable for arrows over its full-width run plus half its taper. The conform's flat core (`osm.RoadDeformBufferM`, 2 m past each edge) covers the gore, because no point of it is more than 1.8 m from a branch.
+- Seam drop: 808 long along the taper. 814 sits on the wider road's ending lane, 15 m upstream of the seam, because the taper starts at the seam.
+- Gain: 801 on the added lane's boundary (hierarchy ד), because the added lane continues.
+- Junction drop (user decision 2026-10-15: apply Table 5.1 at every junction drop, the 80 km/h row below 80). The lane runs full width for `l` (4 s column, no acceleration lane: 90/100/110 m, `LaneDropHoldLengthCm`), then tapers over 1:V_d. 808 long runs along the full-width run and the taper. 814 sits in the full-width run: the first cluster 15 m before the taper starts.
+- An arm shorter than `l` + taper keeps the lane to the next node (`bToNextNode`). At a junction with a kerb turn from that arm, the carried lane is the kerb turn lane: its bay is removed, 808 short over the last 50 m, and it gets the kerb turn arrows. At a dead end the lane runs off the network. At a seam, or a junction with no kerb turn, the hold is shortened to fit and the lane drops inside the arm (the channelization log counts these).
 
 ---
 

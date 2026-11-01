@@ -87,6 +87,13 @@ namespace RoadNetSurface
 		double MaxStepsPerRadian = 16.0,
 		bool bRoundEnds = false);
 
+	// The strip between two per-vertex lateral offsets of a centreline (+right),
+	// unioned so a tight bend cannot fold it; bRoundEnds caps both ends with a
+	// half-disc nose of the local half-width. Returns false if degenerate.
+	ROADNET_API bool BuildOffsetStrip(
+		const TArray<FVector>& Center, const TArray<double>& LoOffs, const TArray<double>& HiOffs,
+		bool bRoundEnds, TArray<UE::Geometry::FGeneralPolygon2d>& Out);
+
 	// Build sidewalk bands from per-road, per-side ribbons (§8.12): UNION the
 	// ribbons, then subtract the carriageway (RoadPolys) so sidewalks never sit on
 	// the road or cross a junction. Only the sides each road actually requests are

@@ -28,6 +28,9 @@ struct FRoadCurves
 	TArray<FVector> LeftEdge;   // +right-axis outer edge at +HalfWidth
 	TArray<FVector> RightEdge;  // -right-axis outer edge at -HalfWidth
 	double Length = 0.0;
+	// This road's lateral moves, fitted to Length. Every lateral offset taken
+	// from Sampled goes through FRoadNetLateralMove::ApplyAll with these.
+	TArray<FRoadNetLateralMove> Moves;
 };
 
 // ---- Terrain-conform corridor (exposed to OSMRoadCore) ---------------------
@@ -40,6 +43,9 @@ struct FRoadNetDeformCorridor
 {
 	TArray<FVector> Points;    // densified, G2-smoothed centreline (world cm, Z = bed)
 	double FlatHalfCm = 0.0;   // half of carriageway (+median gap) + sidewalk footprint
+	// Per point (empty = none): how far the paved edge reaches past FlatHalfCm
+	// there — junction turn bays, carried lanes, speed-change lanes.
+	TArray<float> ExtraHalfCm;
 	bool   bBridge = false;
 	bool   bTunnel = false;
 	int32  Layer   = 0;        // grade-separation layer (only Layer 0 deforms terrain)
@@ -116,6 +122,7 @@ struct FRoadNetJointArm
 	double BearingRad = 0.0;
 
 	int32  DrivableLanes = 0;   // lanes that carry traffic, both directions
+	bool   bLeavable = true;    // some drivable lane carries traffic away from the node
 	double HalfWidthCm = 0.0;   // carriageway half-width incl. any median gap
 	ERoadNetClass Class = ERoadNetClass::Unknown;
 	int32  DesignSpeedKph = 0;  // resolved, never 0
@@ -159,15 +166,106 @@ struct FRoadNetArmWidening
 	ERoadNetSide Side = ERoadNetSide::Right;    // Right = +offset side, Left = −offset side
 	double WidthCm = 0.0;                       // extra carriageway width AT the junction
 	double TaperCm = 0.0;                       // length over which it ramps to zero
+	ERoadNetWideningKind Kind = ERoadNetWideningKind::Drop;
+	int32 Lanes = 1;                            // how many lanes this widening stands for
+	// Seam drop only: the road (and its end) whose kerb lanes end here.
+	int32 FromRoad = INDEX_NONE;
+	bool  bFromAtStart = false;
+	// Junction drop: full width for HoldCm (Table 5.1 `l`) before the taper.
+	double HoldCm = 0.0;
+	// The arm is too short to drop the lane: it runs at full width to the far
+	// node and serves there as the kerb turn lane.
+	bool bToNextNode = false;
+	// An acceleration lane after a merge (Drop) or a deceleration lane before an
+	// exit (kerb bay): 808 long (rule ג, figs. 21-22), never 814 (813-814 rule 2).
+	bool bSpeedChange = false;
+	// Far-side turn bay (§7). Its width comes out of the median first (MedianCm,
+	// keeping 2.50 m of it, §7.4.3); the rest moves the opposing half of the
+	// road over (an FRoadNetLateralMove), so the carriageway edge bulges by
+	// WidthCm - MedianCm only.
+	bool bFarSide = false;
+	double MedianCm = 0.0;
 
 	// Extra width at arc position S on a road of arc length Len.
 	FORCEINLINE double BulgeAt(double S, double Len) const
 	{
-		if (WidthCm <= 0.0 || TaperCm <= 0.0) { return 0.0; }
-		const double D = bAtStart ? S : (Len - S);   // distance from the junction end
-		if (D >= TaperCm) { return 0.0; }
-		return WidthCm * (1.0 - FMath::Max(0.0, D) / TaperCm);
+		if (WidthCm <= 0.0) { return 0.0; }
+		const double D = (bAtStart ? S : (Len - S)) - HoldCm;   // past the full-width run
+		if (D < 0.0) { return WidthCm; }
+		if (TaperCm <= 0.0 || D >= TaperCm) { return 0.0; }
+		return WidthCm * (1.0 - D / TaperCm);
 	}
+};
+
+// ---- The median strip of a divided road -------------------------------------
+// Its two edges as lateral offsets (+right of forward) at arc S along
+// FRoadCurves::Sampled: the median lane's own offset (not the reference line —
+// unequal lane counts put it off centre), through the road's lateral moves,
+// less the part of a far-side turn bay cut into it (§7.4.3). Shared by the
+// median mesh, its planting spline and the PCG median node.
+struct FRoadNetMedianProfile
+{
+	double CentreCm = 0.0;
+	double HalfCm = 0.0;
+	double LengthCm = 0.0;
+	TArray<FRoadNetLateralMove> Moves;
+	TArray<FRoadNetArmWidening> FarBays;
+
+	// False when the road has no median.
+	ROADNET_API bool Init(const FRoadDef& Road, int32 RoadIdx, const FRoadCurves& C,
+		const TArray<FRoadNetArmWidening>& Widenings, bool bDriveOnLeft);
+	ROADNET_API void EdgesAt(double S, double& OutLo, double& OutHi) const;
+	// Edges at every vertex of Pts, whose first vertex sits at arc S0 on the road.
+	ROADNET_API void EdgesAlong(const TArray<FVector>& Pts, double S0, TArray<double>& OutLo, TArray<double>& OutHi) const;
+};
+
+// ---- Lateral shift of a road end at a lane-count seam ----------------------
+// Each road's carriageway is centred on its reference line, so at a seam where
+// the lane count changes the continuing lanes of the two roads sit side by side
+// instead of end to end. תקו"ה 801-809 (803 rule ד, Table 4, figs. 9 and 15):
+// the transition is gradual, so the narrower road's reference line moves over
+// by ShiftCm (+right of its forward direction) at the seam, ramping to nothing
+// over TaperCm. Every offset stage (edges, lanes, paint, lane graph) follows.
+// Across a junction the same applies to the through roads, at full shift for
+// HoldCm (up to the arm's stop line, measured on the junction clip) before the
+// taper, so the lanes meet lane to lane.
+struct FRoadNetSeamShift
+{
+	int32  Road = INDEX_NONE;
+	bool   bAtStart = true;
+	double ShiftCm = 0.0;
+	double TaperCm = 0.0;
+	double HoldCm = 0.0;
+
+	FORCEINLINE double ShiftAt(double S, double Len) const
+	{
+		const double D = (bAtStart ? S : (Len - S)) - HoldCm;
+		if (D <= 0.0 && HoldCm > 0.0) { return ShiftCm; }
+		if (TaperCm <= 0.0 || D >= TaperCm) { return 0.0; }
+		return ShiftCm * (1.0 - FMath::Max(0.0, D) / TaperCm);
+	}
+};
+
+// ---- One arm of one junction, as every marking stage sees it ----------------
+// Where a zone road's centreline crosses a junction clip polygon, with the
+// lateral spans (+right of INBOUND) and the per-arm paint the effective preset
+// asks for. The per-road lane lines stop where this paint starts, and the
+// junction paint is drawn from the same record, so the two cannot disagree.
+struct FRoadNetJunctionArm
+{
+	int32 Road = INDEX_NONE;
+	FVector2D Stop = FVector2D::ZeroVector;      // on the junction boundary
+	FVector2D Outward = FVector2D(1, 0);         // unit, away from the junction
+	double Z = 0.0;
+	bool bForwardEnters = true;                  // the road's +arc direction points into the junction
+	double HalfWidthCm = 300.0;
+	bool bEnters = false;
+	double EnterLoCm = 0.0, EnterHiCm = 0.0;     // entering lanes, bays included
+	double SurfLoCm = 0.0, SurfHiCm = 0.0;       // whole paved arm, widenings included
+	bool bStopLine = false;                      // 810 drawn on this arm
+	bool bCrosswalk = false;                     // 811 drawn on this arm
+	double BarOutCm = 0.0;                       // Stop -> stop line centre, outward
+	double PaintReachCm = 0.0;                   // Stop -> far edge of the arm's mouth paint
 };
 
 // ---- 2-D centerline crossing between two roads (§10.12 / §10.8) -------------
@@ -204,6 +302,21 @@ struct FRoadNetRebuildContext
 	// outer-edge widenings on the arms. Built between the joints and the curves
 	// so BuildCurves can fold them into the same variable offset as parking.
 	TArray<FRoadNetArmWidening> ArmWidenings;
+	TArray<FRoadNetSeamShift> SeamShifts;
+	// Through-road shifts held over a junction area, keyed RoadIdx * 2 + (bAtStart ? 1 : 0).
+	// Requested: the hold each one was built with. Measured: arc length (along Ref)
+	// from the road end to its stop line on the junction clip, which the plan
+	// stages re-run with until the two agree.
+	TMap<int32, double> RequestedShiftHoldCm;
+	TMap<int32, double> MeasuredShiftHoldCm;
+	// Median squeezes at seams and far-bay shifts; copied per road into FRoadCurves::Moves.
+	TArray<FRoadNetLateralMove> LateralMoves;
+	// Indices into Joints planned as a tangential merge or exit
+	// (RoadNetJunctions::PlanMerge). Their lanes run through the junction area,
+	// so per-road paint is not stopped there, and the pavement between the
+	// branches is a painted island (815, figs. 6-7).
+	TArray<int32> TangentialJoints;
+	int32 TangentialGores = 0;   // 815 islands painted at them
 	// §10.12/§10.8 all 2-D centerline crossings (computed once, shared).
 	TArray<FRoadNetCrossing> Crossings;
 	// §10.12 grade-separation zones: each group is a set of road indices that are
@@ -262,8 +375,37 @@ struct FRoadNetRebuildContext
 	struct FApproachStop
 	{
 		FVector2D StopPos = FVector2D::ZeroVector;
+		// Where the stop line actually is: StopPos pushed OUT past the crosswalk on
+		// an arm that has one (BuildJoint's layout).
+		FVector2D BarPos = FVector2D::ZeroVector;
+		double LineEndCm = 0.0;   // StopPos -> where the lane lines end (FRoadNetJunctionArm::PaintReachCm)
 	};
 	TArray<FApproachStop> ApproachStops;
+
+	// 813 arrows that resolved to an assigned arrow mesh (the rest are painted).
+	// Built by BuildApproachMarks, instanced by CommitLaneMarks.
+	struct FAutoArrow
+	{
+		FVector At = FVector::ZeroVector;   // glyph centre, on the lane centreline
+		float YawDeg = 0.f;
+		uint8 Mask = 0;                     // 1 through, 2 left, 4 right, 8 U-turn
+		float Scale = 1.f;
+	};
+	TArray<FAutoArrow> AutoArrows;
+
+	// One mouth per (joint, arm): where that arm meets the junction boundary.
+	// A 2-arm seam with no clip polygon, or an arm that never leaves the polygon,
+	// falls back to the road end (bNode).
+	struct FArmMouth
+	{
+		int32 Joint = INDEX_NONE;
+		int32 Arm = INDEX_NONE;
+		FVector Pos = FVector::ZeroVector;
+		FVector TravelIn = FVector::ForwardVector; // unit, into the junction
+		double TrimFromEndCm = 0.0;
+		bool bNode = true;
+	};
+	TArray<FArmMouth> ArmMouths;
 	// § street-furniture placements for this rebuild (one bucket per enabled
 	// FurnitureTypes entry). Committed as HISMs / spawned actors.
 	TArray<FRoadNetFurnitureBucket> FurnitureBuckets;
@@ -543,6 +685,24 @@ public:
 	UPROPERTY()
 	TArray<FRoadNetZoneRun> ZoneGraphRuns;
 
+	// Lane graph from the last rebuild. Full rebuild replaces it. A windowed
+	// rebuild drops every node whose joint lies in the dirty tiles, then re-adds
+	// the joints that rebuild could see completely.
+	UPROPERTY(Transient)
+	FRoadNetLaneGraph LaneGraph;
+
+	// Copied off the rebuild context so a second rebuild can be compared. Not saved.
+	TArray<FVector2D> LastApproachStops;
+	TArray<FRoadNetArmWidening> LastArmWidenings;
+	TArray<FRoadNetLateralMove> LastLateralMoves;
+	int32 LastTangentialGores = 0;
+	double LastSurfaceAreaCm2 = 0.0;
+	double LastSidewalkAreaCm2 = 0.0;
+
+	// Nodes, then each node's successors, empty lists included. RoadNet.DumpLaneGraph
+	// prints the same text.
+	FString DumpLaneGraph() const;
+
 	// Which ends of a road meet another road, by the same spatial endpoint weld
 	// BuildEndpointJoints uses. For callers that run OUTSIDE a rebuild, where the
 	// joint topology (FRoadNetRebuildContext::Joints) does not exist yet.
@@ -726,17 +886,18 @@ public:
 	TObjectPtr<UMaterialInterface> MedianMaterial;
 
 	// ---- junctions (§10.8/§10.9) ------------------------------------------
-	// Morphological "close" radius (cm) applied to the merged carriageway. Larger
-	// = rounder junction corners / more gap bridging. Adjustable live with the
-	// [ and ] hotkeys in the RoadNet Draw mode, which step by 10 cm (50 with
-	// Shift) — so the 150 default is the 15 steps a freshly spawned junction
-	// used to need by hand before it read as a real corner rather than a
-	// mitre. Junction paint and signals set themselves back by this much on top
-	// of JunctionClearanceCm: the close fillets the wedge between adjacent
-	// arms, which carries the pavement that much further up each approach.
+	// Kerb return radius (cm) at a street corner: the morphological "close"
+	// radius applied to the merged carriageway at each junction, which rounds
+	// every corner between two arms to an arc of exactly this radius. 3 m is the
+	// usual Israeli urban corner; a junction with a secondary or bigger road
+	// gets 2 m more (5 m), a tangential merge or exit at most 1.5 m. The [ and ]
+	// hotkeys in the RoadNet Draw mode override one junction (10 cm steps, 50
+	// with Shift). Junction paint and signals set themselves back by the radius
+	// on top of JunctionClearanceCm: the fillet carries the pavement that much
+	// further up each approach.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Junctions",
-		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "300.0"))
-	double JunctionSmoothingCm = 150.0;
+		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "1000.0"))
+	double JunctionSmoothingCm = 300.0;
 
 	// Stop-line setback (cm): how far markings and lane ribbons stop BACK from the
 	// true junction area (§2.1 מבואות). Applied as a dilation of the edge-line
@@ -765,6 +926,13 @@ public:
 	// the constructor.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Furniture")
 	TArray<FRoadNetFurnitureType> FurnitureTypes;
+
+	// No furniture within this distance (cm) of the edge of a junction of three or
+	// more arms — measured from the joint out past its widest arm's carriageway +
+	// sidewalk. Dead ends and two-road seams are not junctions. 0 = no clearance.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RoadNet|Furniture",
+		meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "5000.0"))
+	float FurnitureJunctionClearanceCm = 1000.f;
 
 	// ---- standard parking bays (street features) --------------------------
 	// Default stall dimensions used by AddStandardParkingBay for each layout
@@ -1092,6 +1260,25 @@ public:
 	// Returns the number of roads created. Caller triggers Rebuild().
 	int32 SplitRoadsAtCrossings(double MaxZGapCm = 350.0);
 
+	// Weld every junction into ONE shared point. Road points within RadiusCm of a
+	// road end — other ends, and the nearest interior point of a road running
+	// through — collapse onto a single coordinate carrying a single node id, so
+	// the joint is one point instead of a knot of ends 0.5-3 m apart. Interior
+	// points are made ends first by splitting their road (or trimming a stub that
+	// overshoots the junction), and an interior node id shared by two roads (a
+	// crossing through one node) is split the same way.
+	//
+	// RadiusCm is clamped to the joint weld radius (400): a divided road's two
+	// junctions must stay two. Grade-separated pairs (layer / bridge / tunnel, or
+	// more than MaxZGapCm apart) are never welded. OnlyRoads limits the seeds to
+	// those roads' points (a freshly drawn or dragged road); null = whole network.
+	// Idempotent: a welded network moves nothing and is not Modify()'d. Returns
+	// the number of road ends moved. Caller triggers Rebuild().
+	int32 WeldJunctionPoints(double RadiusCm, const TArray<FGuid>* OnlyRoads = nullptr, double MaxZGapCm = 350.0);
+
+	// roadnet.JunctionWeldRadiusCm, for callers that weld outside OSMRoadCore's panel.
+	static double JunctionWeldRadiusCm();
+
 	// ---- standard parking bays (street features) --------------------------
 	// Append a standard parking bay to a road on the given side + layout, using
 	// the network's default stall dimensions. CenterArcCm is the arc-length (cm)
@@ -1266,10 +1453,12 @@ public:
 	// Weld two control points (X = road, Y = point) into one: Snap moves onto
 	// Keep. On two roads, an interior point first splits its road there, so
 	// both meet as road ends and BuildEndpointJoints joins them into one
-	// junction; the moved ends adopt Keep's OSM node id. On one road, neighbours
-	// collapse to one point and the two ends close a loop. Road indices only
-	// grow, except a one-road merge that empties its road. False (OutMsg says
-	// why) when nothing changed. Caller triggers Rebuild().
+	// junction; the moved ends adopt Keep's OSM node id. When exactly two road
+	// ends meet there and their lanes match, they become one road through the
+	// point instead (Keep's road, the other removed, reversed if needed). On one
+	// road, neighbours collapse to one point and the two ends close a loop. A
+	// join or a one-road merge that empties its road removes an index. False
+	// (OutMsg says why) when nothing changed. Caller triggers Rebuild().
 	bool MergeRoadPoints(FIntPoint Keep, FIntPoint Snap, FString& OutMsg);
 
 	// Replace the selected roads with one closed circular ring (Kåsa fit of
@@ -1297,8 +1486,18 @@ public:
 	const TArray<FRoadNetRoundaboutConfig>& GetRoundaboutConfigs() const { return RoundaboutConfigs; }
 
 	// Resolve the stored preset for the junction nearest Loc (within tolerance);
-	// ERoadNetJunctionPreset::None if no override exists there.
+	// ERoadNetJunctionPreset::Auto if no override exists there.
 	ERoadNetJunctionPreset ResolveJunctionPresetNear(const FVector2D& Loc) const;
+
+	// The preset a junction actually paints with: the stored one, with a roundabout's
+	// entry give-way standing in for Auto / None.
+	ERoadNetJunctionPreset EffectiveJunctionPresetAt(const FVector2D& Loc) const;
+
+	// The arms of the junction clip polygon GP in a zone, with their paint resolved
+	// for the junction's effective preset (returned). OutCentre: outer-ring centroid.
+	ERoadNetJunctionPreset CollectJunctionArms(const FRoadNetRebuildContext& Ctx,
+		const TArray<int32>& ZoneRoads, const UE::Geometry::FGeneralPolygon2d& GP,
+		FVector2D& OutCentre, TArray<FRoadNetJunctionArm>& OutArms) const;
 
 	// Advance (Dir=+1) or reverse (Dir=-1) the preset for the junction nearest
 	// Loc, creating an override entry if needed. Returns the new preset. Caller
@@ -1313,12 +1512,12 @@ public:
 	bool ToggleJunctionIslandsNear(const FVector2D& Loc);
 
 	// Resolve the effective morphological-close (smoothing) radius for the
-	// junction nearest Loc: its per-junction override if set, else the network
-	// default (JunctionSmoothingCm).
+	// junction nearest Loc: its per-junction override if set, else the kerb
+	// return radius for the roads there (JunctionSmoothingCm, more on a major road).
 	double ResolveJunctionSmoothingNear(const FVector2D& Loc) const;
 
 	// Nudge the PER-JUNCTION smoothing of the junction nearest Loc by DeltaCm
-	// (clamped 0..300), creating/seeding the override from the current effective
+	// (clamped 0..1000), creating/seeding the override from the current effective
 	// value. Returns the new value; OutJunctionLoc is the matched junction's
 	// location (for a disc-scoped rebuild). Caller triggers Rebuild().
 	double AdjustJunctionSmoothingNear(const FVector2D& Loc, double DeltaCm, FVector2D& OutJunctionLoc);
@@ -1572,6 +1771,13 @@ private:
 	// this must run after the joints and before the curves. See
 	// RoadNetJunctions.cpp.
 	void BuildJunctionChannelization(FRoadNetRebuildContext& Ctx) const;
+	// Measure each junction shift hold (Ctx.RequestedShiftHoldCm) at its stop line
+	// on the junction clip into Ctx.MeasuredShiftHoldCm. Returns how many differ
+	// from what was requested by more than 1 cm, with the largest difference.
+	int32 MeasureShiftHolds(FRoadNetRebuildContext& Ctx, double& OutWorstCm, int32& OutWorstKey) const;
+	// Measured holds from the last rebuild, so the next one starts converged and
+	// the surface plan cache can serve it. Verified again every rebuild.
+	TMap<TPair<FGuid, bool>, double> ShiftHoldMemo;
 	// Vertical alignment: junctions become the vertical points of intersection,
 	// the road runs a straight tangent grade between them (with a span-scaled
 	// deviation budget so long links may still follow the ground), and each
@@ -1588,6 +1794,7 @@ private:
 	void BuildPerimeterLoops(FRoadNetRebuildContext& Ctx) const; // §10.11 loops for PCG export
 	void BuildLaneGraph(FRoadNetRebuildContext& Ctx) const;      // §12.2 lane connectivity
 	void BuildTurnGuides(FRoadNetRebuildContext& Ctx) const;     // LOT"M 809 dashed turn guides through junctions
+	void BuildApproachMarks(FRoadNetRebuildContext& Ctx) const;  // 813 arrows, 808 turn-lane rectangles, 815 painted islands
 	void BuildLaneRibbons(FRoadNetRebuildContext& Ctx) const;    // §12.1 per-lane ribbon polys
 	void BuildJunctionMarkings(FRoadNetRebuildContext& Ctx);     // §2 junction paint + signals
 	void BuildJunctionIslands(FRoadNetRebuildContext& Ctx) const;// § corner channelizing grass islands

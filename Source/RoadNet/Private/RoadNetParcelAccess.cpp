@@ -1074,8 +1074,8 @@ void URoadNetwork::BuildParcelAccessPaths(FRoadNetRebuildContext& Ctx)
 		// Per-point width, not the max: the spur leaves from where the pavement
 		// ends AT THIS FRONTAGE, so a narrow stretch must not push it out to the
 		// width of a bulge somewhere else on the road. The +offset side is the
-		// one bSidewalkLeft controls (see the tile emitter's EmitSide calls).
-		const bool bWalkLeft = (BestPR.Offset >= 0.0);
+		// one bSidewalkRight controls (see the tile emitter's EmitSide calls).
+		const bool bWalkLeft = (BestPR.Offset < 0.0);
 		const double WalkW = (L.bSidewalkLeft || L.bSidewalkRight)
 			? L.SidewalkWidthAt(BestPR.AlongDist, bWalkLeft) : 0.0;
 		const double BandOuter = Half + WalkW;

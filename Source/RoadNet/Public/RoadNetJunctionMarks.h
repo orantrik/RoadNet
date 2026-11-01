@@ -44,6 +44,16 @@ namespace RoadNetJunctionMarks
 		// rule and stripe the entering half of HalfWidthCm.
 		double EnterLoCm = 0.0;
 		double EnterHiCm = 0.0;
+
+		// Lateral span of the whole paved arm at the mouth (same frame), bays and
+		// drops included, so a zebra crosses the widened carriageway. Hi <= Lo:
+		// ±HalfWidthCm.
+		double SurfLoCm = 0.0;
+		double SurfHiCm = 0.0;
+
+		// Per-arm answer for ERoadNetJunctionPreset::Auto (ignored otherwise).
+		bool bStopLine = false;
+		bool bCrosswalk = false;
 	};
 
 	// A placeholder traffic-signal placement (world cm + facing yaw).
@@ -86,6 +96,11 @@ namespace RoadNetJunctionMarks
 	// keep its own copy of the layout, because the crossing length is a setting and a
 	// second copy would silently stop matching the first time it changed.
 	ROADNET_API double ApproachPaintReachCm();
+
+	// Outward distance from FApproach::StopPos to the stop line's centre: behind
+	// the zebra when the arm has one, on the boundary otherwise.
+	ROADNET_API double StopBarOffsetCm(bool bCrosswalk);
+	ROADNET_API double StopBarHalfThickCm();
 
 	// Build paint + signals for one junction from its precomputed approaches.
 	// White paint (bars/stripes) is APPENDED to OutWhite; signal placements are

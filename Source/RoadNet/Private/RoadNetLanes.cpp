@@ -43,7 +43,8 @@ namespace RoadNetLanes
 	}
 
 	void BuildLaneCenterline(
-		const TArray<FVector>& SampledRef, const FRoadNetLane& Lane, TArray<FVector>& Out)
+		const TArray<FVector>& SampledRef, const FRoadNetLane& Lane, TArray<FVector>& Out,
+		const TArray<FRoadNetLateralMove>* Moves)
 	{
 		Out.Reset();
 		const int32 N = SampledRef.Num();
@@ -56,7 +57,8 @@ namespace RoadNetLanes
 		for (int32 i = 0; i < N; ++i)
 		{
 			const double d = Len.IsValidIndex(i) ? Len[i] : 0.0;
-			const double off = LaneOffsetAt(Lane, d);
+			double off = LaneOffsetAt(Lane, d);
+			if (Moves) { off = FRoadNetLateralMove::ApplyAll(*Moves, off, d, Len.Last()); }
 			const FVector2D T = RoadNetMath::TangentAt(SampledRef, i);
 			const FVector2D Rt = RoadNetMath::RightAxis(T);
 			FVector P = SampledRef[i];
@@ -64,5 +66,32 @@ namespace RoadNetLanes
 			P.Y += Rt.Y * off;
 			Out.Add(P);
 		}
+	}
+
+	double MedianOf(const TArray<FRoadNetLane>& Lanes, double& OutCentreCm)
+	{
+		for (const FRoadNetLane& L : Lanes)
+		{
+			if (L.Type == ERoadNetLaneType::Median) { OutCentreCm = L.CenterOffset; return (double)L.Width; }
+		}
+		OutCentreCm = 0.0;
+		return 0.0;
+	}
+
+	int32 MedianInsertIndex(const TArray<FRoadNetLane>& Lanes, bool bDriveOnLeft)
+	{
+		// Drive-on-right carries forward traffic on the +offset side.
+		int32 FirstLane = INDEX_NONE, LastLane = INDEX_NONE;
+		for (int32 i = 0; i < Lanes.Num(); ++i)
+		{
+			const FRoadNetLane& L = Lanes[i];
+			if (L.bOutboard() || L.Type == ERoadNetLaneType::Median) { continue; }
+			if (FirstLane == INDEX_NONE) { FirstLane = i; }
+			LastLane = i;
+			if (!L.bDrivable() || L.Type == ERoadNetLaneType::CenterTurn) { continue; }
+			const bool bRightSide = bDriveOnLeft ? L.bTravelsBackward(bDriveOnLeft) : L.bTravelsForward(bDriveOnLeft);
+			if (bRightSide && L.Direction != ERoadNetLaneDirection::Both) { return i; }
+		}
+		return LastLane != INDEX_NONE ? LastLane + 1 : (FirstLane != INDEX_NONE ? FirstLane : 0);
 	}
 }

@@ -1,0 +1,3472 @@
+## seam
+area surface=140000 sidewalk=0
+reductions 0
+tile 0,0 mesh MarkingsWhite 0,-316,13 19965,315,13
+tile 0,0 mesh Surface 0,-350,12 10000,350,12
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,-175,0 10000,-175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,175,0 10000,175,0
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 9609,350,12 10391,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=51 0,0,12 10000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 0,-350,12 10000,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 0,350,12 10000,350,12
+tile 1,0 mesh MarkingsWhite 10000,-15,13 20000,15,13
+tile 1,0 mesh Surface 10000,-350,12 20000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 9609,-350,12 10391,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=51 10000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 10000,-350,12 20000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 10000,350,12 20000,350,12
+NODE 656254645
+  -
+NODE 985232272
+  -
+NODE 2219033904
+  472056850 985232272 1 0 0 0
+NODE 2322543493
+  743465955 656254645 1 0 0 0
+
+## seam left
+area surface=140000 sidewalk=0
+reductions 0
+tile 0,0 mesh MarkingsWhite 0,-316,13 19965,315,13
+tile 0,0 mesh Surface 0,-350,12 10000,350,12
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,-175,0 10000,-175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,175,0 10000,175,0
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 9609,350,12 10391,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=51 0,0,12 10000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 0,-350,12 10000,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 0,350,12 10000,350,12
+tile 1,0 mesh MarkingsWhite 10000,-15,13 20000,15,13
+tile 1,0 mesh Surface 10000,-350,12 20000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 9609,-350,12 10391,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=51 10000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 10000,-350,12 20000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 10000,350,12 20000,350,12
+NODE 656254645
+  -
+NODE 985232272
+  -
+NODE 2219033904
+  472056850 985232272 1 0 0 0
+NODE 2322543493
+  743465955 656254645 1 0 0 0
+
+## seam no-channel
+area surface=140000 sidewalk=0
+reductions 0
+tile 0,0 mesh MarkingsWhite 0,-316,13 19965,315,13
+tile 0,0 mesh Surface 0,-350,12 10000,350,12
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,-175,0 10000,-175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,175,0 10000,175,0
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 9609,350,12 10391,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=51 0,0,12 10000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 0,-350,12 10000,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 0,350,12 10000,350,12
+tile 1,0 mesh MarkingsWhite 10000,-15,13 20000,15,13
+tile 1,0 mesh Surface 10000,-350,12 20000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 9609,-350,12 10391,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=51 10000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 10000,-350,12 20000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 10000,350,12 20000,350,12
+NODE 656254645
+  -
+NODE 985232272
+  -
+NODE 2219033904
+  472056850 985232272 1 0 0 0
+NODE 2322543493
+  743465955 656254645 1 0 0 0
+
+## seam left no-channel
+area surface=140000 sidewalk=0
+reductions 0
+tile 0,0 mesh MarkingsWhite 0,-316,13 19965,315,13
+tile 0,0 mesh Surface 0,-350,12 10000,350,12
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,-175,0 10000,-175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,175,0 10000,175,0
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 9609,350,12 10391,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=51 0,0,12 10000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 0,-350,12 10000,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 0,350,12 10000,350,12
+tile 1,0 mesh MarkingsWhite 10000,-15,13 20000,15,13
+tile 1,0 mesh Surface 10000,-350,12 20000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 9609,-350,12 10391,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=51 10000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 10000,-350,12 20000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 10000,350,12 20000,350,12
+NODE 656254645
+  -
+NODE 985232272
+  -
+NODE 2219033904
+  472056850 985232272 1 0 0 0
+NODE 2322543493
+  743465955 656254645 1 0 0 0
+
+## seam 60
+area surface=139856 sidewalk=0
+reductions 0
+stop 10267,462
+stop 9466,0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9379,315,13
+tile 0,0 mesh Surface 0,-350,12 9397,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9351,350,12 9400,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=47 0,0,12 9200,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 0,-350,12 9200,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 0,350,12 9200,350,12
+tile 0,1 mesh MarkingsWhite 9193,-316,13 10585,856,13
+tile 0,1 mesh Surface 9177,-350,12 10604,869,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10452,432,0 9400,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,175,0 10148,607,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=11 10297,1214,12 0,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=15 9351,-350,12 10603,345,12
+tile 1,0 mesh MarkingsWhite 10130,383,13 15253,8785,13
+tile 1,0 mesh Surface 10098,347,12 15303,8835,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=101 10628,387,12 10097,868,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=47 10400,693,12 15000,8660,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 10703,518,12 15303,8485,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 10097,868,12 14697,8835,12
+NODE 656254645
+  -
+NODE 985232272
+  -
+NODE 2219033904
+  472056850 985232272 1 0 0 0
+NODE 2322543493
+  743465955 656254645 1 0 0 0
+
+## seam 60 left
+area surface=139856 sidewalk=0
+reductions 0
+stop 10267,462
+stop 9466,0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9379,315,13
+tile 0,0 mesh Surface 0,-350,12 9397,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9351,350,12 9400,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=47 0,0,12 9200,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 0,-350,12 9200,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 0,350,12 9200,350,12
+tile 0,1 mesh MarkingsWhite 9193,-316,13 10585,856,13
+tile 0,1 mesh Surface 9177,-350,12 10604,869,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10148,607,0 9400,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,-175,0 10452,432,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=11 10297,1214,12 0,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=15 9351,-350,12 10603,345,12
+tile 1,0 mesh MarkingsWhite 10130,383,13 15253,8785,13
+tile 1,0 mesh Surface 10098,347,12 15303,8835,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=101 10628,387,12 10097,868,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=47 10400,693,12 15000,8660,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 10703,518,12 15303,8485,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 10097,868,12 14697,8835,12
+NODE 656254645
+  -
+NODE 985232272
+  -
+NODE 2219033904
+  472056850 985232272 1 0 0 0
+NODE 2322543493
+  743465955 656254645 1 0 0 0
+
+## seam 60 no-channel
+area surface=139856 sidewalk=0
+reductions 0
+stop 10267,462
+stop 9466,0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9379,315,13
+tile 0,0 mesh Surface 0,-350,12 9397,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9351,350,12 9400,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=47 0,0,12 9200,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 0,-350,12 9200,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 0,350,12 9200,350,12
+tile 0,1 mesh MarkingsWhite 9193,-316,13 10585,856,13
+tile 0,1 mesh Surface 9177,-350,12 10604,869,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10452,432,0 9400,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,175,0 10148,607,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=11 10297,1214,12 0,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=15 9351,-350,12 10603,345,12
+tile 1,0 mesh MarkingsWhite 10130,383,13 15253,8785,13
+tile 1,0 mesh Surface 10098,347,12 15303,8835,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=101 10628,387,12 10097,868,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=47 10400,693,12 15000,8660,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 10703,518,12 15303,8485,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 10097,868,12 14697,8835,12
+NODE 656254645
+  -
+NODE 985232272
+  -
+NODE 2219033904
+  472056850 985232272 1 0 0 0
+NODE 2322543493
+  743465955 656254645 1 0 0 0
+
+## seam 60 left no-channel
+area surface=139856 sidewalk=0
+reductions 0
+stop 10267,462
+stop 9466,0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9379,315,13
+tile 0,0 mesh Surface 0,-350,12 9397,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9351,350,12 9400,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=47 0,0,12 9200,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 0,-350,12 9200,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 0,350,12 9200,350,12
+tile 0,1 mesh MarkingsWhite 9193,-316,13 10585,856,13
+tile 0,1 mesh Surface 9177,-350,12 10604,869,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10148,607,0 9400,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,-175,0 10452,432,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=11 10297,1214,12 0,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=15 9351,-350,12 10603,345,12
+tile 1,0 mesh MarkingsWhite 10130,383,13 15253,8785,13
+tile 1,0 mesh Surface 10098,347,12 15303,8835,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=101 10628,387,12 10097,868,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=47 10400,693,12 15000,8660,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 10703,518,12 15303,8485,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 10097,868,12 14697,8835,12
+NODE 656254645
+  -
+NODE 985232272
+  -
+NODE 2219033904
+  472056850 985232272 1 0 0 0
+NODE 2322543493
+  743465955 656254645 1 0 0 0
+
+## seam 3 into 2
+area surface=197685 sidewalk=0
+reductions 1
+tile 0,0 mesh MarkingsWhite 0,-181,13 9900,181,13
+tile 0,0 mesh Surface 0,-525,12 10000,637,12
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,-350,0 10000,-175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,0,0 10000,175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,350,0 10000,525,0
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 10063,698,12 10000,-463,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=51 0,0,12 10000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 0,-525,12 10000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 0,525,12 10000,525,12
+tile 1,0 mesh MarkingsWhite 35,-491,13 19965,661,13
+tile 1,0 mesh Surface 10000,-463,12 20000,700,12
+tile 1,0 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough,RoadNetLaneVirtual] pts=2 10000,525,0 19800,175,0
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=46 10044,-419,12 10000,700,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=51 10000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 10000,-350,12 20000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 10000,700,12 20000,450,12
+widen road=1 start=1 side=1 kind=0 lanes=1 w=350 taper=14000
+NODE 6886110
+  -
+NODE 177815550
+  3583008192 656254645 1 0 0 0
+NODE 656254645
+  -
+NODE 2322543493
+  2983618125 4216479214 1 0 0 0
+NODE 3465596146
+  3541368824 3611099120 1 0 0 0
+NODE 3611099120
+  -
+NODE 4216479214
+  3231811093 6886110 1 0 1 0
+
+## seam 3 into 2 left
+area surface=197685 sidewalk=0
+reductions 1
+tile 0,0 mesh MarkingsWhite 0,-181,13 9900,181,13
+tile 0,0 mesh Surface 0,-637,12 10000,525,12
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,-350,0 10000,-525,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,0,0 10000,-175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,350,0 10000,175,0
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=14 10044,419,12 10000,-700,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=51 0,0,12 10000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 0,-525,12 10000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 0,525,12 10000,525,12
+tile 1,0 mesh MarkingsWhite 35,-665,13 19965,490,13
+tile 1,0 mesh Surface 10000,-700,12 20000,463,12
+tile 1,0 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough,RoadNetLaneVirtual] pts=2 10000,-525,0 19800,-175,0
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=44 10063,-698,12 10000,463,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=51 10000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 10000,-700,12 20000,-450,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 10000,350,12 20000,350,12
+widen road=1 start=1 side=0 kind=0 lanes=1 w=350 taper=14000
+NODE 6886110
+  -
+NODE 177815550
+  3583008192 656254645 1 0 0 0
+NODE 656254645
+  -
+NODE 2322543493
+  2983618125 4216479214 1 0 0 0
+NODE 3465596146
+  3541368824 3611099120 1 0 0 0
+NODE 3611099120
+  -
+NODE 4216479214
+  3231811093 6886110 1 0 1 0
+
+## seam 3 into 2 no-channel
+area surface=175185 sidewalk=0
+reductions 1
+tile 0,0 mesh MarkingsWhite 0,-181,13 9900,181,13
+tile 0,0 mesh Surface 0,-525,12 10000,525,12
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough] pts=2 10000,350,0 10000,175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,-350,0 10000,-175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,0,0 10000,175,0
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=11 10044,419,12 10000,-463,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=51 0,0,12 10000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 0,-525,12 10000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 0,525,12 10000,525,12
+tile 1,0 mesh MarkingsWhite 35,-491,13 19965,490,13
+tile 1,0 mesh Surface 10000,-463,12 20000,463,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 10044,-419,12 10000,463,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=51 10000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 10000,-350,12 20000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 10000,350,12 20000,350,12
+NODE 177815550
+  3583008192 656254645 1 0 0 0
+NODE 656254645
+  -
+NODE 2322543493
+  743465955 656254645 1 0 1 0
+NODE 3465596146
+  3541368824 3611099120 1 0 0 0
+NODE 3611099120
+  -
+
+## seam 3 into 2 left no-channel
+area surface=175185 sidewalk=0
+reductions 1
+tile 0,0 mesh MarkingsWhite 0,-181,13 9900,181,13
+tile 0,0 mesh Surface 0,-525,12 10000,525,12
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough] pts=2 10000,-350,0 10000,-175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,0,0 10000,-175,0
+tile 0,0 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,350,0 10000,175,0
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=11 10044,419,12 10000,-463,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=51 0,0,12 10000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 0,-525,12 10000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 0,525,12 10000,525,12
+tile 1,0 mesh MarkingsWhite 35,-491,13 19965,490,13
+tile 1,0 mesh Surface 10000,-463,12 20000,463,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 10044,-419,12 10000,463,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=51 10000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=51 10000,-350,12 20000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=51 10000,350,12 20000,350,12
+NODE 177815550
+  3583008192 656254645 1 0 0 0
+NODE 656254645
+  -
+NODE 2322543493
+  743465955 656254645 1 0 1 0
+NODE 3465596146
+  3541368824 3611099120 1 0 0 0
+NODE 3611099120
+  -
+
+## cross 2+2
+area surface=275550 sidewalk=0
+reductions 0
+stop -590,0
+stop 0,-590
+stop 0,590
+stop 590,0
+tile 0,0 hism ArrowThrough -2400,175,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,175,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-316,13 -910,315,13
+tile 0,0 mesh Surface -10000,-350,12 -910,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -794,350,12 -500,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 -10000,0,12 -1000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -10000,-350,12 -1000,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 -10000,350,12 -1000,350,12
+tile 0,1 mesh MarkingsWhite -910,-910,13 910,910,13
+tile 0,1 mesh Surface -910,-910,12 910,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -175,-600,0 -175,600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -600,175,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 175,600,0 175,-600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 600,-175,0 -600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,-600,0 -600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,-600,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,175,0 -175,600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,175,0 175,-600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,600,0 -600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,600,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,-175,0 -175,600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,-175,0 175,-600,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=5 -10000,-350,12 -350,-10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 -350,10000,12 -10000,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 350,-794,12 10000,-350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 10000,350,12 350,10000,12
+tile 1,0 hism ArrowThrough 2400,-175,16 yaw=180
+tile 1,0 hism ArrowThrough 5400,-175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 910,-316,13 10000,315,13
+tile 1,0 mesh Surface 910,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 794,-350,12 794,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 1000,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 1000,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 1000,350,12 10000,350,12
+tile 2,0 hism ArrowThrough 175,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 175,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -316,910,13 315,10000,13
+tile 2,0 mesh Surface -350,910,12 350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 350,794,12 -350,500,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=46 0,10000,12 0,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -350,10000,12 -350,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 350,10000,12 350,1000,12
+tile 3,0 hism ArrowThrough -175,-2400,16 yaw=90
+tile 3,0 hism ArrowThrough -175,-5400,16 yaw=90
+tile 3,0 mesh MarkingsWhite -316,-10000,13 315,-910,13
+tile 3,0 mesh Surface -350,-10000,12 350,-910,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 -350,-794,12 350,-10000,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=46 0,-1000,12 0,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -350,-1000,12 -350,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 350,-1000,12 350,-10000,12
+NODE 713230961
+  -
+NODE 1161263239
+  -
+NODE 1996651818
+  -
+NODE 2415832622
+  811997739 1996651818 1 0 0 0
+  2470880171 1161263239 3 0 0 0
+  2799580655 713230961 2 0 0 0
+NODE 3229030968
+  3286821672 713230961 1 0 0 0
+  3638345225 1996651818 3 0 0 0
+  3847272272 3757206299 2 0 0 0
+NODE 3562729957
+  614093229 1996651818 2 0 0 0
+  2334200527 1161263239 1 0 0 0
+  2508751870 3757206299 3 0 0 0
+NODE 3746555805
+  1845033593 713230961 3 0 0 0
+  3115364877 3757206299 1 0 0 0
+  3169358595 1161263239 2 0 0 0
+NODE 3757206299
+  -
+
+## cross 2+2 left
+area surface=275550 sidewalk=0
+reductions 0
+stop -590,0
+stop 0,-590
+stop 0,590
+stop 590,0
+tile 0,0 hism ArrowThrough -2400,-175,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,-175,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-316,13 -910,315,13
+tile 0,0 mesh Surface -10000,-350,12 -910,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -794,350,12 -500,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 -10000,0,12 -1000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -10000,-350,12 -1000,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 -10000,350,12 -1000,350,12
+tile 0,1 mesh MarkingsWhite -910,-910,13 910,910,13
+tile 0,1 mesh Surface -910,-910,12 910,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -175,600,0 -175,-600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -600,-175,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 175,-600,0 175,600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 600,175,0 -600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,600,0 -600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,600,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,-175,0 -175,-600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,-175,0 175,600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,-600,0 -600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,-600,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,175,0 -175,-600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,175,0 175,600,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=5 -10000,-350,12 -350,-10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 -350,10000,12 -10000,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 350,-794,12 10000,-350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 10000,350,12 350,10000,12
+tile 1,0 hism ArrowThrough 2400,175,16 yaw=180
+tile 1,0 hism ArrowThrough 5400,175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 910,-316,13 10000,315,13
+tile 1,0 mesh Surface 910,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 794,-350,12 794,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 1000,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 1000,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 1000,350,12 10000,350,12
+tile 2,0 hism ArrowThrough -175,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough -175,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -316,910,13 315,10000,13
+tile 2,0 mesh Surface -350,910,12 350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 350,794,12 -350,500,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=46 0,10000,12 0,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -350,10000,12 -350,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 350,10000,12 350,1000,12
+tile 3,0 hism ArrowThrough 175,-2400,16 yaw=90
+tile 3,0 hism ArrowThrough 175,-5400,16 yaw=90
+tile 3,0 mesh MarkingsWhite -316,-10000,13 315,-910,13
+tile 3,0 mesh Surface -350,-10000,12 350,-910,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 -350,-794,12 350,-10000,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=46 0,-1000,12 0,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -350,-1000,12 -350,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 350,-1000,12 350,-10000,12
+NODE 713230961
+  -
+NODE 1161263239
+  -
+NODE 1996651818
+  -
+NODE 2415832622
+  811997739 1996651818 1 0 0 0
+  2470880171 1161263239 3 0 0 0
+  2799580655 713230961 2 0 0 0
+NODE 3229030968
+  3286821672 713230961 1 0 0 0
+  3638345225 1996651818 3 0 0 0
+  3847272272 3757206299 2 0 0 0
+NODE 3562729957
+  614093229 1996651818 2 0 0 0
+  2334200527 1161263239 1 0 0 0
+  2508751870 3757206299 3 0 0 0
+NODE 3746555805
+  1845033593 713230961 3 0 0 0
+  3115364877 3757206299 1 0 0 0
+  3169358595 1161263239 2 0 0 0
+NODE 3757206299
+  -
+
+## cross 2+2 no-channel
+area surface=275550 sidewalk=0
+reductions 0
+stop -590,0
+stop 0,-590
+stop 0,590
+stop 590,0
+tile 0,0 hism ArrowThrough -2400,175,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,175,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-316,13 -910,315,13
+tile 0,0 mesh Surface -10000,-350,12 -910,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -794,350,12 -500,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 -10000,0,12 -1000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -10000,-350,12 -1000,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 -10000,350,12 -1000,350,12
+tile 0,1 mesh MarkingsWhite -910,-910,13 910,910,13
+tile 0,1 mesh Surface -910,-910,12 910,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -175,-600,0 -175,600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -600,175,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 175,600,0 175,-600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 600,-175,0 -600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,-600,0 -600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,-600,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,175,0 -175,600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,175,0 175,-600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,600,0 -600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,600,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,-175,0 -175,600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,-175,0 175,-600,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=5 -10000,-350,12 -350,-10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 -350,10000,12 -10000,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 350,-794,12 10000,-350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 10000,350,12 350,10000,12
+tile 1,0 hism ArrowThrough 2400,-175,16 yaw=180
+tile 1,0 hism ArrowThrough 5400,-175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 910,-316,13 10000,315,13
+tile 1,0 mesh Surface 910,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 794,-350,12 794,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 1000,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 1000,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 1000,350,12 10000,350,12
+tile 2,0 hism ArrowThrough 175,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 175,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -316,910,13 315,10000,13
+tile 2,0 mesh Surface -350,910,12 350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 350,794,12 -350,500,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=46 0,10000,12 0,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -350,10000,12 -350,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 350,10000,12 350,1000,12
+tile 3,0 hism ArrowThrough -175,-2400,16 yaw=90
+tile 3,0 hism ArrowThrough -175,-5400,16 yaw=90
+tile 3,0 mesh MarkingsWhite -316,-10000,13 315,-910,13
+tile 3,0 mesh Surface -350,-10000,12 350,-910,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 -350,-794,12 350,-10000,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=46 0,-1000,12 0,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -350,-1000,12 -350,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 350,-1000,12 350,-10000,12
+NODE 713230961
+  -
+NODE 1161263239
+  -
+NODE 1996651818
+  -
+NODE 2415832622
+  811997739 1996651818 1 0 0 0
+  2470880171 1161263239 3 0 0 0
+  2799580655 713230961 2 0 0 0
+NODE 3229030968
+  3286821672 713230961 1 0 0 0
+  3638345225 1996651818 3 0 0 0
+  3847272272 3757206299 2 0 0 0
+NODE 3562729957
+  614093229 1996651818 2 0 0 0
+  2334200527 1161263239 1 0 0 0
+  2508751870 3757206299 3 0 0 0
+NODE 3746555805
+  1845033593 713230961 3 0 0 0
+  3115364877 3757206299 1 0 0 0
+  3169358595 1161263239 2 0 0 0
+NODE 3757206299
+  -
+
+## cross 2+2 left no-channel
+area surface=275550 sidewalk=0
+reductions 0
+stop -590,0
+stop 0,-590
+stop 0,590
+stop 590,0
+tile 0,0 hism ArrowThrough -2400,-175,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,-175,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-316,13 -910,315,13
+tile 0,0 mesh Surface -10000,-350,12 -910,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -794,350,12 -500,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 -10000,0,12 -1000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -10000,-350,12 -1000,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 -10000,350,12 -1000,350,12
+tile 0,1 mesh MarkingsWhite -910,-910,13 910,910,13
+tile 0,1 mesh Surface -910,-910,12 910,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -175,600,0 -175,-600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -600,-175,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 175,-600,0 175,600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 600,175,0 -600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,600,0 -600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,600,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,-175,0 -175,-600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,-175,0 175,600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,-600,0 -600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,-600,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,175,0 -175,-600,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,175,0 175,600,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=5 -10000,-350,12 -350,-10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 -350,10000,12 -10000,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 350,-794,12 10000,-350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 10000,350,12 350,10000,12
+tile 1,0 hism ArrowThrough 2400,175,16 yaw=180
+tile 1,0 hism ArrowThrough 5400,175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 910,-316,13 10000,315,13
+tile 1,0 mesh Surface 910,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 794,-350,12 794,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 1000,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 1000,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 1000,350,12 10000,350,12
+tile 2,0 hism ArrowThrough -175,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough -175,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -316,910,13 315,10000,13
+tile 2,0 mesh Surface -350,910,12 350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 350,794,12 -350,500,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=46 0,10000,12 0,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -350,10000,12 -350,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 350,10000,12 350,1000,12
+tile 3,0 hism ArrowThrough 175,-2400,16 yaw=90
+tile 3,0 hism ArrowThrough 175,-5400,16 yaw=90
+tile 3,0 mesh MarkingsWhite -316,-10000,13 315,-910,13
+tile 3,0 mesh Surface -350,-10000,12 350,-910,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 -350,-794,12 350,-10000,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=46 0,-1000,12 0,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -350,-1000,12 -350,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 350,-1000,12 350,-10000,12
+NODE 713230961
+  -
+NODE 1161263239
+  -
+NODE 1996651818
+  -
+NODE 2415832622
+  811997739 1996651818 1 0 0 0
+  2470880171 1161263239 3 0 0 0
+  2799580655 713230961 2 0 0 0
+NODE 3229030968
+  3286821672 713230961 1 0 0 0
+  3638345225 1996651818 3 0 0 0
+  3847272272 3757206299 2 0 0 0
+NODE 3562729957
+  614093229 1996651818 2 0 0 0
+  2334200527 1161263239 1 0 0 0
+  2508751870 3757206299 3 0 0 0
+NODE 3746555805
+  1845033593 713230961 3 0 0 0
+  3115364877 3757206299 1 0 0 0
+  3169358595 1161263239 2 0 0 0
+NODE 3757206299
+  -
+
+## T 3-lane stem
+area surface=274297 sidewalk=0
+reductions 2
+stop 10000,1797
+stop 11115,0
+stop 8885,0
+tile 0,0 hism ArrowThrough 7000,175,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9086,315,13
+tile 0,0 mesh Surface 0,-350,12 9120,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 8950,350,12 11050,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=45 0,0,12 8800,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 0,-350,12 8800,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 0,350,12 8800,350,12
+tile 0,1 mesh MarkingsWhite 8915,-316,13 11085,1600,13
+tile 0,1 mesh Surface 8915,-350,12 11085,1610,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,1800,0 11200,525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10350,1800,0 11200,525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11200,-175,0 8800,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8800,175,0 11200,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9650,1800,0 11200,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9650,1800,0 8800,-175,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 11000,1025,12 10525,8000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9475,8000,12 0,350,12
+tile 1,0 hism ArrowThrough 13000,-175,16 yaw=180
+tile 1,0 hism ArrowThrough 13000,525,16 yaw=180
+tile 1,0 hism ArrowThrough 13000,525,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10914,-316,13 20000,988,13
+tile 1,0 mesh Surface 10880,-350,12 20000,1023,12
+tile 1,0 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough,RoadNetLaneVirtual] pts=2 11200,525,0 19800,175,0
+tile 1,0 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough,RoadNetLaneVirtual] pts=2 11200,525,0 19800,175,0
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=40 8950,-350,12 11200,1020,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=45 11200,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 11200,-350,12 20000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 11200,1020,12 20000,800,12
+tile 2,0 hism ArrowThrough 10000,3600,16 yaw=-90
+tile 2,0 hism ArrowThrough 10350,3600,16 yaw=-90
+tile 2,0 hism ArrowThrough 9650,3600,16 yaw=-90
+tile 2,0 hism ArrowThrough 9650,6600,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9509,1215,13 10490,8000,13
+tile 2,0 mesh Surface 9475,1600,12 10525,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10525,1037,12 9475,500,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=32 10000,8000,12 10000,1800,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=32 9475,8000,12 9475,1800,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=32 10525,8000,12 10525,1800,12
+widen road=1 start=1 side=1 kind=0 lanes=2 w=700 taper=28000
+NODE 113571517
+  1756214202 1732915029 1 0 0 0
+  3667977079 2859970804 2 0 0 0
+NODE 833980904
+  142025840 1019912723 1 0 0 0
+NODE 1019912723
+  413050085 1244864822 1 0 1 0
+NODE 1112333744
+  673105013 2859970804 1 0 0 0
+NODE 1206673646
+  698670740 1244864822 1 0 1 0
+NODE 1244864822
+  -
+NODE 1672596159
+  4013024766 1206673646 1 0 0 0
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+NODE 2859970804
+  -
+
+## T 3-lane stem left
+area surface=279313 sidewalk=0
+reductions 2
+stop 10000,590
+stop 11115,0
+stop 8885,0
+tile 0,0 hism ArrowThrough 7000,-175,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9086,315,13
+tile 0,0 mesh Surface 0,-350,12 9120,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 8950,350,12 9557,-350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9691,-433,12 10000,-1050,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=45 0,0,12 8800,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 0,-350,12 8800,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 0,350,12 8800,350,12
+tile 0,1 mesh MarkingsWhite 8915,-871,13 11085,910,13
+tile 0,1 mesh Surface 8915,-875,12 11085,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10000,600,0 11200,-525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10350,600,0 11200,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11200,175,0 8800,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8800,-175,0 11200,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9650,600,0 11200,-525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9650,600,0 8800,175,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 0,-350,12 9980,-1011,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 20000,350,12 10525,983,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9475,983,12 0,350,12
+tile 1,0 hism ArrowThrough 13000,-525,16 yaw=180
+tile 1,0 hism ArrowThrough 13000,-525,16 yaw=180
+tile 1,0 hism ArrowThrough 13000,175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 9949,-1015,13 20000,315,13
+tile 1,0 mesh Surface 9908,-1050,12 20000,350,12
+tile 1,0 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough,RoadNetLaneVirtual] pts=2 11200,-525,0 19800,-175,0
+tile 1,0 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough,RoadNetLaneVirtual] pts=2 11200,-525,0 19800,-175,0
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=40 10044,-1049,12 11050,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=45 11200,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 11200,-1020,12 20000,-800,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 11200,350,12 20000,350,12
+tile 2,0 hism ArrowThrough 10000,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 10350,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 9650,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 9650,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9509,910,13 10490,8000,13
+tile 2,0 mesh Surface 9475,910,12 10525,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=10 10525,500,12 9475,500,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=36 10000,8000,12 10000,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=36 9475,8000,12 9475,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=36 10525,8000,12 10525,1000,12
+widen road=1 start=1 side=0 kind=0 lanes=2 w=700 taper=28000
+NODE 113571517
+  1756214202 1732915029 1 0 0 0
+NODE 833980904
+  142025840 1019912723 1 0 0 0
+NODE 1019912723
+  413050085 1244864822 1 0 1 0
+NODE 1112333744
+  673105013 2859970804 1 0 0 0
+NODE 1206673646
+  698670740 1244864822 1 0 1 0
+NODE 1244864822
+  -
+NODE 1672596159
+  3648587306 2859970804 2 0 0 0
+  4013024766 1206673646 1 0 0 0
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+NODE 2859970804
+  -
+
+## T 3-lane stem no-channel
+area surface=220550 sidewalk=0
+reductions 2
+stop 10000,590
+stop 11115,0
+stop 8885,0
+tile 0,0 hism ArrowThrough 7000,175,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9086,315,13
+tile 0,0 mesh Surface 0,-350,12 9120,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 8950,350,12 11050,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=45 0,0,12 8800,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 0,-350,12 8800,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 0,350,12 8800,350,12
+tile 0,1 mesh MarkingsWhite 8915,-316,13 11085,910,13
+tile 0,1 mesh Surface 8915,-350,12 11085,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough] pts=2 10000,600,0 11200,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough] pts=2 10350,600,0 11200,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11200,-175,0 8800,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8800,175,0 11200,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9650,600,0 11200,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9650,600,0 8800,-175,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=5 11050,350,12 10525,8000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9475,8000,12 0,350,12
+tile 1,0 hism ArrowThrough 13000,-175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10914,-316,13 20000,315,13
+tile 1,0 mesh Surface 10880,-350,12 20000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=5 8950,-350,12 20000,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=45 11200,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 11200,-350,12 20000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 11200,350,12 20000,350,12
+tile 2,0 hism ArrowThrough 10000,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 10350,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 9650,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 9650,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9509,910,13 10491,8000,13
+tile 2,0 mesh Surface 9475,910,12 10525,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10525,500,12 9475,500,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=36 10000,8000,12 10000,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=36 9475,8000,12 9475,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=36 10525,8000,12 10525,1000,12
+NODE 113571517
+  1756214202 1732915029 1 0 0 0
+  3667977079 2859970804 2 0 0 0
+NODE 833980904
+  2041320301 1732915029 1 0 1 0
+NODE 1112333744
+  673105013 2859970804 1 0 0 0
+NODE 1672596159
+  2460450555 1732915029 1 0 1 0
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+NODE 2859970804
+  -
+
+## T 3-lane stem left no-channel
+area surface=220550 sidewalk=0
+reductions 2
+stop 10000,590
+stop 11115,0
+stop 8885,0
+tile 0,0 hism ArrowThrough 7000,-175,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9086,315,13
+tile 0,0 mesh Surface 0,-350,12 9120,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 8950,350,12 11050,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=45 0,0,12 8800,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 0,-350,12 8800,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 0,350,12 8800,350,12
+tile 0,1 mesh MarkingsWhite 8915,-316,13 11085,910,13
+tile 0,1 mesh Surface 8915,-350,12 11085,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough] pts=2 10000,600,0 11200,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneMerge,RoadNetLaneThrough] pts=2 9650,600,0 11200,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10350,600,0 11200,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11200,175,0 8800,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8800,-175,0 11200,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9650,600,0 8800,175,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=5 11050,350,12 10525,8000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9475,8000,12 0,350,12
+tile 1,0 hism ArrowThrough 13000,175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10914,-316,13 20000,315,13
+tile 1,0 mesh Surface 10880,-350,12 20000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=5 8950,-350,12 20000,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=45 11200,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 11200,-350,12 20000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 11200,350,12 20000,350,12
+tile 2,0 hism ArrowThrough 10000,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 10350,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 9650,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 9650,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9509,910,13 10491,8000,13
+tile 2,0 mesh Surface 9475,910,12 10525,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10525,500,12 9475,500,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=36 10000,8000,12 10000,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=36 9475,8000,12 9475,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=36 10525,8000,12 10525,1000,12
+NODE 113571517
+  1756214202 1732915029 1 0 0 0
+NODE 833980904
+  2041320301 1732915029 1 0 1 0
+NODE 1112333744
+  673105013 2859970804 1 0 0 0
+NODE 1672596159
+  2460450555 1732915029 1 0 1 0
+  3648587306 2859970804 2 0 0 0
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+NODE 2859970804
+  -
+
+## T 3+3 main
+area surface=468875 sidewalk=0
+reductions 0
+stop 10000,1290
+stop 11640,0
+stop 8360,0
+tile 0,0 hism ArrowThrough 3600,875,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,175,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,525,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,875,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-1016,13 9041,1015,13
+tile 0,0 mesh Surface 0,-1050,12 9083,1050,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9500,1050,12 11538,-1050,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=44 0,0,12 8600,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 0,-1050,12 8600,-1050,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 0,1050,12 8600,1050,12
+tile 0,1 mesh MarkingsWhite 8600,-1016,13 11400,1610,13
+tile 0,1 mesh Surface 8600,-1050,12 11400,1610,12
+tile 0,1 spline [RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,1200,0 11600,175,0
+tile 0,1 spline [RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,1200,0 11600,525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,1200,0 11600,875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,-175,0 8400,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,-525,0 8400,-525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,-875,0 8400,-875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,175,0 11600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,525,0 11600,525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,875,0 11600,875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10175,1200,0 8400,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 11600,-175,0 9825,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 8400,875,0 9825,1200,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 10500,1050,12 10350,7800,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9650,7800,12 8462,1050,12
+tile 1,0 hism ArrowThrough 13400,-175,16 yaw=180
+tile 1,0 hism ArrowThrough 13400,-525,16 yaw=180
+tile 1,0 hism ArrowThrough 13400,-875,16 yaw=180
+tile 1,0 hism ArrowThrough 16400,-175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10959,-1016,13 20000,1015,13
+tile 1,0 mesh Surface 10917,-1050,12 20000,1050,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 8462,-1050,12 11538,1050,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-1050,12 20000,-1050,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,1050,12 20000,1050,12
+tile 2,0 hism ArrowThrough 10175,3000,16 yaw=-90
+tile 2,0 hism ArrowThrough 10175,6000,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9684,1610,13 10316,8000,13
+tile 2,0 mesh Surface 9650,1610,12 10350,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 10350,1200,12 9650,1200,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=32 10000,8000,12 10000,1800,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=32 9650,8000,12 9650,1800,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=32 10350,8000,12 10350,1800,12
+NODE 26352841
+  2047945294 2144933682 1 0 0 0
+NODE 542498875
+  -
+NODE 1037882168
+  193756034 542498875 2 0 0 0
+  3479411049 3235378634 1 0 0 0
+NODE 1112333744
+  673105013 2859970804 1 0 0 0
+NODE 1468335634
+  1257875902 4252238361 1 0 0 0
+NODE 1672596159
+  356145763 3235378634 2 0 0 0
+  1373280526 4252238361 1 0 0 1
+  2460450555 1732915029 1 0 0 0
+  4072116857 3510760665 1 0 0 1
+NODE 1732915029
+  -
+NODE 2025992221
+  509952291 542498875 3 0 0 0
+  2214402469 1732915029 1 0 0 0
+NODE 2144933682
+  -
+NODE 2859970804
+  -
+NODE 3235378634
+  -
+NODE 3510760665
+  -
+NODE 4252238361
+  -
+NODE 4277978556
+  2937845079 3510760665 1 0 0 0
+
+## T 3+3 main left
+area surface=468875 sidewalk=0
+reductions 0
+stop 10000,1290
+stop 11640,0
+stop 8360,0
+tile 0,0 hism ArrowThrough 3600,-175,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,-175,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,-525,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,-875,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-1016,13 9041,1015,13
+tile 0,0 mesh Surface 0,-1050,12 9083,1050,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9500,1050,12 11538,-1050,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=44 0,0,12 8600,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 0,-1050,12 8600,-1050,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 0,1050,12 8600,1050,12
+tile 0,1 mesh MarkingsWhite 8600,-1016,13 11400,1610,13
+tile 0,1 mesh Surface 8600,-1050,12 11400,1610,12
+tile 0,1 spline [RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,1200,0 11600,-175,0
+tile 0,1 spline [RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,1200,0 11600,-525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,175,0 8400,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,525,0 8400,525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,875,0 8400,875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,-175,0 11600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,-525,0 11600,-525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,-875,0 11600,-875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,1200,0 11600,-875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 11600,875,0 10175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 8400,-175,0 10175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9825,1200,0 8400,875,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 10500,1050,12 10350,7800,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9650,7800,12 8462,1050,12
+tile 1,0 hism ArrowThrough 13400,175,16 yaw=180
+tile 1,0 hism ArrowThrough 13400,525,16 yaw=180
+tile 1,0 hism ArrowThrough 13400,875,16 yaw=180
+tile 1,0 hism ArrowThrough 16400,875,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10959,-1016,13 20000,1015,13
+tile 1,0 mesh Surface 10917,-1050,12 20000,1050,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 8462,-1050,12 11538,1050,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-1050,12 20000,-1050,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,1050,12 20000,1050,12
+tile 2,0 hism ArrowThrough 9825,3000,16 yaw=-90
+tile 2,0 hism ArrowThrough 9825,6000,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9684,1610,13 10316,8000,13
+tile 2,0 mesh Surface 9650,1610,12 10350,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 10350,1200,12 9650,1200,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=32 10000,8000,12 10000,1800,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=32 9650,8000,12 9650,1800,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=32 10350,8000,12 10350,1800,12
+NODE 26352841
+  2047945294 2144933682 1 0 0 0
+NODE 542498875
+  -
+NODE 1037882168
+  3479411049 3235378634 1 0 0 0
+NODE 1112333744
+  673105013 2859970804 1 0 0 0
+  3399191577 542498875 2 0 0 0
+NODE 1468335634
+  820293781 542498875 3 0 0 0
+  1257875902 4252238361 1 0 0 0
+NODE 1672596159
+  1373280526 4252238361 1 0 0 1
+  2460450555 1732915029 1 0 0 0
+  3648587306 2859970804 2 0 0 0
+  4072116857 3510760665 1 0 0 1
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+NODE 2144933682
+  -
+NODE 2859970804
+  -
+NODE 3235378634
+  -
+NODE 3510760665
+  -
+NODE 4252238361
+  -
+NODE 4277978556
+  2937845079 3510760665 1 0 0 0
+
+## T 3+3 main no-channel
+area surface=468875 sidewalk=0
+reductions 0
+stop 10000,1290
+stop 11640,0
+stop 8360,0
+tile 0,0 hism ArrowThrough 3600,875,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,175,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,525,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,875,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-1016,13 9041,1015,13
+tile 0,0 mesh Surface 0,-1050,12 9083,1050,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9500,1050,12 11538,-1050,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=44 0,0,12 8600,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 0,-1050,12 8600,-1050,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 0,1050,12 8600,1050,12
+tile 0,1 mesh MarkingsWhite 8600,-1016,13 11400,1610,13
+tile 0,1 mesh Surface 8600,-1050,12 11400,1610,12
+tile 0,1 spline [RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,1200,0 11600,175,0
+tile 0,1 spline [RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,1200,0 11600,525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,1200,0 11600,875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,-175,0 8400,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,-525,0 8400,-525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,-875,0 8400,-875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,175,0 11600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,525,0 11600,525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,875,0 11600,875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10175,1200,0 8400,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 11600,-175,0 9825,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 8400,875,0 9825,1200,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 10500,1050,12 10350,7800,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9650,7800,12 8462,1050,12
+tile 1,0 hism ArrowThrough 13400,-175,16 yaw=180
+tile 1,0 hism ArrowThrough 13400,-525,16 yaw=180
+tile 1,0 hism ArrowThrough 13400,-875,16 yaw=180
+tile 1,0 hism ArrowThrough 16400,-175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10959,-1016,13 20000,1015,13
+tile 1,0 mesh Surface 10917,-1050,12 20000,1050,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 8462,-1050,12 11538,1050,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-1050,12 20000,-1050,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,1050,12 20000,1050,12
+tile 2,0 hism ArrowThrough 10175,3000,16 yaw=-90
+tile 2,0 hism ArrowThrough 10175,6000,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9684,1610,13 10316,8000,13
+tile 2,0 mesh Surface 9650,1610,12 10350,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 10350,1200,12 9650,1200,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=32 10000,8000,12 10000,1800,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=32 9650,8000,12 9650,1800,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=32 10350,8000,12 10350,1800,12
+NODE 26352841
+  2047945294 2144933682 1 0 0 0
+NODE 542498875
+  -
+NODE 1037882168
+  193756034 542498875 2 0 0 0
+  3479411049 3235378634 1 0 0 0
+NODE 1112333744
+  673105013 2859970804 1 0 0 0
+NODE 1468335634
+  1257875902 4252238361 1 0 0 0
+NODE 1672596159
+  356145763 3235378634 2 0 0 0
+  1373280526 4252238361 1 0 0 1
+  2460450555 1732915029 1 0 0 0
+  4072116857 3510760665 1 0 0 1
+NODE 1732915029
+  -
+NODE 2025992221
+  509952291 542498875 3 0 0 0
+  2214402469 1732915029 1 0 0 0
+NODE 2144933682
+  -
+NODE 2859970804
+  -
+NODE 3235378634
+  -
+NODE 3510760665
+  -
+NODE 4252238361
+  -
+NODE 4277978556
+  2937845079 3510760665 1 0 0 0
+
+## T 3+3 main left no-channel
+area surface=468875 sidewalk=0
+reductions 0
+stop 10000,1290
+stop 11640,0
+stop 8360,0
+tile 0,0 hism ArrowThrough 3600,-175,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,-175,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,-525,16 yaw=0
+tile 0,0 hism ArrowThrough 6600,-875,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-1016,13 9041,1015,13
+tile 0,0 mesh Surface 0,-1050,12 9083,1050,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9500,1050,12 11538,-1050,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=44 0,0,12 8600,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 0,-1050,12 8600,-1050,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 0,1050,12 8600,1050,12
+tile 0,1 mesh MarkingsWhite 8600,-1016,13 11400,1610,13
+tile 0,1 mesh Surface 8600,-1050,12 11400,1610,12
+tile 0,1 spline [RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,1200,0 11600,-175,0
+tile 0,1 spline [RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,1200,0 11600,-525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,175,0 8400,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,525,0 8400,525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 11600,875,0 8400,875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,-175,0 11600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,-525,0 11600,-525,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 8400,-875,0 11600,-875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,1200,0 11600,-875,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 11600,875,0 10175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 8400,-175,0 10175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9825,1200,0 8400,875,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 10500,1050,12 10350,7800,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9650,7800,12 8462,1050,12
+tile 1,0 hism ArrowThrough 13400,175,16 yaw=180
+tile 1,0 hism ArrowThrough 13400,525,16 yaw=180
+tile 1,0 hism ArrowThrough 13400,875,16 yaw=180
+tile 1,0 hism ArrowThrough 16400,875,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10959,-1016,13 20000,1015,13
+tile 1,0 mesh Surface 10917,-1050,12 20000,1050,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 8462,-1050,12 11538,1050,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-1050,12 20000,-1050,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,1050,12 20000,1050,12
+tile 2,0 hism ArrowThrough 9825,3000,16 yaw=-90
+tile 2,0 hism ArrowThrough 9825,6000,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9684,1610,13 10316,8000,13
+tile 2,0 mesh Surface 9650,1610,12 10350,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 10350,1200,12 9650,1200,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=32 10000,8000,12 10000,1800,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=32 9650,8000,12 9650,1800,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=32 10350,8000,12 10350,1800,12
+NODE 26352841
+  2047945294 2144933682 1 0 0 0
+NODE 542498875
+  -
+NODE 1037882168
+  3479411049 3235378634 1 0 0 0
+NODE 1112333744
+  673105013 2859970804 1 0 0 0
+  3399191577 542498875 2 0 0 0
+NODE 1468335634
+  820293781 542498875 3 0 0 0
+  1257875902 4252238361 1 0 0 0
+NODE 1672596159
+  1373280526 4252238361 1 0 0 1
+  2460450555 1732915029 1 0 0 0
+  3648587306 2859970804 2 0 0 0
+  4072116857 3510760665 1 0 0 1
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+NODE 2144933682
+  -
+NODE 2859970804
+  -
+NODE 3235378634
+  -
+NODE 3510760665
+  -
+NODE 4252238361
+  -
+NODE 4277978556
+  2937845079 3510760665 1 0 0 0
+
+## Y 2 into 1+1
+area surface=139639 sidewalk=0
+reductions 0
+stop 9619,0
+tile 0,0 hism ArrowThrough 7800,-175,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,175,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9379,315,13
+tile 0,0 mesh Surface 0,-350,12 9397,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9943,350,12 10000,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=47 0,0,12 9200,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 0,-350,12 9200,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 0,350,12 9200,350,12
+tile 0,1 mesh MarkingsWhite 9375,-316,13 11310,579,13
+tile 0,1 mesh Surface 9300,-350,12 11409,604,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,175,0 11128,410,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,-175,0 11200,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 11256,643,12 7003,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 0,-350,12 10166,-175,12
+tile 1,0 mesh Surface 11286,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 13009,-175,12 11792,466,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11179,-141,13 19965,3539,13
+tile 2,0 mesh Surface 11148,175,12 19457,3585,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=92 11843,175,12 11068,575,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=44 11316,479,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11375,314,12 19457,3256,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11256,643,12 19337,3585,12
+NODE 542498875
+  -
+NODE 1732915029
+  -
+NODE 2025992221
+  3210518967 542498875 1 7 0 0
+NODE 4277978556
+  3162772704 1732915029 1 0 0 0
+
+## Y 2 into 1+1 left
+area surface=139639 sidewalk=0
+reductions 0
+stop 9619,0
+tile 0,0 hism ArrowThrough 7800,-175,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,175,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9379,315,13
+tile 0,0 mesh Surface 0,-350,12 9397,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9943,350,12 10000,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=47 0,0,12 9200,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 0,-350,12 9200,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 0,350,12 9200,350,12
+tile 0,1 mesh MarkingsWhite 9375,-316,13 11310,579,13
+tile 0,1 mesh Surface 9300,-350,12 11409,604,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,175,0 11128,410,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,-175,0 11200,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 11256,643,12 7003,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 0,-350,12 10166,-175,12
+tile 1,0 mesh Surface 11286,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 13009,-175,12 11792,466,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11179,-141,13 19965,3539,13
+tile 2,0 mesh Surface 11148,175,12 19457,3585,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=92 11843,175,12 11068,575,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=44 11316,479,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11375,314,12 19457,3256,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11256,643,12 19337,3585,12
+NODE 542498875
+  -
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+NODE 4277978556
+  2177657683 542498875 1 7 0 0
+
+## Y 2 into 1+1 no-channel
+area surface=139639 sidewalk=0
+reductions 0
+stop 9619,0
+tile 0,0 hism ArrowThrough 7800,-175,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,175,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9379,315,13
+tile 0,0 mesh Surface 0,-350,12 9397,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9943,350,12 10000,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=47 0,0,12 9200,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 0,-350,12 9200,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 0,350,12 9200,350,12
+tile 0,1 mesh MarkingsWhite 9375,-316,13 11310,579,13
+tile 0,1 mesh Surface 9300,-350,12 11409,604,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,175,0 11128,410,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,-175,0 11200,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 11256,643,12 7003,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 0,-350,12 10166,-175,12
+tile 1,0 mesh Surface 11286,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 13009,-175,12 11792,466,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11179,-141,13 19965,3539,13
+tile 2,0 mesh Surface 11148,175,12 19457,3585,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=92 11843,175,12 11068,575,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=44 11316,479,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11375,314,12 19457,3256,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11256,643,12 19337,3585,12
+NODE 542498875
+  -
+NODE 1732915029
+  -
+NODE 2025992221
+  3210518967 542498875 1 7 0 0
+NODE 4277978556
+  3162772704 1732915029 1 0 0 0
+
+## Y 2 into 1+1 left no-channel
+area surface=139639 sidewalk=0
+reductions 0
+stop 9619,0
+tile 0,0 hism ArrowThrough 7800,-175,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,175,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-316,13 9379,315,13
+tile 0,0 mesh Surface 0,-350,12 9397,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 9943,350,12 10000,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=47 0,0,12 9200,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 0,-350,12 9200,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 0,350,12 9200,350,12
+tile 0,1 mesh MarkingsWhite 9375,-316,13 11310,579,13
+tile 0,1 mesh Surface 9300,-350,12 11409,604,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,175,0 11128,410,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,-175,0 11200,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 11256,643,12 7003,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 0,-350,12 10166,-175,12
+tile 1,0 mesh Surface 11286,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 13009,-175,12 11792,466,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11179,-141,13 19965,3539,13
+tile 2,0 mesh Surface 11148,175,12 19457,3585,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=92 11843,175,12 11068,575,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=44 11316,479,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11375,314,12 19457,3256,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11256,643,12 19337,3585,12
+NODE 542498875
+  -
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+NODE 4277978556
+  2177657683 542498875 1 7 0 0
+
+## Y 1 into 1+1
+area surface=104448 sidewalk=0
+reductions 0
+stop 9683,0
+tile 0,0 hism ArrowThrough 7800,0,16 yaw=0
+tile 0,0 mesh MarkingsWhite 35,-141,13 9455,140,13
+tile 0,0 mesh Surface 0,-175,12 9468,175,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9943,175,12 12001,-175,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=48 0,0,12 9400,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=48 0,-175,12 9400,-175,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=48 0,175,12 9400,175,12
+tile 0,1 mesh MarkingsWhite 9421,-141,13 11310,579,13
+tile 0,1 mesh Surface 9414,-175,12 11409,604,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11128,410,0
+tile 0,1 spline [RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11200,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=11 11256,643,12 7999,175,12
+tile 1,0 mesh MarkingsWhite 11306,-141,13 12001,-134,13
+tile 1,0 mesh Surface 11286,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 7999,-175,12 11843,175,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11179,-141,13 19965,3539,13
+tile 2,0 mesh Surface 11148,175,12 19457,3585,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=84 11792,466,12 11068,575,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=44 11316,479,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11375,314,12 19457,3256,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11256,643,12 19337,3585,12
+NODE 542498875
+  -
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 1
+  3210518967 542498875 1 7 0 0
+
+## Y 1 into 1+1 left
+area surface=104448 sidewalk=0
+reductions 0
+stop 9683,0
+tile 0,0 hism ArrowThrough 7800,0,16 yaw=0
+tile 0,0 mesh MarkingsWhite 35,-141,13 9455,140,13
+tile 0,0 mesh Surface 0,-175,12 9468,175,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9943,175,12 12001,-175,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=48 0,0,12 9400,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=48 0,-175,12 9400,-175,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=48 0,175,12 9400,175,12
+tile 0,1 mesh MarkingsWhite 9421,-141,13 11310,579,13
+tile 0,1 mesh Surface 9414,-175,12 11409,604,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11128,410,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11200,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=11 11256,643,12 7999,175,12
+tile 1,0 mesh MarkingsWhite 11306,-141,13 12001,-134,13
+tile 1,0 mesh Surface 11286,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 7999,-175,12 11843,175,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11179,-141,13 19965,3539,13
+tile 2,0 mesh Surface 11148,175,12 19457,3585,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=84 11792,466,12 11068,575,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=44 11316,479,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11375,314,12 19457,3256,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11256,643,12 19337,3585,12
+NODE 542498875
+  -
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+  3210518967 542498875 1 7 0 1
+
+## Y 1 into 1+1 no-channel
+area surface=104448 sidewalk=0
+reductions 0
+stop 9683,0
+tile 0,0 hism ArrowThrough 7800,0,16 yaw=0
+tile 0,0 mesh MarkingsWhite 35,-141,13 9455,140,13
+tile 0,0 mesh Surface 0,-175,12 9468,175,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9943,175,12 12001,-175,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=48 0,0,12 9400,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=48 0,-175,12 9400,-175,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=48 0,175,12 9400,175,12
+tile 0,1 mesh MarkingsWhite 9421,-141,13 11310,579,13
+tile 0,1 mesh Surface 9414,-175,12 11409,604,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11128,410,0
+tile 0,1 spline [RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11200,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=11 11256,643,12 7999,175,12
+tile 1,0 mesh MarkingsWhite 11306,-141,13 12001,-134,13
+tile 1,0 mesh Surface 11286,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 7999,-175,12 11843,175,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11179,-141,13 19965,3539,13
+tile 2,0 mesh Surface 11148,175,12 19457,3585,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=84 11792,466,12 11068,575,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=44 11316,479,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11375,314,12 19457,3256,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11256,643,12 19337,3585,12
+NODE 542498875
+  -
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 1
+  3210518967 542498875 1 7 0 0
+
+## Y 1 into 1+1 left no-channel
+area surface=104448 sidewalk=0
+reductions 0
+stop 9683,0
+tile 0,0 hism ArrowThrough 7800,0,16 yaw=0
+tile 0,0 mesh MarkingsWhite 35,-141,13 9455,140,13
+tile 0,0 mesh Surface 0,-175,12 9468,175,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9943,175,12 12001,-175,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=48 0,0,12 9400,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=48 0,-175,12 9400,-175,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=48 0,175,12 9400,175,12
+tile 0,1 mesh MarkingsWhite 9421,-141,13 11310,579,13
+tile 0,1 mesh Surface 9414,-175,12 11409,604,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneFork,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11128,410,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11200,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=11 11256,643,12 7999,175,12
+tile 1,0 mesh MarkingsWhite 11306,-141,13 12001,-134,13
+tile 1,0 mesh Surface 11286,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 7999,-175,12 11843,175,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 11400,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11400,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11400,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11179,-141,13 19965,3539,13
+tile 2,0 mesh Surface 11148,175,12 19457,3585,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=84 11792,466,12 11068,575,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=44 11316,479,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 11375,314,12 19457,3256,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 11256,643,12 19337,3585,12
+NODE 542498875
+  -
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+  3210518967 542498875 1 7 0 1
+
+## Y 3 into 2+1
+area surface=207837 sidewalk=0
+reductions 0
+stop 9555,0
+tile 0,0 hism ArrowThrough 7800,-350,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,0,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,350,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-491,13 9276,490,13
+tile 0,0 mesh Surface 0,-525,12 9304,525,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 10000,525,12 9961,-525,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 0,0,12 9000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 0,-525,12 9000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 0,525,12 9000,525,12
+tile 0,1 mesh MarkingsWhite 9271,-491,13 11821,735,13
+tile 0,1 mesh Surface 9125,-525,12 11921,735,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11751,451,0
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,350,0 11632,780,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,-350,0 11600,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 11008,739,12 6007,525,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=14 6007,-525,12 10569,-175,12
+tile 1,0 mesh Surface 11800,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 14016,-175,12 12304,466,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=41 12000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=41 12000,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=41 12000,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11097,-141,13 19965,3704,13
+tile 2,0 mesh Surface 10996,175,12 19517,3749,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=93 12355,175,12 10820,671,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=42 11691,616,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=42 11811,287,12 19517,3091,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=42 11572,945,12 19277,3749,12
+NODE 379696398
+  -
+NODE 542498875
+  -
+NODE 1468335634
+  2452025081 1732915029 1 0 0 0
+NODE 1732915029
+  -
+NODE 2025992221
+  3210518967 542498875 1 7 0 0
+NODE 4277978556
+  79312187 379696398 1 7 0 0
+
+## Y 3 into 2+1 left
+area surface=207837 sidewalk=0
+reductions 0
+stop 9555,0
+tile 0,0 hism ArrowThrough 7800,-350,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,0,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,350,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-491,13 9276,490,13
+tile 0,0 mesh Surface 0,-525,12 9304,525,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 10000,525,12 9961,-525,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 0,0,12 9000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 0,-525,12 9000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 0,525,12 9000,525,12
+tile 0,1 mesh MarkingsWhite 9271,-491,13 11821,735,13
+tile 0,1 mesh Surface 9125,-525,12 11921,735,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11751,451,0
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,350,0 11632,780,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,-350,0 11600,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 11008,739,12 6007,525,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=14 6007,-525,12 10569,-175,12
+tile 1,0 mesh Surface 11800,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 14016,-175,12 12304,466,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=41 12000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=41 12000,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=41 12000,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11097,-141,13 19965,3704,13
+tile 2,0 mesh Surface 10996,175,12 19517,3749,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=93 12355,175,12 10820,671,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=42 11691,616,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=42 11811,287,12 19517,3091,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=42 11572,945,12 19277,3749,12
+NODE 379696398
+  -
+NODE 542498875
+  -
+NODE 1468335634
+  407327362 379696398 1 7 0 0
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+NODE 4277978556
+  2177657683 542498875 1 7 0 0
+
+## Y 3 into 2+1 no-channel
+area surface=207837 sidewalk=0
+reductions 0
+stop 9555,0
+tile 0,0 hism ArrowThrough 7800,-350,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,0,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,350,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-491,13 9276,490,13
+tile 0,0 mesh Surface 0,-525,12 9304,525,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 10000,525,12 9961,-525,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 0,0,12 9000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 0,-525,12 9000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 0,525,12 9000,525,12
+tile 0,1 mesh MarkingsWhite 9271,-491,13 11821,735,13
+tile 0,1 mesh Surface 9125,-525,12 11921,735,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11751,451,0
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,350,0 11632,780,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,-350,0 11600,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 11008,739,12 6007,525,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=14 6007,-525,12 10569,-175,12
+tile 1,0 mesh Surface 11800,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 14016,-175,12 12304,466,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=41 12000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=41 12000,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=41 12000,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11097,-141,13 19965,3704,13
+tile 2,0 mesh Surface 10996,175,12 19517,3749,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=93 12355,175,12 10820,671,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=42 11691,616,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=42 11811,287,12 19517,3091,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=42 11572,945,12 19277,3749,12
+NODE 379696398
+  -
+NODE 542498875
+  -
+NODE 1468335634
+  2452025081 1732915029 1 0 0 0
+NODE 1732915029
+  -
+NODE 2025992221
+  3210518967 542498875 1 7 0 0
+NODE 4277978556
+  79312187 379696398 1 7 0 0
+
+## Y 3 into 2+1 left no-channel
+area surface=207837 sidewalk=0
+reductions 0
+stop 9555,0
+tile 0,0 hism ArrowThrough 7800,-350,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,0,16 yaw=0
+tile 0,0 hism ArrowThrough 7800,350,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-491,13 9276,490,13
+tile 0,0 mesh Surface 0,-525,12 9304,525,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 10000,525,12 9961,-525,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 0,0,12 9000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 0,-525,12 9000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 0,525,12 9000,525,12
+tile 0,1 mesh MarkingsWhite 9271,-491,13 11821,735,13
+tile 0,1 mesh Surface 9125,-525,12 11921,735,12
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,0,0 11751,451,0
+tile 0,1 spline [RoadNetLaneBearRight,RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,350,0 11632,780,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9600,-350,0 11600,0,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=12 11008,739,12 6007,525,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=14 6007,-525,12 10569,-175,12
+tile 1,0 mesh Surface 11800,-175,12 20000,175,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 14016,-175,12 12304,466,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=41 12000,0,12 20000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=41 12000,-175,12 20000,-175,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=41 12000,175,12 20000,175,12
+tile 2,0 mesh MarkingsWhite 11097,-141,13 19965,3704,13
+tile 2,0 mesh Surface 10996,175,12 19517,3749,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=93 12355,175,12 10820,671,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=42 11691,616,12 19397,3420,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=42 11811,287,12 19517,3091,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=42 11572,945,12 19277,3749,12
+NODE 379696398
+  -
+NODE 542498875
+  -
+NODE 1468335634
+  407327362 379696398 1 7 0 0
+NODE 1732915029
+  -
+NODE 2025992221
+  2214402469 1732915029 1 0 0 0
+NODE 4277978556
+  2177657683 542498875 1 7 0 0
+
+## centre turn
+area surface=309325 sidewalk=0
+reductions 0
+stop -590,0
+stop 0,-1115
+stop 0,1115
+stop 590,0
+tile 0,0 hism ArrowThrough -2400,0,16 yaw=0
+tile 0,0 hism ArrowThrough -2400,350,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,0,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,350,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-491,13 -910,490,13
+tile 0,0 mesh Surface -10000,-525,12 -910,525,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 -500,525,12 -500,-525,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 -10000,0,12 -1000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -10000,-525,12 -1000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 -10000,525,12 -1000,525,12
+tile 0,1 mesh MarkingsWhite -910,-1085,13 910,1085,13
+tile 0,1 mesh Surface -910,-1085,12 910,1085,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -175,-1200,0 -175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -600,350,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 175,1200,0 175,-1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 600,-175,0 -600,-350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,-1200,0 -600,-350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,-1200,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,0,0 -600,-350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,0,0 175,-1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,350,0 -175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,1200,0 -600,-350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,1200,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,-175,0 -175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,-175,0 175,-1200,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 350,-500,12 1050,-350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -350,10000,12 -983,525,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 1050,350,12 350,10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 -983,-525,12 -350,-10000,12
+tile 1,0 hism ArrowThrough 2400,-175,16 yaw=180
+tile 1,0 hism ArrowThrough 5400,-175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 910,-316,13 10000,315,13
+tile 1,0 mesh Surface 910,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 500,-350,12 500,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 1000,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 1000,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 1000,350,12 10000,350,12
+tile 2,0 hism ArrowThrough 175,3000,16 yaw=-90
+tile 2,0 hism ArrowThrough 175,6000,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -316,914,13 315,10000,13
+tile 2,0 mesh Surface -350,1000,12 350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 350,500,12 -350,675,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=45 0,10000,12 0,1200,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 -350,10000,12 -350,1200,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 350,10000,12 350,1200,12
+tile 3,0 hism ArrowThrough -175,-3000,16 yaw=90
+tile 3,0 hism ArrowThrough -175,-6000,16 yaw=90
+tile 3,0 mesh MarkingsWhite -316,-10000,13 315,-914,13
+tile 3,0 mesh Surface -350,-10000,12 350,-910,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -350,-1050,12 350,-1050,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=45 0,-10000,12 0,-1200,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 350,-10000,12 350,-1200,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 -350,-10000,12 -350,-1200,12
+NODE 713230961
+  -
+NODE 1161263239
+  -
+NODE 1724829651
+  1217083665 1161263239 4 0 0 0
+  2476572389 3757206299 2 0 0 0
+NODE 1996651818
+  -
+NODE 2415832622
+  811997739 1996651818 1 0 0 0
+  2470880171 1161263239 3 0 0 0
+  2799580655 713230961 2 0 0 0
+NODE 3229030968
+  3286821672 713230961 1 0 0 0
+  3638345225 1996651818 3 0 0 0
+NODE 3562729957
+  614093229 1996651818 2 0 0 0
+  2334200527 1161263239 1 0 0 0
+  2508751870 3757206299 3 0 0 0
+NODE 3746555805
+  1845033593 713230961 3 0 0 0
+  3115364877 3757206299 1 0 0 0
+  3169358595 1161263239 2 0 0 0
+NODE 3757206299
+  -
+
+## centre turn left
+area surface=309325 sidewalk=0
+reductions 0
+stop -590,0
+stop 0,-1115
+stop 0,1115
+stop 590,0
+tile 0,0 hism ArrowThrough -2400,-350,16 yaw=0
+tile 0,0 hism ArrowThrough -2400,0,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,-350,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,0,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-491,13 -910,490,13
+tile 0,0 mesh Surface -10000,-525,12 -910,525,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 -500,525,12 -500,-525,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 -10000,0,12 -1000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -10000,-525,12 -1000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 -10000,525,12 -1000,525,12
+tile 0,1 mesh MarkingsWhite -910,-1085,13 910,1085,13
+tile 0,1 mesh Surface -910,-1085,12 910,1085,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -175,1200,0 -175,-1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -600,-350,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 175,-1200,0 175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 600,175,0 -600,350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,1200,0 -600,350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,1200,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,-350,0 -175,-1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,0,0 -600,350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,0,0 175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,-1200,0 -600,350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,-1200,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,175,0 -175,-1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,175,0 175,1200,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 350,-500,12 1050,-350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -350,10000,12 -983,525,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 1050,350,12 350,10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 -983,-525,12 -350,-10000,12
+tile 1,0 hism ArrowThrough 2400,175,16 yaw=180
+tile 1,0 hism ArrowThrough 5400,175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 910,-316,13 10000,315,13
+tile 1,0 mesh Surface 910,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 500,-350,12 500,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 1000,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 1000,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 1000,350,12 10000,350,12
+tile 2,0 hism ArrowThrough -175,3000,16 yaw=-90
+tile 2,0 hism ArrowThrough -175,6000,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -316,914,13 315,10000,13
+tile 2,0 mesh Surface -350,1000,12 350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 350,500,12 -350,675,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=45 0,10000,12 0,1200,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 -350,10000,12 -350,1200,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 350,10000,12 350,1200,12
+tile 3,0 hism ArrowThrough 175,-3000,16 yaw=90
+tile 3,0 hism ArrowThrough 175,-6000,16 yaw=90
+tile 3,0 mesh MarkingsWhite -316,-10000,13 315,-914,13
+tile 3,0 mesh Surface -350,-10000,12 350,-910,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -350,-1050,12 350,-1050,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=45 0,-10000,12 0,-1200,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 350,-10000,12 350,-1200,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 -350,-10000,12 -350,-1200,12
+NODE 713230961
+  -
+NODE 1161263239
+  -
+NODE 1724829651
+  1217083665 1161263239 4 0 0 0
+  3129189385 1996651818 3 0 0 0
+NODE 1996651818
+  -
+NODE 2415832622
+  811997739 1996651818 1 0 0 0
+  2470880171 1161263239 3 0 0 0
+  2799580655 713230961 2 0 0 0
+NODE 3229030968
+  3286821672 713230961 1 0 0 0
+  3847272272 3757206299 2 0 0 0
+NODE 3562729957
+  614093229 1996651818 2 0 0 0
+  2334200527 1161263239 1 0 0 0
+  2508751870 3757206299 3 0 0 0
+NODE 3746555805
+  1845033593 713230961 3 0 0 0
+  3115364877 3757206299 1 0 0 0
+  3169358595 1161263239 2 0 0 0
+NODE 3757206299
+  -
+
+## centre turn no-channel
+area surface=309325 sidewalk=0
+reductions 0
+stop -590,0
+stop 0,-1115
+stop 0,1115
+stop 590,0
+tile 0,0 hism ArrowThrough -2400,0,16 yaw=0
+tile 0,0 hism ArrowThrough -2400,350,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,0,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,350,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-491,13 -910,490,13
+tile 0,0 mesh Surface -10000,-525,12 -910,525,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 -500,525,12 -500,-525,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 -10000,0,12 -1000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -10000,-525,12 -1000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 -10000,525,12 -1000,525,12
+tile 0,1 mesh MarkingsWhite -910,-1085,13 910,1085,13
+tile 0,1 mesh Surface -910,-1085,12 910,1085,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -175,-1200,0 -175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -600,350,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 175,1200,0 175,-1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 600,-175,0 -600,-350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,-1200,0 -600,-350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,-1200,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,0,0 -600,-350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,0,0 175,-1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,350,0 -175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,1200,0 -600,-350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,1200,0 600,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,-175,0 -175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,-175,0 175,-1200,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 350,-500,12 1050,-350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -350,10000,12 -983,525,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 1050,350,12 350,10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 -983,-525,12 -350,-10000,12
+tile 1,0 hism ArrowThrough 2400,-175,16 yaw=180
+tile 1,0 hism ArrowThrough 5400,-175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 910,-316,13 10000,315,13
+tile 1,0 mesh Surface 910,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 500,-350,12 500,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 1000,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 1000,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 1000,350,12 10000,350,12
+tile 2,0 hism ArrowThrough 175,3000,16 yaw=-90
+tile 2,0 hism ArrowThrough 175,6000,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -316,914,13 315,10000,13
+tile 2,0 mesh Surface -350,1000,12 350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 350,500,12 -350,675,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=45 0,10000,12 0,1200,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 -350,10000,12 -350,1200,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 350,10000,12 350,1200,12
+tile 3,0 hism ArrowThrough -175,-3000,16 yaw=90
+tile 3,0 hism ArrowThrough -175,-6000,16 yaw=90
+tile 3,0 mesh MarkingsWhite -316,-10000,13 315,-914,13
+tile 3,0 mesh Surface -350,-10000,12 350,-910,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -350,-1050,12 350,-1050,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=45 0,-10000,12 0,-1200,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 350,-10000,12 350,-1200,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 -350,-10000,12 -350,-1200,12
+NODE 713230961
+  -
+NODE 1161263239
+  -
+NODE 1724829651
+  1217083665 1161263239 4 0 0 0
+  2476572389 3757206299 2 0 0 0
+NODE 1996651818
+  -
+NODE 2415832622
+  811997739 1996651818 1 0 0 0
+  2470880171 1161263239 3 0 0 0
+  2799580655 713230961 2 0 0 0
+NODE 3229030968
+  3286821672 713230961 1 0 0 0
+  3638345225 1996651818 3 0 0 0
+NODE 3562729957
+  614093229 1996651818 2 0 0 0
+  2334200527 1161263239 1 0 0 0
+  2508751870 3757206299 3 0 0 0
+NODE 3746555805
+  1845033593 713230961 3 0 0 0
+  3115364877 3757206299 1 0 0 0
+  3169358595 1161263239 2 0 0 0
+NODE 3757206299
+  -
+
+## centre turn left no-channel
+area surface=309325 sidewalk=0
+reductions 0
+stop -590,0
+stop 0,-1115
+stop 0,1115
+stop 590,0
+tile 0,0 hism ArrowThrough -2400,-350,16 yaw=0
+tile 0,0 hism ArrowThrough -2400,0,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,-350,16 yaw=0
+tile 0,0 hism ArrowThrough -5400,0,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-491,13 -910,490,13
+tile 0,0 mesh Surface -10000,-525,12 -910,525,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 -500,525,12 -500,-525,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 -10000,0,12 -1000,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 -10000,-525,12 -1000,-525,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 -10000,525,12 -1000,525,12
+tile 0,1 mesh MarkingsWhite -910,-1085,13 910,1085,13
+tile 0,1 mesh Surface -910,-1085,12 910,1085,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -175,1200,0 -175,-1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -600,-350,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 175,-1200,0 175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 600,175,0 -600,350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,1200,0 -600,350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -175,1200,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,-350,0 -175,-1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,0,0 -600,350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 -600,0,0 175,1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,-1200,0 -600,350,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 175,-1200,0 600,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,175,0 -175,-1200,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 600,175,0 175,1200,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 350,-500,12 1050,-350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -350,10000,12 -983,525,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 1050,350,12 350,10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 -983,-525,12 -350,-10000,12
+tile 1,0 hism ArrowThrough 2400,175,16 yaw=180
+tile 1,0 hism ArrowThrough 5400,175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 910,-316,13 10000,315,13
+tile 1,0 mesh Surface 910,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 500,-350,12 500,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 1000,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 1000,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 1000,350,12 10000,350,12
+tile 2,0 hism ArrowThrough -175,3000,16 yaw=-90
+tile 2,0 hism ArrowThrough -175,6000,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -316,914,13 315,10000,13
+tile 2,0 mesh Surface -350,1000,12 350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 350,500,12 -350,675,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=45 0,10000,12 0,1200,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 -350,10000,12 -350,1200,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 350,10000,12 350,1200,12
+tile 3,0 hism ArrowThrough 175,-3000,16 yaw=90
+tile 3,0 hism ArrowThrough 175,-6000,16 yaw=90
+tile 3,0 mesh MarkingsWhite -316,-10000,13 315,-914,13
+tile 3,0 mesh Surface -350,-10000,12 350,-910,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -350,-1050,12 350,-1050,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=45 0,-10000,12 0,-1200,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 350,-10000,12 350,-1200,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 -350,-10000,12 -350,-1200,12
+NODE 713230961
+  -
+NODE 1161263239
+  -
+NODE 1724829651
+  1217083665 1161263239 4 0 0 0
+  3129189385 1996651818 3 0 0 0
+NODE 1996651818
+  -
+NODE 2415832622
+  811997739 1996651818 1 0 0 0
+  2470880171 1161263239 3 0 0 0
+  2799580655 713230961 2 0 0 0
+NODE 3229030968
+  3286821672 713230961 1 0 0 0
+  3847272272 3757206299 2 0 0 0
+NODE 3562729957
+  614093229 1996651818 2 0 0 0
+  2334200527 1161263239 1 0 0 0
+  2508751870 3757206299 3 0 0 0
+NODE 3746555805
+  1845033593 713230961 3 0 0 0
+  3115364877 3757206299 1 0 0 0
+  3169358595 1161263239 2 0 0 0
+NODE 3757206299
+  -
+
+## tertiary bay
+area surface=191618 sidewalk=0
+reductions 0
+stop -1062,0
+stop 0,590
+stop 1103,0
+tile 0,0 hism ArrowThrough -2800,175,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-315,13 -902,315,13
+tile 0,0 mesh Surface -10000,-350,12 -870,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -794,350,12 -794,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=45 -10000,0,12 -1200,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 -10000,-350,12 -1200,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 -10000,350,12 -1200,350,12
+tile 0,1 mesh MarkingsWhite -1069,-315,13 1085,910,13
+tile 0,1 mesh Surface -1082,-350,12 1085,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -1000,175,0 1200,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 0,600,0 1200,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1200,-175,0 -1000,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn,RoadNetLaneVirtual] pts=2 -350,600,0 -1000,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn,RoadNetLaneVirtual] pts=2 350,600,0 1200,175,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=10 -425,1000,12 -10000,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=10 10000,350,12 503,1000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=5 -10000,-350,12 794,-350,12
+tile 1,0 hism ArrowThrough 3000,-175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 911,-315,13 10000,315,13
+tile 1,0 mesh Surface 878,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 10000,-350,12 794,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=45 1200,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 1200,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 1200,350,12 10000,350,12
+tile 2,0 hism ArrowThrough -350,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough -350,5400,16 yaw=-90
+tile 2,0 hism ArrowThrough 0,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 350,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 350,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -399,910,13 470,7965,13
+tile 2,0 mesh Surface -434,910,12 505,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=46 507,800,12 -445,800,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=36 0,8000,12 0,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=36 -175,8000,12 -425,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=36 347,8000,12 503,1000,12
+widen road=2 start=0 side=0 kind=2 lanes=1 w=350 taper=3500
+widen road=2 start=0 side=1 kind=1 lanes=1 w=350 taper=15750
+NODE 1004271935
+  876284486 1663962454 1 0 0 0
+NODE 1290034283
+  2741203891 2856002051 1 0 0 0
+NODE 1663962454
+  -
+NODE 2856002051
+  -
+NODE 2921197315
+  905885104 2856002051 2 0 0 0
+NODE 3423833462
+  2265790993 1663962454 3 0 0 0
+NODE 3510947227
+  3325165 1663962454 1 0 0 0
+
+## tertiary bay left
+area surface=191618 sidewalk=0
+reductions 0
+stop -1062,0
+stop 0,590
+stop 1103,0
+tile 0,0 hism ArrowThrough -2800,-175,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-315,13 -902,315,13
+tile 0,0 mesh Surface -10000,-350,12 -870,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -794,350,12 -794,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=45 -10000,0,12 -1200,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 -10000,-350,12 -1200,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 -10000,350,12 -1200,350,12
+tile 0,1 mesh MarkingsWhite -1069,-315,13 1085,910,13
+tile 0,1 mesh Surface -1082,-350,12 1085,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -1000,-175,0 1200,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 0,600,0 1200,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1200,175,0 -1000,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn,RoadNetLaneVirtual] pts=2 -350,600,0 1200,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn,RoadNetLaneVirtual] pts=2 350,600,0 -1000,175,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=10 -425,1000,12 -10000,350,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=10 10000,350,12 503,1000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=5 -10000,-350,12 794,-350,12
+tile 1,0 hism ArrowThrough 3000,175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 911,-315,13 10000,315,13
+tile 1,0 mesh Surface 878,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 10000,-350,12 794,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=45 1200,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=45 1200,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=45 1200,350,12 10000,350,12
+tile 2,0 hism ArrowThrough -350,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough -350,5400,16 yaw=-90
+tile 2,0 hism ArrowThrough 0,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 350,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 350,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -399,910,13 470,7965,13
+tile 2,0 mesh Surface -434,910,12 505,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=46 507,800,12 -445,800,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=36 0,8000,12 0,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=36 -175,8000,12 -425,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=36 347,8000,12 503,1000,12
+widen road=2 start=0 side=0 kind=1 lanes=1 w=350 taper=3500
+widen road=2 start=0 side=1 kind=2 lanes=1 w=350 taper=15750
+NODE 1004271935
+  876284486 1663962454 1 0 0 0
+NODE 1290034283
+  2741203891 2856002051 1 0 0 0
+NODE 1663962454
+  -
+NODE 2856002051
+  -
+NODE 2921197315
+  2789616687 1663962454 3 0 0 0
+NODE 3423833462
+  3525850855 2856002051 2 0 0 0
+NODE 3510947227
+  3325165 1663962454 1 0 0 0
+
+## tertiary bay no-channel
+area surface=167000 sidewalk=0
+reductions 0
+stop -765,0
+stop 0,590
+stop 765,0
+tile 0,0 hism ArrowThrough -2600,175,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-316,13 -621,315,13
+tile 0,0 mesh Surface -10000,-350,12 -603,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 -325,350,12 794,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=47 -10000,0,12 -800,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 -10000,-350,12 -800,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 -10000,350,12 -800,350,12
+tile 0,1 mesh MarkingsWhite -735,-316,13 735,910,13
+tile 0,1 mesh Surface -735,-350,12 735,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -800,175,0 800,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 0,600,0 800,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 800,-175,0 -800,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 0,600,0 -800,-175,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 325,350,12 175,8000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -175,8000,12 -794,350,12
+tile 1,0 hism ArrowThrough 2600,-175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 621,-316,13 10000,315,13
+tile 1,0 mesh Surface 603,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 -794,-350,12 794,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=47 800,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 800,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 800,350,12 10000,350,12
+tile 2,0 hism ArrowThrough 0,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 0,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -141,910,13 140,7965,13
+tile 2,0 mesh Surface -175,910,12 175,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 175,500,12 -175,500,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=36 0,8000,12 0,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=36 -175,8000,12 -175,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=36 175,8000,12 175,1000,12
+NODE 1004271935
+  876284486 1663962454 1 0 0 0
+NODE 1290034283
+  2741203891 2856002051 1 0 0 0
+NODE 1663962454
+  -
+NODE 2856002051
+  -
+NODE 3510947227
+  3325165 1663962454 1 0 0 0
+  1766972354 2856002051 2 0 0 0
+
+## tertiary bay left no-channel
+area surface=167000 sidewalk=0
+reductions 0
+stop -765,0
+stop 0,590
+stop 765,0
+tile 0,0 hism ArrowThrough -2600,-175,16 yaw=0
+tile 0,0 mesh MarkingsWhite -10000,-316,13 -621,315,13
+tile 0,0 mesh Surface -10000,-350,12 -603,350,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 -325,350,12 794,-350,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=47 -10000,0,12 -800,0,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 -10000,-350,12 -800,-350,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 -10000,350,12 -800,350,12
+tile 0,1 mesh MarkingsWhite -735,-316,13 735,910,13
+tile 0,1 mesh Surface -735,-350,12 735,910,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 -800,-175,0 800,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 0,600,0 800,-175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 800,175,0 -800,175,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 0,600,0 -800,175,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 325,350,12 175,8000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 -175,8000,12 -794,350,12
+tile 1,0 hism ArrowThrough 2600,175,16 yaw=180
+tile 1,0 mesh MarkingsWhite 621,-316,13 10000,315,13
+tile 1,0 mesh Surface 603,-350,12 10000,350,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=7 -794,-350,12 794,350,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=47 800,0,12 10000,0,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=47 800,-350,12 10000,-350,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=47 800,350,12 10000,350,12
+tile 2,0 hism ArrowThrough 0,2400,16 yaw=-90
+tile 2,0 hism ArrowThrough 0,5400,16 yaw=-90
+tile 2,0 mesh MarkingsWhite -141,910,13 140,7965,13
+tile 2,0 mesh Surface -175,910,12 175,8000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 175,500,12 -175,500,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=36 0,8000,12 0,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=36 -175,8000,12 -175,1000,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=36 175,8000,12 175,1000,12
+NODE 1004271935
+  876284486 1663962454 1 0 0 0
+NODE 1290034283
+  2741203891 2856002051 1 0 0 0
+NODE 1663962454
+  -
+NODE 2856002051
+  -
+NODE 3510947227
+  3325165 1663962454 1 0 0 0
+  1766972354 2856002051 2 0 0 0
+
+## dual carriageway
+area surface=411818 sidewalk=0
+reductions 0
+stop 10000,-1090
+stop 10000,1090
+stop 10590,-500
+stop 9410,500
+tile 0,0 hism ArrowThrough 4600,325,16 yaw=0
+tile 0,0 hism ArrowThrough 4600,675,16 yaw=0
+tile 0,0 hism ArrowThrough 7600,325,16 yaw=0
+tile 0,0 hism ArrowThrough 7600,675,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-815,13 9090,815,13
+tile 0,0 mesh Surface 0,-850,12 9090,850,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9206,-150,12 9206,-850,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9206,850,12 9206,150,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 0,500,12 9000,500,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 9000,-500,12 0,-500,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 0,150,12 9000,150,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 9000,-150,12 0,-150,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 0,850,12 9000,850,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 9000,-850,12 0,-850,12
+tile 0,1 hism ArrowThrough 10175,500,16 yaw=-90
+tile 0,1 hism ArrowThrough 9825,-500,16 yaw=90
+tile 0,1 mesh MarkingsWhite 9090,-1410,13 10910,1410,13
+tile 0,1 mesh Surface 9090,-1410,12 10910,1410,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,-500,0 10175,-1100,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,1000,0 10175,500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10600,-325,0 9400,-325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10600,-675,0 9400,-675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,325,0 10600,325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,675,0 10600,675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,-1100,0 9825,-500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,500,0 9825,1000,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10175,-500,0 9400,-325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10175,1000,0 10600,675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10600,-325,0 9825,-500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10600,-675,0 10175,-1100,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9400,325,0 10175,500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9400,675,0 9825,1000,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9825,-1100,0 9400,-675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9825,500,0 10600,325,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 10350,-1294,12 20000,-850,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 20000,850,12 10350,10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 0,-850,12 9650,-10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9650,10000,12 0,850,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=9 0,150,12 0,-150,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=9 20000,-150,12 20000,150,12
+tile 1,0 hism ArrowThrough 12400,-325,16 yaw=180
+tile 1,0 hism ArrowThrough 12400,-675,16 yaw=180
+tile 1,0 hism ArrowThrough 15400,-325,16 yaw=180
+tile 1,0 hism ArrowThrough 15400,-675,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10910,-816,13 20000,815,13
+tile 1,0 mesh Surface 10910,-850,12 20000,850,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10794,-850,12 10794,-150,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10794,150,12 10794,850,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 11000,500,12 20000,500,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 20000,-500,12 11000,-500,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 11000,150,12 20000,150,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 20000,-150,12 11000,-150,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 11000,850,12 20000,850,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 20000,-850,12 11000,-850,12
+tile 2,0 hism ArrowThrough 10175,2800,16 yaw=-90
+tile 2,0 hism ArrowThrough 10175,5800,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9684,1410,13 10316,10000,13
+tile 2,0 mesh Surface 9650,1410,12 10350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10350,1000,12 9650,1294,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=43 10000,10000,12 10000,1600,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=43 9650,10000,12 9650,1600,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=43 10350,10000,12 10350,1600,12
+tile 3,0 hism ArrowThrough 9825,-2900,16 yaw=90
+tile 3,0 hism ArrowThrough 9825,-5900,16 yaw=90
+tile 3,0 mesh MarkingsWhite 9684,-10000,13 10316,-1410,13
+tile 3,0 mesh Surface 9650,-10000,12 10350,-1410,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 9650,-1294,12 10350,-10000,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=44 10000,-1500,12 10000,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 9650,-1500,12 9650,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 10350,-1500,12 10350,-10000,12
+NODE 233186558
+  -
+NODE 371844206
+  -
+NODE 417993046
+  -
+NODE 746109346
+  2080069045 3501496918 3 0 0 0
+  3379936331 417993046 1 0 0 0
+NODE 1026189804
+  2455447890 3147086773 1 0 0 0
+  3409941644 417993046 3 0 0 0
+NODE 1251110720
+  387573252 233186558 1 0 0 0
+  516548286 2360255249 2 0 0 0
+NODE 2012193249
+  413928292 2360255249 1 0 0 0
+  1042109302 2350041933 3 0 0 0
+NODE 2350041933
+  -
+NODE 2360255249
+  -
+NODE 2501075030
+  64998395 2350041933 1 0 0 0
+  3211525828 371844206 3 0 0 0
+NODE 2880917937
+  -
+NODE 3049240566
+  1920027310 3501496918 1 0 0 0
+  3762283198 2880917937 2 0 0 0
+NODE 3147086773
+  -
+NODE 3501496918
+  -
+NODE 3668002362
+  957472484 3147086773 2 0 0 0
+  3454513715 2880917937 1 0 0 0
+NODE 3865301428
+  1064982389 233186558 2 0 0 0
+  3821962854 371844206 1 0 0 0
+
+## dual carriageway left
+area surface=411818 sidewalk=0
+reductions 0
+stop 10000,-1090
+stop 10000,1090
+stop 10590,-500
+stop 9410,500
+tile 0,0 hism ArrowThrough 4600,325,16 yaw=0
+tile 0,0 hism ArrowThrough 4600,675,16 yaw=0
+tile 0,0 hism ArrowThrough 7600,325,16 yaw=0
+tile 0,0 hism ArrowThrough 7600,675,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-815,13 9090,815,13
+tile 0,0 mesh Surface 0,-850,12 9090,850,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9206,-150,12 9206,-850,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9206,850,12 9206,150,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 0,500,12 9000,500,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 9000,-500,12 0,-500,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 0,150,12 9000,150,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 9000,-150,12 0,-150,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 0,850,12 9000,850,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 9000,-850,12 0,-850,12
+tile 0,1 hism ArrowThrough 10175,-500,16 yaw=90
+tile 0,1 hism ArrowThrough 9825,500,16 yaw=-90
+tile 0,1 mesh MarkingsWhite 9090,-1410,13 10910,1410,13
+tile 0,1 mesh Surface 9090,-1410,12 10910,1410,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,-1100,0 10175,-500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,500,0 10175,1000,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10600,-325,0 9400,-325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10600,-675,0 9400,-675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,325,0 10600,325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,675,0 10600,675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,-500,0 9825,-1100,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,1000,0 9825,500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10175,-1100,0 9400,-675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10175,500,0 10600,325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10600,-325,0 10175,-500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10600,-675,0 9825,-1100,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9400,325,0 9825,500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9400,675,0 10175,1000,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9825,-500,0 9400,-325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9825,1000,0 10600,675,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 10350,-1294,12 20000,-850,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 20000,850,12 10350,10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 0,-850,12 9650,-10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9650,10000,12 0,850,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=9 0,150,12 0,-150,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=9 20000,-150,12 20000,150,12
+tile 1,0 hism ArrowThrough 12400,-325,16 yaw=180
+tile 1,0 hism ArrowThrough 12400,-675,16 yaw=180
+tile 1,0 hism ArrowThrough 15400,-325,16 yaw=180
+tile 1,0 hism ArrowThrough 15400,-675,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10910,-816,13 20000,815,13
+tile 1,0 mesh Surface 10910,-850,12 20000,850,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10794,-850,12 10794,-150,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10794,150,12 10794,850,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 11000,500,12 20000,500,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 20000,-500,12 11000,-500,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 11000,150,12 20000,150,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 20000,-150,12 11000,-150,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 11000,850,12 20000,850,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 20000,-850,12 11000,-850,12
+tile 2,0 hism ArrowThrough 9825,2800,16 yaw=-90
+tile 2,0 hism ArrowThrough 9825,5800,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9684,1410,13 10316,10000,13
+tile 2,0 mesh Surface 9650,1410,12 10350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10350,1000,12 9650,1294,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=43 10000,10000,12 10000,1600,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=43 9650,10000,12 9650,1600,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=43 10350,10000,12 10350,1600,12
+tile 3,0 hism ArrowThrough 10175,-2900,16 yaw=90
+tile 3,0 hism ArrowThrough 10175,-5900,16 yaw=90
+tile 3,0 mesh MarkingsWhite 9684,-10000,13 10316,-1410,13
+tile 3,0 mesh Surface 9650,-10000,12 10350,-1410,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 9650,-1294,12 10350,-10000,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=44 10000,-1500,12 10000,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 9650,-1500,12 9650,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 10350,-1500,12 10350,-10000,12
+NODE 233186558
+  -
+NODE 371844206
+  -
+NODE 417993046
+  -
+NODE 746109346
+  2270668649 3147086773 2 0 0 0
+  3379936331 417993046 1 0 0 0
+NODE 1026189804
+  2455447890 3147086773 1 0 0 0
+  3230797641 2880917937 3 0 0 0
+NODE 1251110720
+  387573252 233186558 1 0 0 0
+  3874383669 371844206 3 0 0 0
+NODE 2012193249
+  413928292 2360255249 1 0 0 0
+  4167351758 233186558 3 0 0 0
+NODE 2350041933
+  -
+NODE 2360255249
+  -
+NODE 2501075030
+  64998395 2350041933 1 0 0 0
+  2872237843 2360255249 2 0 0 0
+NODE 2880917937
+  -
+NODE 3049240566
+  158677012 417993046 2 0 0 0
+  1920027310 3501496918 1 0 0 0
+NODE 3147086773
+  -
+NODE 3501496918
+  -
+NODE 3668002362
+  2844691029 3501496918 3 0 0 0
+  3454513715 2880917937 1 0 0 0
+NODE 3865301428
+  2293227132 2350041933 2 0 0 0
+  3821962854 371844206 1 0 0 0
+
+## dual carriageway no-channel
+area surface=411818 sidewalk=0
+reductions 0
+stop 10000,-1090
+stop 10000,1090
+stop 10590,-500
+stop 9410,500
+tile 0,0 hism ArrowThrough 4600,325,16 yaw=0
+tile 0,0 hism ArrowThrough 4600,675,16 yaw=0
+tile 0,0 hism ArrowThrough 7600,325,16 yaw=0
+tile 0,0 hism ArrowThrough 7600,675,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-815,13 9090,815,13
+tile 0,0 mesh Surface 0,-850,12 9090,850,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9206,-150,12 9206,-850,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9206,850,12 9206,150,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 0,500,12 9000,500,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 9000,-500,12 0,-500,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 0,150,12 9000,150,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 9000,-150,12 0,-150,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 0,850,12 9000,850,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 9000,-850,12 0,-850,12
+tile 0,1 hism ArrowThrough 10175,500,16 yaw=-90
+tile 0,1 hism ArrowThrough 9825,-500,16 yaw=90
+tile 0,1 mesh MarkingsWhite 9090,-1410,13 10910,1410,13
+tile 0,1 mesh Surface 9090,-1410,12 10910,1410,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,-500,0 10175,-1100,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,1000,0 10175,500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10600,-325,0 9400,-325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10600,-675,0 9400,-675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,325,0 10600,325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,675,0 10600,675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,-1100,0 9825,-500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,500,0 9825,1000,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10175,-500,0 9400,-325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10175,1000,0 10600,675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10600,-325,0 9825,-500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10600,-675,0 10175,-1100,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9400,325,0 10175,500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9400,675,0 9825,1000,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9825,-1100,0 9400,-675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9825,500,0 10600,325,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 10350,-1294,12 20000,-850,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 20000,850,12 10350,10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 0,-850,12 9650,-10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9650,10000,12 0,850,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=9 0,150,12 0,-150,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=9 20000,-150,12 20000,150,12
+tile 1,0 hism ArrowThrough 12400,-325,16 yaw=180
+tile 1,0 hism ArrowThrough 12400,-675,16 yaw=180
+tile 1,0 hism ArrowThrough 15400,-325,16 yaw=180
+tile 1,0 hism ArrowThrough 15400,-675,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10910,-816,13 20000,815,13
+tile 1,0 mesh Surface 10910,-850,12 20000,850,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10794,-850,12 10794,-150,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10794,150,12 10794,850,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 11000,500,12 20000,500,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 20000,-500,12 11000,-500,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 11000,150,12 20000,150,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 20000,-150,12 11000,-150,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 11000,850,12 20000,850,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 20000,-850,12 11000,-850,12
+tile 2,0 hism ArrowThrough 10175,2800,16 yaw=-90
+tile 2,0 hism ArrowThrough 10175,5800,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9684,1410,13 10316,10000,13
+tile 2,0 mesh Surface 9650,1410,12 10350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10350,1000,12 9650,1294,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=43 10000,10000,12 10000,1600,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=43 9650,10000,12 9650,1600,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=43 10350,10000,12 10350,1600,12
+tile 3,0 hism ArrowThrough 9825,-2900,16 yaw=90
+tile 3,0 hism ArrowThrough 9825,-5900,16 yaw=90
+tile 3,0 mesh MarkingsWhite 9684,-10000,13 10316,-1410,13
+tile 3,0 mesh Surface 9650,-10000,12 10350,-1410,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 9650,-1294,12 10350,-10000,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=44 10000,-1500,12 10000,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 9650,-1500,12 9650,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 10350,-1500,12 10350,-10000,12
+NODE 233186558
+  -
+NODE 371844206
+  -
+NODE 417993046
+  -
+NODE 746109346
+  2080069045 3501496918 3 0 0 0
+  3379936331 417993046 1 0 0 0
+NODE 1026189804
+  2455447890 3147086773 1 0 0 0
+  3409941644 417993046 3 0 0 0
+NODE 1251110720
+  387573252 233186558 1 0 0 0
+  516548286 2360255249 2 0 0 0
+NODE 2012193249
+  413928292 2360255249 1 0 0 0
+  1042109302 2350041933 3 0 0 0
+NODE 2350041933
+  -
+NODE 2360255249
+  -
+NODE 2501075030
+  64998395 2350041933 1 0 0 0
+  3211525828 371844206 3 0 0 0
+NODE 2880917937
+  -
+NODE 3049240566
+  1920027310 3501496918 1 0 0 0
+  3762283198 2880917937 2 0 0 0
+NODE 3147086773
+  -
+NODE 3501496918
+  -
+NODE 3668002362
+  957472484 3147086773 2 0 0 0
+  3454513715 2880917937 1 0 0 0
+NODE 3865301428
+  1064982389 233186558 2 0 0 0
+  3821962854 371844206 1 0 0 0
+
+## dual carriageway left no-channel
+area surface=411818 sidewalk=0
+reductions 0
+stop 10000,-1090
+stop 10000,1090
+stop 10590,-500
+stop 9410,500
+tile 0,0 hism ArrowThrough 4600,325,16 yaw=0
+tile 0,0 hism ArrowThrough 4600,675,16 yaw=0
+tile 0,0 hism ArrowThrough 7600,325,16 yaw=0
+tile 0,0 hism ArrowThrough 7600,675,16 yaw=0
+tile 0,0 mesh MarkingsWhite 0,-815,13 9090,815,13
+tile 0,0 mesh Surface 0,-850,12 9090,850,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9206,-150,12 9206,-850,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 9206,850,12 9206,150,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 0,500,12 9000,500,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=46 9000,-500,12 0,-500,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 0,150,12 9000,150,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 9000,-150,12 0,-150,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 0,850,12 9000,850,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 9000,-850,12 0,-850,12
+tile 0,1 hism ArrowThrough 10175,-500,16 yaw=90
+tile 0,1 hism ArrowThrough 9825,500,16 yaw=-90
+tile 0,1 mesh MarkingsWhite 9090,-1410,13 10910,1410,13
+tile 0,1 mesh Surface 9090,-1410,12 10910,1410,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,-1100,0 10175,-500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10175,500,0 10175,1000,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10600,-325,0 9400,-325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 10600,-675,0 9400,-675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,325,0 10600,325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9400,675,0 10600,675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,-500,0 9825,-1100,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 9825,1000,0 9825,500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10175,-1100,0 9400,-675,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10175,500,0 10600,325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10600,-325,0 10175,-500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 10600,-675,0 9825,-1100,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9400,325,0 9825,500,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9400,675,0 10175,1000,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9825,-500,0 9400,-325,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneTurn] pts=2 9825,1000,0 10600,675,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 10350,-1294,12 20000,-850,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 20000,850,12 10350,10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 0,-850,12 9650,-10000,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=8 9650,10000,12 0,850,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=9 0,150,12 0,-150,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=9 20000,-150,12 20000,150,12
+tile 1,0 hism ArrowThrough 12400,-325,16 yaw=180
+tile 1,0 hism ArrowThrough 12400,-675,16 yaw=180
+tile 1,0 hism ArrowThrough 15400,-325,16 yaw=180
+tile 1,0 hism ArrowThrough 15400,-675,16 yaw=180
+tile 1,0 mesh MarkingsWhite 10910,-816,13 20000,815,13
+tile 1,0 mesh Surface 10910,-850,12 20000,850,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10794,-850,12 10794,-150,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10794,150,12 10794,850,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 11000,500,12 20000,500,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 20000,-500,12 11000,-500,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 11000,150,12 20000,150,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 20000,-150,12 11000,-150,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 11000,850,12 20000,850,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 20000,-850,12 11000,-850,12
+tile 2,0 hism ArrowThrough 9825,2800,16 yaw=-90
+tile 2,0 hism ArrowThrough 9825,5800,16 yaw=-90
+tile 2,0 mesh MarkingsWhite 9684,1410,13 10316,10000,13
+tile 2,0 mesh Surface 9650,1410,12 10350,10000,12
+tile 2,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=4 10350,1000,12 9650,1294,12
+tile 2,0 spline [RoadNetSegmentCenter] pts=43 10000,10000,12 10000,1600,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=43 9650,10000,12 9650,1600,12
+tile 2,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=43 10350,10000,12 10350,1600,12
+tile 3,0 hism ArrowThrough 10175,-2900,16 yaw=90
+tile 3,0 hism ArrowThrough 10175,-5900,16 yaw=90
+tile 3,0 mesh MarkingsWhite 9684,-10000,13 10316,-1410,13
+tile 3,0 mesh Surface 9650,-10000,12 10350,-1410,12
+tile 3,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=3 9650,-1294,12 10350,-10000,12
+tile 3,0 spline [RoadNetSegmentCenter] pts=44 10000,-1500,12 10000,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 9650,-1500,12 9650,-10000,12
+tile 3,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 10350,-1500,12 10350,-10000,12
+NODE 233186558
+  -
+NODE 371844206
+  -
+NODE 417993046
+  -
+NODE 746109346
+  2270668649 3147086773 2 0 0 0
+  3379936331 417993046 1 0 0 0
+NODE 1026189804
+  2455447890 3147086773 1 0 0 0
+  3230797641 2880917937 3 0 0 0
+NODE 1251110720
+  387573252 233186558 1 0 0 0
+  3874383669 371844206 3 0 0 0
+NODE 2012193249
+  413928292 2360255249 1 0 0 0
+  4167351758 233186558 3 0 0 0
+NODE 2350041933
+  -
+NODE 2360255249
+  -
+NODE 2501075030
+  64998395 2350041933 1 0 0 0
+  2872237843 2360255249 2 0 0 0
+NODE 2880917937
+  -
+NODE 3049240566
+  158677012 417993046 2 0 0 0
+  1920027310 3501496918 1 0 0 0
+NODE 3147086773
+  -
+NODE 3501496918
+  -
+NODE 3668002362
+  2844691029 3501496918 3 0 0 0
+  3454513715 2880917937 1 0 0 0
+NODE 3865301428
+  2293227132 2350041933 2 0 0 0
+  3821962854 371844206 1 0 0 0
+
+## roundabout
+area surface=115364 sidewalk=0
+reductions 0
+stop 1000,2547
+stop 1966,318
+stop 342,1974
+tile 0,0 hism ArrowThrough 1175,4400,16 yaw=-90
+tile 0,0 hism ArrowThrough 825,4400,16 yaw=-90
+tile 0,0 mesh MarkingsWhite 684,2573,13 1315,6000,13
+tile 0,0 mesh Surface 650,2554,12 1350,6000,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 1350,2000,12 650,2453,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=17 1000,6000,12 1000,2800,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=17 650,6000,12 650,2800,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=17 1350,6000,12 1350,2800,12
+tile 0,1 hism CurbA 1034,1290,12 yaw=-40
+tile 0,1 hism CurbA 1182,1155,12 yaw=-46
+tile 0,1 hism CurbA 313,1623,12 yaw=-11
+tile 0,1 hism CurbA 507,1573,12 yaw=-19
+tile 0,1 hism CurbA 694,1500,12 yaw=-26
+tile 0,1 hism CurbA 871,1406,12 yaw=-34
+tile 0,1 hism CurbB 1110,1225,12 yaw=-41
+tile 0,1 hism CurbB 1250,1081,12 yaw=-49
+tile 0,1 hism CurbB 214,1639,12 yaw=-7
+tile 0,1 hism CurbB 411,1601,12 yaw=-14
+tile 0,1 hism CurbB 601,1540,12 yaw=-20
+tile 0,1 hism CurbB 783,1456,12 yaw=-26
+tile 0,1 hism CurbB 954,1350,12 yaw=-34
+tile 0,1 mesh MarkingsWhite 109,1083,13 1790,2772,13
+tile 0,1 mesh Median 252,1013,27 1033,1425,27
+tile 0,1 mesh MedianWalk 127,1017,27 1256,1642,27
+tile 0,1 mesh Surface 90,1066,12 1812,2801,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1175,2600,0 1736,1310,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 289,1807,0 1454,1103,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 342,2153,0 1736,1310,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 825,2600,0 1454,1103,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=36 150,1645,12 1309,1003,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=15 650,2845,12 -23,2349,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=16 1877,1414,12 1350,6000,12
+tile 1,0 hism ArrowThrough -1419,1648,16 yaw=16
+tile 1,0 hism ArrowThrough -1441,1118,16 yaw=22
+tile 1,0 hism CurbA -1012,1307,12 yaw=38
+tile 1,0 hism CurbA -1018,-1302,12 yaw=141
+tile 1,0 hism CurbA -1162,1175,12 yaw=44
+tile 1,0 hism CurbA -1168,-1169,12 yaw=135
+tile 1,0 hism CurbA -1296,1026,12 yaw=51
+tile 1,0 hism CurbA -1301,-1020,12 yaw=129
+tile 1,0 hism CurbA -1411,862,12 yaw=57
+tile 1,0 hism CurbA -1415,-855,12 yaw=122
+tile 1,0 hism CurbA -1505,685,12 yaw=64
+tile 1,0 hism CurbA -1508,-677,12 yaw=116
+tile 1,0 hism CurbA -1576,498,12 yaw=71
+tile 1,0 hism CurbA -1579,-490,12 yaw=109
+tile 1,0 hism CurbA -1625,303,12 yaw=79
+tile 1,0 hism CurbA -1626,-295,12 yaw=101
+tile 1,0 hism CurbA -1649,104,12 yaw=86
+tile 1,0 hism CurbA -1650,-96,12 yaw=94
+tile 1,0 hism CurbA -285,1628,12 yaw=11
+tile 1,0 hism CurbA -293,-1627,12 yaw=169
+tile 1,0 hism CurbA -480,1582,12 yaw=19
+tile 1,0 hism CurbA -488,-1579,12 yaw=161
+tile 1,0 hism CurbA -668,1512,12 yaw=25
+tile 1,0 hism CurbA -676,-1509,12 yaw=154
+tile 1,0 hism CurbA -846,1420,12 yaw=32
+tile 1,0 hism CurbA -853,-1416,12 yaw=148
+tile 1,0 hism CurbA -86,1650,12 yaw=4
+tile 1,0 hism CurbA -94,-1650,12 yaw=176
+tile 1,0 hism CurbA 106,-1649,12 yaw=-176
+tile 1,0 hism CurbA 114,1649,12 yaw=-4
+tile 1,0 hism CurbA 1148,-1189,12 yaw=-137
+tile 1,0 hism CurbA 1284,-1042,12 yaw=-131
+tile 1,0 hism CurbA 1313,1003,12 yaw=-53
+tile 1,0 hism CurbA 1400,-879,12 yaw=-124
+tile 1,0 hism CurbA 1425,837,12 yaw=-59
+tile 1,0 hism CurbA 1496,-703,12 yaw=-116
+tile 1,0 hism CurbA 1516,659,12 yaw=-65
+tile 1,0 hism CurbA 266,-1632,12 yaw=-169
+tile 1,0 hism CurbA 461,-1588,12 yaw=-162
+tile 1,0 hism CurbA 650,-1520,12 yaw=-156
+tile 1,0 hism CurbA 829,-1430,12 yaw=-150
+tile 1,0 hism CurbA 995,-1319,12 yaw=-144
+tile 1,0 hism CurbB -1089,1243,12 yaw=41
+tile 1,0 hism CurbB -1095,-1238,12 yaw=139
+tile 1,0 hism CurbB -1231,1102,12 yaw=49
+tile 1,0 hism CurbB -1237,-1096,12 yaw=131
+tile 1,0 hism CurbB -1356,945,12 yaw=56
+tile 1,0 hism CurbB -1360,-939,12 yaw=124
+tile 1,0 hism CurbB -1461,775,12 yaw=64
+tile 1,0 hism CurbB -1464,-767,12 yaw=116
+tile 1,0 hism CurbB -1544,592,12 yaw=71
+tile 1,0 hism CurbB -1547,-585,12 yaw=109
+tile 1,0 hism CurbB -1604,401,12 yaw=77
+tile 1,0 hism CurbB -1606,-393,12 yaw=102
+tile 1,0 hism CurbB -1640,204,12 yaw=83
+tile 1,0 hism CurbB -1641,-196,12 yaw=96
+tile 1,0 hism CurbB -1653,4,12 yaw=90
+tile 1,0 hism CurbB -186,1643,12 yaw=5
+tile 1,0 hism CurbB -194,-1641,12 yaw=174
+tile 1,0 hism CurbB -383,1608,12 yaw=12
+tile 1,0 hism CurbB -391,-1606,12 yaw=168
+tile 1,0 hism CurbB -575,1550,12 yaw=19
+tile 1,0 hism CurbB -583,-1547,12 yaw=161
+tile 1,0 hism CurbB -758,1469,12 yaw=26
+tile 1,0 hism CurbB -766,-1465,12 yaw=154
+tile 1,0 hism CurbB -930,1366,12 yaw=34
+tile 1,0 hism CurbB -937,-1361,12 yaw=146
+tile 1,0 hism CurbB 1074,-1256,12 yaw=-139
+tile 1,0 hism CurbB 1218,-1117,12 yaw=-131
+tile 1,0 hism CurbB 1345,-962,12 yaw=-124
+tile 1,0 hism CurbB 1371,922,12 yaw=-56
+tile 1,0 hism CurbB 14,1653,12 yaw=-1
+tile 1,0 hism CurbB 1451,-792,12 yaw=-117
+tile 1,0 hism CurbB 1473,749,12 yaw=-64
+tile 1,0 hism CurbB 1536,-611,12 yaw=-111
+tile 1,0 hism CurbB 1553,566,12 yaw=-71
+tile 1,0 hism CurbB 186,-1644,12 yaw=-176
+tile 1,0 hism CurbB 364,-1613,12 yaw=-169
+tile 1,0 hism CurbB 556,-1556,12 yaw=-161
+tile 1,0 hism CurbB 6,-1653,12 yaw=-180
+tile 1,0 hism CurbB 740,-1477,12 yaw=-154
+tile 1,0 hism CurbB 914,-1377,12 yaw=-146
+tile 1,0 mesh MarkingsWhite -2312,-2313,13 2216,2315,13
+tile 1,0 mesh Median -1450,-1450,27 1375,1450,27
+tile 1,0 mesh MedianWalk -1650,-1650,27 1554,1650,27
+tile 1,0 mesh Surface -2347,-2348,12 2255,2349,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=13 1204,1134,12 1567,516,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=49 1570,-500,12 48,1647,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=14 2263,617,12 1738,1587,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=48 199,2344,12 2246,-686,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=4 1595,1206,12 1849,764,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 1850,-765,12 -21,1999,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=4 1313,999,12 1526,631,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 1526,-632,12 -13,1649,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=4 1877,1414,12 2173,898,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 2174,-899,12 -29,2349,12
+tile 1,1 hism CurbA 1570,-517,12 yaw=-109
+tile 1,1 hism CurbA 1585,471,12 yaw=-72
+tile 1,1 hism CurbA 1621,-323,12 yaw=-101
+tile 1,1 hism CurbA 1630,275,12 yaw=-79
+tile 1,1 hism CurbA 1648,-124,12 yaw=-94
+tile 1,1 hism CurbA 1651,76,12 yaw=-86
+tile 1,1 hism CurbB 1598,-420,12 yaw=-104
+tile 1,1 hism CurbB 1611,374,12 yaw=-79
+tile 1,1 hism CurbB 1638,-224,12 yaw=-98
+tile 1,1 hism CurbB 1644,176,12 yaw=-85
+tile 1,1 hism CurbB 1653,-24,12 yaw=-92
+tile 1,1 mesh MarkingsWhite 1586,-665,13 2314,665,13
+tile 1,1 mesh Median 1089,-451,27 1450,452,27
+tile 1,1 mesh MedianWalk 1374,-544,27 1650,546,27
+tile 1,1 mesh Surface 1555,-700,12 2348,700,12
+tile 1,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1796,267,0 1780,-366,0
+tile 1,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 2142,316,0 2124,-428,0
+tile 1,1 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=19 1550,562,12 1526,-632,12
+tile 1,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=39 2262,-616,12 2237,720,12
+NODE 13699252
+  -
+NODE 715083025
+  1727392771 1875914520 1 0 0 0
+NODE 952112034
+  -
+NODE 1294590531
+  -
+NODE 1875914520
+  -
+NODE 1954266157
+  2973796187 1294590531 1 0 0 0
+NODE 2365967473
+  345717342 952112034 1 0 0 0
+NODE 2769014024
+  3757283035 952112034 1 0 0 0
+NODE 3113042527
+  2539655377 13699252 1 0 0 0
+NODE 4140658493
+  850584205 1875914520 1 0 0 0
+
+## roundabout left
+area surface=115365 sidewalk=0
+reductions 0
+stop 1000,2537
+stop 1610,1245
+stop 1966,-316
+tile 0,0 hism ArrowThrough 1175,4400,16 yaw=-90
+tile 0,0 hism ArrowThrough 825,4400,16 yaw=-90
+tile 0,0 mesh MarkingsWhite 684,2573,13 1315,6000,13
+tile 0,0 mesh Surface 650,2554,12 1350,6000,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 1350,2453,12 650,2453,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=17 1000,6000,12 1000,2800,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=17 650,6000,12 650,2800,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=17 1350,6000,12 1350,2800,12
+tile 0,1 hism CurbA 1034,1290,12 yaw=-40
+tile 0,1 hism CurbA 1182,1155,12 yaw=-46
+tile 0,1 hism CurbA 313,1623,12 yaw=-11
+tile 0,1 hism CurbA 507,1573,12 yaw=-19
+tile 0,1 hism CurbA 694,1500,12 yaw=-26
+tile 0,1 hism CurbA 871,1406,12 yaw=-34
+tile 0,1 hism CurbB 1110,1225,12 yaw=-41
+tile 0,1 hism CurbB 1250,1081,12 yaw=-49
+tile 0,1 hism CurbB 214,1639,12 yaw=-7
+tile 0,1 hism CurbB 411,1601,12 yaw=-14
+tile 0,1 hism CurbB 601,1540,12 yaw=-20
+tile 0,1 hism CurbB 783,1456,12 yaw=-26
+tile 0,1 hism CurbB 954,1350,12 yaw=-34
+tile 0,1 mesh MarkingsWhite 90,1084,13 1792,2770,13
+tile 0,1 mesh Median 252,1013,27 1033,1425,27
+tile 0,1 mesh MedianWalk 127,1017,27 1256,1642,27
+tile 0,1 mesh Surface 90,1068,12 1813,2790,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1175,2600,0 289,1807,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1394,1183,0 289,1807,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1668,1400,0 342,2153,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 825,2600,0 342,2153,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=38 214,1638,12 1354,940,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=13 650,2835,12 83,2347,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=23 1938,1326,12 1350,6000,12
+tile 1,0 hism CurbA -1012,1307,12 yaw=38
+tile 1,0 hism CurbA -1018,-1302,12 yaw=141
+tile 1,0 hism CurbA -1162,1175,12 yaw=44
+tile 1,0 hism CurbA -1168,-1169,12 yaw=135
+tile 1,0 hism CurbA -1296,1026,12 yaw=51
+tile 1,0 hism CurbA -1301,-1020,12 yaw=129
+tile 1,0 hism CurbA -1411,862,12 yaw=57
+tile 1,0 hism CurbA -1415,-855,12 yaw=122
+tile 1,0 hism CurbA -1505,685,12 yaw=64
+tile 1,0 hism CurbA -1508,-677,12 yaw=116
+tile 1,0 hism CurbA -1576,498,12 yaw=71
+tile 1,0 hism CurbA -1579,-490,12 yaw=109
+tile 1,0 hism CurbA -1625,303,12 yaw=79
+tile 1,0 hism CurbA -1626,-295,12 yaw=101
+tile 1,0 hism CurbA -1649,104,12 yaw=86
+tile 1,0 hism CurbA -1650,-96,12 yaw=94
+tile 1,0 hism CurbA -285,1628,12 yaw=11
+tile 1,0 hism CurbA -293,-1627,12 yaw=169
+tile 1,0 hism CurbA -480,1582,12 yaw=19
+tile 1,0 hism CurbA -488,-1579,12 yaw=161
+tile 1,0 hism CurbA -668,1512,12 yaw=25
+tile 1,0 hism CurbA -676,-1509,12 yaw=154
+tile 1,0 hism CurbA -846,1420,12 yaw=32
+tile 1,0 hism CurbA -853,-1416,12 yaw=148
+tile 1,0 hism CurbA -86,1650,12 yaw=4
+tile 1,0 hism CurbA -94,-1650,12 yaw=176
+tile 1,0 hism CurbA 106,-1649,12 yaw=-176
+tile 1,0 hism CurbA 114,1649,12 yaw=-4
+tile 1,0 hism CurbA 1148,-1189,12 yaw=-137
+tile 1,0 hism CurbA 1284,-1042,12 yaw=-131
+tile 1,0 hism CurbA 1313,1003,12 yaw=-53
+tile 1,0 hism CurbA 1400,-879,12 yaw=-124
+tile 1,0 hism CurbA 1425,837,12 yaw=-59
+tile 1,0 hism CurbA 1496,-703,12 yaw=-116
+tile 1,0 hism CurbA 1516,659,12 yaw=-65
+tile 1,0 hism CurbA 266,-1632,12 yaw=-169
+tile 1,0 hism CurbA 461,-1588,12 yaw=-162
+tile 1,0 hism CurbA 650,-1520,12 yaw=-156
+tile 1,0 hism CurbA 829,-1430,12 yaw=-150
+tile 1,0 hism CurbA 995,-1319,12 yaw=-144
+tile 1,0 hism CurbB -1089,1243,12 yaw=41
+tile 1,0 hism CurbB -1095,-1238,12 yaw=139
+tile 1,0 hism CurbB -1231,1102,12 yaw=49
+tile 1,0 hism CurbB -1237,-1096,12 yaw=131
+tile 1,0 hism CurbB -1356,945,12 yaw=56
+tile 1,0 hism CurbB -1360,-939,12 yaw=124
+tile 1,0 hism CurbB -1461,775,12 yaw=64
+tile 1,0 hism CurbB -1464,-767,12 yaw=116
+tile 1,0 hism CurbB -1544,592,12 yaw=71
+tile 1,0 hism CurbB -1547,-585,12 yaw=109
+tile 1,0 hism CurbB -1604,401,12 yaw=77
+tile 1,0 hism CurbB -1606,-393,12 yaw=102
+tile 1,0 hism CurbB -1640,204,12 yaw=83
+tile 1,0 hism CurbB -1641,-196,12 yaw=96
+tile 1,0 hism CurbB -1653,4,12 yaw=90
+tile 1,0 hism CurbB -186,1643,12 yaw=5
+tile 1,0 hism CurbB -194,-1641,12 yaw=174
+tile 1,0 hism CurbB -383,1608,12 yaw=12
+tile 1,0 hism CurbB -391,-1606,12 yaw=168
+tile 1,0 hism CurbB -575,1550,12 yaw=19
+tile 1,0 hism CurbB -583,-1547,12 yaw=161
+tile 1,0 hism CurbB -758,1469,12 yaw=26
+tile 1,0 hism CurbB -766,-1465,12 yaw=154
+tile 1,0 hism CurbB -930,1366,12 yaw=34
+tile 1,0 hism CurbB -937,-1361,12 yaw=146
+tile 1,0 hism CurbB 1074,-1256,12 yaw=-139
+tile 1,0 hism CurbB 1218,-1117,12 yaw=-131
+tile 1,0 hism CurbB 1345,-962,12 yaw=-124
+tile 1,0 hism CurbB 1371,922,12 yaw=-56
+tile 1,0 hism CurbB 14,1653,12 yaw=-1
+tile 1,0 hism CurbB 1451,-792,12 yaw=-117
+tile 1,0 hism CurbB 1473,749,12 yaw=-64
+tile 1,0 hism CurbB 1536,-611,12 yaw=-111
+tile 1,0 hism CurbB 1553,566,12 yaw=-71
+tile 1,0 hism CurbB 186,-1644,12 yaw=-176
+tile 1,0 hism CurbB 364,-1613,12 yaw=-169
+tile 1,0 hism CurbB 556,-1556,12 yaw=-161
+tile 1,0 hism CurbB 6,-1653,12 yaw=-180
+tile 1,0 hism CurbB 740,-1477,12 yaw=-154
+tile 1,0 hism CurbB 914,-1377,12 yaw=-146
+tile 1,0 mesh MarkingsWhite -2315,-2313,13 2336,2315,13
+tile 1,0 mesh Median -1450,-1450,27 1375,1450,27
+tile 1,0 mesh MedianWalk -1650,-1650,27 1554,1650,27
+tile 1,0 mesh Surface -2350,-2347,12 2325,2349,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=51 1574,-480,12 48,1648,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=8 1261,1068,12 1570,499,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=17 2328,242,12 1807,1507,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=64 274,2336,12 2319,-311,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=4 1909,592,12 1648,1130,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 47,1999,12 1888,-657,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=4 2246,687,12 1940,1324,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 52,2349,12 2223,-761,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=4 1571,497,12 1357,935,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 42,1649,12 1554,-553,12
+tile 1,1 hism ArrowThrough 1826,-17,16 yaw=110
+tile 1,1 hism ArrowThrough 2174,17,16 yaw=110
+tile 1,1 hism CurbA 1570,-517,12 yaw=-109
+tile 1,1 hism CurbA 1585,471,12 yaw=-72
+tile 1,1 hism CurbA 1621,-323,12 yaw=-101
+tile 1,1 hism CurbA 1630,275,12 yaw=-79
+tile 1,1 hism CurbA 1648,-124,12 yaw=-94
+tile 1,1 hism CurbA 1651,76,12 yaw=-86
+tile 1,1 hism CurbB 1598,-420,12 yaw=-104
+tile 1,1 hism CurbB 1611,374,12 yaw=-79
+tile 1,1 hism CurbB 1638,-224,12 yaw=-98
+tile 1,1 hism CurbB 1644,176,12 yaw=-85
+tile 1,1 hism CurbB 1653,-24,12 yaw=-92
+tile 1,1 mesh MarkingsWhite 1588,-572,13 2314,557,13
+tile 1,1 mesh Median 1089,-452,27 1450,451,27
+tile 1,1 mesh MedianWalk 1375,-545,27 1650,544,27
+tile 1,1 mesh Surface 1555,-592,12 2348,591,12
+tile 1,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1798,-243,0 1780,366,0
+tile 1,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 2145,-290,0 2124,428,0
+tile 1,1 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=19 1526,629,12 1554,-553,12
+tile 1,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=21 2342,-104,12 2297,457,12
+NODE 629721482
+  -
+NODE 715083025
+  2136244530 1440824853 1 0 0 0
+NODE 1187889268
+  1013596294 1856569991 1 0 0 0
+NODE 1251452846
+  -
+NODE 1440824853
+  -
+NODE 1856569991
+  -
+NODE 2599210533
+  50803867 1440824853 1 0 0 0
+NODE 2716731826
+  1948070636 629721482 1 0 0 0
+NODE 2769014024
+  3620248343 1856569991 1 0 0 0
+NODE 3258452270
+  2095147931 1251452846 1 0 0 0
+
+## roundabout no-channel
+area surface=115364 sidewalk=0
+reductions 0
+stop 1000,2547
+stop 1966,318
+stop 342,1974
+tile 0,0 hism ArrowThrough 1175,4400,16 yaw=-90
+tile 0,0 hism ArrowThrough 825,4400,16 yaw=-90
+tile 0,0 mesh MarkingsWhite 684,2573,13 1315,6000,13
+tile 0,0 mesh Surface 650,2554,12 1350,6000,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 1350,2000,12 650,2453,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=17 1000,6000,12 1000,2800,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=17 650,6000,12 650,2800,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=17 1350,6000,12 1350,2800,12
+tile 0,1 hism CurbA 1034,1290,12 yaw=-40
+tile 0,1 hism CurbA 1182,1155,12 yaw=-46
+tile 0,1 hism CurbA 313,1623,12 yaw=-11
+tile 0,1 hism CurbA 507,1573,12 yaw=-19
+tile 0,1 hism CurbA 694,1500,12 yaw=-26
+tile 0,1 hism CurbA 871,1406,12 yaw=-34
+tile 0,1 hism CurbB 1110,1225,12 yaw=-41
+tile 0,1 hism CurbB 1250,1081,12 yaw=-49
+tile 0,1 hism CurbB 214,1639,12 yaw=-7
+tile 0,1 hism CurbB 411,1601,12 yaw=-14
+tile 0,1 hism CurbB 601,1540,12 yaw=-20
+tile 0,1 hism CurbB 783,1456,12 yaw=-26
+tile 0,1 hism CurbB 954,1350,12 yaw=-34
+tile 0,1 mesh MarkingsWhite 109,1083,13 1790,2772,13
+tile 0,1 mesh Median 252,1013,27 1033,1425,27
+tile 0,1 mesh MedianWalk 127,1017,27 1256,1642,27
+tile 0,1 mesh Surface 90,1066,12 1812,2801,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1175,2600,0 1736,1310,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 289,1807,0 1454,1103,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 342,2153,0 1736,1310,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 825,2600,0 1454,1103,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=36 150,1645,12 1309,1003,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=15 650,2845,12 -23,2349,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=16 1877,1414,12 1350,6000,12
+tile 1,0 hism ArrowThrough -1419,1648,16 yaw=16
+tile 1,0 hism ArrowThrough -1441,1118,16 yaw=22
+tile 1,0 hism CurbA -1012,1307,12 yaw=38
+tile 1,0 hism CurbA -1018,-1302,12 yaw=141
+tile 1,0 hism CurbA -1162,1175,12 yaw=44
+tile 1,0 hism CurbA -1168,-1169,12 yaw=135
+tile 1,0 hism CurbA -1296,1026,12 yaw=51
+tile 1,0 hism CurbA -1301,-1020,12 yaw=129
+tile 1,0 hism CurbA -1411,862,12 yaw=57
+tile 1,0 hism CurbA -1415,-855,12 yaw=122
+tile 1,0 hism CurbA -1505,685,12 yaw=64
+tile 1,0 hism CurbA -1508,-677,12 yaw=116
+tile 1,0 hism CurbA -1576,498,12 yaw=71
+tile 1,0 hism CurbA -1579,-490,12 yaw=109
+tile 1,0 hism CurbA -1625,303,12 yaw=79
+tile 1,0 hism CurbA -1626,-295,12 yaw=101
+tile 1,0 hism CurbA -1649,104,12 yaw=86
+tile 1,0 hism CurbA -1650,-96,12 yaw=94
+tile 1,0 hism CurbA -285,1628,12 yaw=11
+tile 1,0 hism CurbA -293,-1627,12 yaw=169
+tile 1,0 hism CurbA -480,1582,12 yaw=19
+tile 1,0 hism CurbA -488,-1579,12 yaw=161
+tile 1,0 hism CurbA -668,1512,12 yaw=25
+tile 1,0 hism CurbA -676,-1509,12 yaw=154
+tile 1,0 hism CurbA -846,1420,12 yaw=32
+tile 1,0 hism CurbA -853,-1416,12 yaw=148
+tile 1,0 hism CurbA -86,1650,12 yaw=4
+tile 1,0 hism CurbA -94,-1650,12 yaw=176
+tile 1,0 hism CurbA 106,-1649,12 yaw=-176
+tile 1,0 hism CurbA 114,1649,12 yaw=-4
+tile 1,0 hism CurbA 1148,-1189,12 yaw=-137
+tile 1,0 hism CurbA 1284,-1042,12 yaw=-131
+tile 1,0 hism CurbA 1313,1003,12 yaw=-53
+tile 1,0 hism CurbA 1400,-879,12 yaw=-124
+tile 1,0 hism CurbA 1425,837,12 yaw=-59
+tile 1,0 hism CurbA 1496,-703,12 yaw=-116
+tile 1,0 hism CurbA 1516,659,12 yaw=-65
+tile 1,0 hism CurbA 266,-1632,12 yaw=-169
+tile 1,0 hism CurbA 461,-1588,12 yaw=-162
+tile 1,0 hism CurbA 650,-1520,12 yaw=-156
+tile 1,0 hism CurbA 829,-1430,12 yaw=-150
+tile 1,0 hism CurbA 995,-1319,12 yaw=-144
+tile 1,0 hism CurbB -1089,1243,12 yaw=41
+tile 1,0 hism CurbB -1095,-1238,12 yaw=139
+tile 1,0 hism CurbB -1231,1102,12 yaw=49
+tile 1,0 hism CurbB -1237,-1096,12 yaw=131
+tile 1,0 hism CurbB -1356,945,12 yaw=56
+tile 1,0 hism CurbB -1360,-939,12 yaw=124
+tile 1,0 hism CurbB -1461,775,12 yaw=64
+tile 1,0 hism CurbB -1464,-767,12 yaw=116
+tile 1,0 hism CurbB -1544,592,12 yaw=71
+tile 1,0 hism CurbB -1547,-585,12 yaw=109
+tile 1,0 hism CurbB -1604,401,12 yaw=77
+tile 1,0 hism CurbB -1606,-393,12 yaw=102
+tile 1,0 hism CurbB -1640,204,12 yaw=83
+tile 1,0 hism CurbB -1641,-196,12 yaw=96
+tile 1,0 hism CurbB -1653,4,12 yaw=90
+tile 1,0 hism CurbB -186,1643,12 yaw=5
+tile 1,0 hism CurbB -194,-1641,12 yaw=174
+tile 1,0 hism CurbB -383,1608,12 yaw=12
+tile 1,0 hism CurbB -391,-1606,12 yaw=168
+tile 1,0 hism CurbB -575,1550,12 yaw=19
+tile 1,0 hism CurbB -583,-1547,12 yaw=161
+tile 1,0 hism CurbB -758,1469,12 yaw=26
+tile 1,0 hism CurbB -766,-1465,12 yaw=154
+tile 1,0 hism CurbB -930,1366,12 yaw=34
+tile 1,0 hism CurbB -937,-1361,12 yaw=146
+tile 1,0 hism CurbB 1074,-1256,12 yaw=-139
+tile 1,0 hism CurbB 1218,-1117,12 yaw=-131
+tile 1,0 hism CurbB 1345,-962,12 yaw=-124
+tile 1,0 hism CurbB 1371,922,12 yaw=-56
+tile 1,0 hism CurbB 14,1653,12 yaw=-1
+tile 1,0 hism CurbB 1451,-792,12 yaw=-117
+tile 1,0 hism CurbB 1473,749,12 yaw=-64
+tile 1,0 hism CurbB 1536,-611,12 yaw=-111
+tile 1,0 hism CurbB 1553,566,12 yaw=-71
+tile 1,0 hism CurbB 186,-1644,12 yaw=-176
+tile 1,0 hism CurbB 364,-1613,12 yaw=-169
+tile 1,0 hism CurbB 556,-1556,12 yaw=-161
+tile 1,0 hism CurbB 6,-1653,12 yaw=-180
+tile 1,0 hism CurbB 740,-1477,12 yaw=-154
+tile 1,0 hism CurbB 914,-1377,12 yaw=-146
+tile 1,0 mesh MarkingsWhite -2312,-2313,13 2216,2315,13
+tile 1,0 mesh Median -1450,-1450,27 1375,1450,27
+tile 1,0 mesh MedianWalk -1650,-1650,27 1554,1650,27
+tile 1,0 mesh Surface -2347,-2348,12 2255,2349,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=13 1204,1134,12 1567,516,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=49 1570,-500,12 48,1647,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=14 2263,617,12 1738,1587,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=48 199,2344,12 2246,-686,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=4 1595,1206,12 1849,764,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=44 1850,-765,12 -21,1999,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=4 1313,999,12 1526,631,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=44 1526,-632,12 -13,1649,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=4 1877,1414,12 2173,898,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=44 2174,-899,12 -29,2349,12
+tile 1,1 hism CurbA 1570,-517,12 yaw=-109
+tile 1,1 hism CurbA 1585,471,12 yaw=-72
+tile 1,1 hism CurbA 1621,-323,12 yaw=-101
+tile 1,1 hism CurbA 1630,275,12 yaw=-79
+tile 1,1 hism CurbA 1648,-124,12 yaw=-94
+tile 1,1 hism CurbA 1651,76,12 yaw=-86
+tile 1,1 hism CurbB 1598,-420,12 yaw=-104
+tile 1,1 hism CurbB 1611,374,12 yaw=-79
+tile 1,1 hism CurbB 1638,-224,12 yaw=-98
+tile 1,1 hism CurbB 1644,176,12 yaw=-85
+tile 1,1 hism CurbB 1653,-24,12 yaw=-92
+tile 1,1 mesh MarkingsWhite 1586,-665,13 2314,665,13
+tile 1,1 mesh Median 1089,-451,27 1450,452,27
+tile 1,1 mesh MedianWalk 1374,-544,27 1650,546,27
+tile 1,1 mesh Surface 1555,-700,12 2348,700,12
+tile 1,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1796,267,0 1780,-366,0
+tile 1,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 2142,316,0 2124,-428,0
+tile 1,1 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=19 1550,562,12 1526,-632,12
+tile 1,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=39 2262,-616,12 2237,720,12
+NODE 13699252
+  -
+NODE 715083025
+  1727392771 1875914520 1 0 0 0
+NODE 952112034
+  -
+NODE 1294590531
+  -
+NODE 1875914520
+  -
+NODE 1954266157
+  2973796187 1294590531 1 0 0 0
+NODE 2365967473
+  345717342 952112034 1 0 0 0
+NODE 2769014024
+  3757283035 952112034 1 0 0 0
+NODE 3113042527
+  2539655377 13699252 1 0 0 0
+NODE 4140658493
+  850584205 1875914520 1 0 0 0
+
+## roundabout left no-channel
+area surface=115365 sidewalk=0
+reductions 0
+stop 1000,2537
+stop 1610,1245
+stop 1966,-316
+tile 0,0 hism ArrowThrough 1175,4400,16 yaw=-90
+tile 0,0 hism ArrowThrough 825,4400,16 yaw=-90
+tile 0,0 mesh MarkingsWhite 684,2573,13 1315,6000,13
+tile 0,0 mesh Surface 650,2554,12 1350,6000,12
+tile 0,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=6 1350,2453,12 650,2453,12
+tile 0,0 spline [RoadNetSegmentCenter] pts=17 1000,6000,12 1000,2800,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=17 650,6000,12 650,2800,12
+tile 0,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=17 1350,6000,12 1350,2800,12
+tile 0,1 hism CurbA 1034,1290,12 yaw=-40
+tile 0,1 hism CurbA 1182,1155,12 yaw=-46
+tile 0,1 hism CurbA 313,1623,12 yaw=-11
+tile 0,1 hism CurbA 507,1573,12 yaw=-19
+tile 0,1 hism CurbA 694,1500,12 yaw=-26
+tile 0,1 hism CurbA 871,1406,12 yaw=-34
+tile 0,1 hism CurbB 1110,1225,12 yaw=-41
+tile 0,1 hism CurbB 1250,1081,12 yaw=-49
+tile 0,1 hism CurbB 214,1639,12 yaw=-7
+tile 0,1 hism CurbB 411,1601,12 yaw=-14
+tile 0,1 hism CurbB 601,1540,12 yaw=-20
+tile 0,1 hism CurbB 783,1456,12 yaw=-26
+tile 0,1 hism CurbB 954,1350,12 yaw=-34
+tile 0,1 mesh MarkingsWhite 90,1084,13 1792,2770,13
+tile 0,1 mesh Median 252,1013,27 1033,1425,27
+tile 0,1 mesh MedianWalk 127,1017,27 1256,1642,27
+tile 0,1 mesh Surface 90,1068,12 1813,2790,12
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1175,2600,0 289,1807,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1394,1183,0 289,1807,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1668,1400,0 342,2153,0
+tile 0,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 825,2600,0 342,2153,0
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=38 214,1638,12 1354,940,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=13 650,2835,12 83,2347,12
+tile 0,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=23 1938,1326,12 1350,6000,12
+tile 1,0 hism CurbA -1012,1307,12 yaw=38
+tile 1,0 hism CurbA -1018,-1302,12 yaw=141
+tile 1,0 hism CurbA -1162,1175,12 yaw=44
+tile 1,0 hism CurbA -1168,-1169,12 yaw=135
+tile 1,0 hism CurbA -1296,1026,12 yaw=51
+tile 1,0 hism CurbA -1301,-1020,12 yaw=129
+tile 1,0 hism CurbA -1411,862,12 yaw=57
+tile 1,0 hism CurbA -1415,-855,12 yaw=122
+tile 1,0 hism CurbA -1505,685,12 yaw=64
+tile 1,0 hism CurbA -1508,-677,12 yaw=116
+tile 1,0 hism CurbA -1576,498,12 yaw=71
+tile 1,0 hism CurbA -1579,-490,12 yaw=109
+tile 1,0 hism CurbA -1625,303,12 yaw=79
+tile 1,0 hism CurbA -1626,-295,12 yaw=101
+tile 1,0 hism CurbA -1649,104,12 yaw=86
+tile 1,0 hism CurbA -1650,-96,12 yaw=94
+tile 1,0 hism CurbA -285,1628,12 yaw=11
+tile 1,0 hism CurbA -293,-1627,12 yaw=169
+tile 1,0 hism CurbA -480,1582,12 yaw=19
+tile 1,0 hism CurbA -488,-1579,12 yaw=161
+tile 1,0 hism CurbA -668,1512,12 yaw=25
+tile 1,0 hism CurbA -676,-1509,12 yaw=154
+tile 1,0 hism CurbA -846,1420,12 yaw=32
+tile 1,0 hism CurbA -853,-1416,12 yaw=148
+tile 1,0 hism CurbA -86,1650,12 yaw=4
+tile 1,0 hism CurbA -94,-1650,12 yaw=176
+tile 1,0 hism CurbA 106,-1649,12 yaw=-176
+tile 1,0 hism CurbA 114,1649,12 yaw=-4
+tile 1,0 hism CurbA 1148,-1189,12 yaw=-137
+tile 1,0 hism CurbA 1284,-1042,12 yaw=-131
+tile 1,0 hism CurbA 1313,1003,12 yaw=-53
+tile 1,0 hism CurbA 1400,-879,12 yaw=-124
+tile 1,0 hism CurbA 1425,837,12 yaw=-59
+tile 1,0 hism CurbA 1496,-703,12 yaw=-116
+tile 1,0 hism CurbA 1516,659,12 yaw=-65
+tile 1,0 hism CurbA 266,-1632,12 yaw=-169
+tile 1,0 hism CurbA 461,-1588,12 yaw=-162
+tile 1,0 hism CurbA 650,-1520,12 yaw=-156
+tile 1,0 hism CurbA 829,-1430,12 yaw=-150
+tile 1,0 hism CurbA 995,-1319,12 yaw=-144
+tile 1,0 hism CurbB -1089,1243,12 yaw=41
+tile 1,0 hism CurbB -1095,-1238,12 yaw=139
+tile 1,0 hism CurbB -1231,1102,12 yaw=49
+tile 1,0 hism CurbB -1237,-1096,12 yaw=131
+tile 1,0 hism CurbB -1356,945,12 yaw=56
+tile 1,0 hism CurbB -1360,-939,12 yaw=124
+tile 1,0 hism CurbB -1461,775,12 yaw=64
+tile 1,0 hism CurbB -1464,-767,12 yaw=116
+tile 1,0 hism CurbB -1544,592,12 yaw=71
+tile 1,0 hism CurbB -1547,-585,12 yaw=109
+tile 1,0 hism CurbB -1604,401,12 yaw=77
+tile 1,0 hism CurbB -1606,-393,12 yaw=102
+tile 1,0 hism CurbB -1640,204,12 yaw=83
+tile 1,0 hism CurbB -1641,-196,12 yaw=96
+tile 1,0 hism CurbB -1653,4,12 yaw=90
+tile 1,0 hism CurbB -186,1643,12 yaw=5
+tile 1,0 hism CurbB -194,-1641,12 yaw=174
+tile 1,0 hism CurbB -383,1608,12 yaw=12
+tile 1,0 hism CurbB -391,-1606,12 yaw=168
+tile 1,0 hism CurbB -575,1550,12 yaw=19
+tile 1,0 hism CurbB -583,-1547,12 yaw=161
+tile 1,0 hism CurbB -758,1469,12 yaw=26
+tile 1,0 hism CurbB -766,-1465,12 yaw=154
+tile 1,0 hism CurbB -930,1366,12 yaw=34
+tile 1,0 hism CurbB -937,-1361,12 yaw=146
+tile 1,0 hism CurbB 1074,-1256,12 yaw=-139
+tile 1,0 hism CurbB 1218,-1117,12 yaw=-131
+tile 1,0 hism CurbB 1345,-962,12 yaw=-124
+tile 1,0 hism CurbB 1371,922,12 yaw=-56
+tile 1,0 hism CurbB 14,1653,12 yaw=-1
+tile 1,0 hism CurbB 1451,-792,12 yaw=-117
+tile 1,0 hism CurbB 1473,749,12 yaw=-64
+tile 1,0 hism CurbB 1536,-611,12 yaw=-111
+tile 1,0 hism CurbB 1553,566,12 yaw=-71
+tile 1,0 hism CurbB 186,-1644,12 yaw=-176
+tile 1,0 hism CurbB 364,-1613,12 yaw=-169
+tile 1,0 hism CurbB 556,-1556,12 yaw=-161
+tile 1,0 hism CurbB 6,-1653,12 yaw=-180
+tile 1,0 hism CurbB 740,-1477,12 yaw=-154
+tile 1,0 hism CurbB 914,-1377,12 yaw=-146
+tile 1,0 mesh MarkingsWhite -2315,-2313,13 2336,2315,13
+tile 1,0 mesh Median -1450,-1450,27 1375,1450,27
+tile 1,0 mesh MedianWalk -1650,-1650,27 1554,1650,27
+tile 1,0 mesh Surface -2350,-2347,12 2325,2349,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=51 1574,-480,12 48,1648,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=8 1261,1068,12 1570,499,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=17 2328,242,12 1807,1507,12
+tile 1,0 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=64 274,2336,12 2319,-311,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=4 1909,592,12 1648,1130,12
+tile 1,0 spline [RoadNetSegmentCenter] pts=46 47,1999,12 1888,-657,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=4 2246,687,12 1940,1324,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeLeft] pts=46 52,2349,12 2223,-761,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=4 1571,497,12 1357,935,12
+tile 1,0 spline [RoadNetSegmentEdge,RoadNetSegmentEdgeRight] pts=46 42,1649,12 1554,-553,12
+tile 1,1 hism ArrowThrough 1826,-17,16 yaw=110
+tile 1,1 hism ArrowThrough 2174,17,16 yaw=110
+tile 1,1 hism CurbA 1570,-517,12 yaw=-109
+tile 1,1 hism CurbA 1585,471,12 yaw=-72
+tile 1,1 hism CurbA 1621,-323,12 yaw=-101
+tile 1,1 hism CurbA 1630,275,12 yaw=-79
+tile 1,1 hism CurbA 1648,-124,12 yaw=-94
+tile 1,1 hism CurbA 1651,76,12 yaw=-86
+tile 1,1 hism CurbB 1598,-420,12 yaw=-104
+tile 1,1 hism CurbB 1611,374,12 yaw=-79
+tile 1,1 hism CurbB 1638,-224,12 yaw=-98
+tile 1,1 hism CurbB 1644,176,12 yaw=-85
+tile 1,1 hism CurbB 1653,-24,12 yaw=-92
+tile 1,1 mesh MarkingsWhite 1588,-572,13 2314,557,13
+tile 1,1 mesh Median 1089,-452,27 1450,451,27
+tile 1,1 mesh MedianWalk 1375,-545,27 1650,544,27
+tile 1,1 mesh Surface 1555,-592,12 2348,591,12
+tile 1,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 1798,-243,0 1780,366,0
+tile 1,1 spline [RoadNetLaneGraph,RoadNetLaneThrough] pts=2 2145,-290,0 2124,428,0
+tile 1,1 spline [RoadNetPerimeter,RoadNetPerimeterHole] pts=19 1526,629,12 1554,-553,12
+tile 1,1 spline [RoadNetPerimeter,RoadNetPerimeterOuter] pts=21 2342,-104,12 2297,457,12
+NODE 629721482
+  -
+NODE 715083025
+  2136244530 1440824853 1 0 0 0
+NODE 1187889268
+  1013596294 1856569991 1 0 0 0
+NODE 1251452846
+  -
+NODE 1440824853
+  -
+NODE 1856569991
+  -
+NODE 2599210533
+  50803867 1440824853 1 0 0 0
+NODE 2716731826
+  1948070636 629721482 1 0 0 0
+NODE 2769014024
+  3620248343 1856569991 1 0 0 0
+NODE 3258452270
+  2095147931 1251452846 1 0 0 0
+

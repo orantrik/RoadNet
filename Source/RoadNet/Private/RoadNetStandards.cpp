@@ -44,6 +44,37 @@ namespace RoadNetStandards
 		return LaneDropTaperRatio(Vd) * FMath::Max(0.0, LaneWidthCm);
 	}
 
+	double LaneDropHoldLengthCm(int32 Vd)
+	{
+		if (Vd >= 100) { return 11000.0; }
+		if (Vd >= 90)  { return 10000.0; }
+		return 9000.0;
+	}
+
+	double OpenRoadTaperLengthCm(int32 Vd, double LaneWidthCm, bool bMerge)
+	{
+		// L[m] = k·V[km/h]·W[m]; W in cm makes the product cm directly.
+		return (bMerge ? 0.6 : 0.4) * (double)FMath::Max(0, Vd) * FMath::Max(0.0, LaneWidthCm);
+	}
+
+	double LaneCountShiftLengthCm(int32 Vd, double ShiftCm)
+	{
+		// Table 4 gives L/W at 60..110 km/h; below 60 its empirical formula
+		// L/W = 2V/3 (which the table rounds) is used.
+		static const double Kph[]   = { 60, 70, 80, 90, 100, 110 };
+		static const double Ratio[] = { 40, 45, 50, 60, 65, 75 };
+		const double V = (double)FMath::Max(1, Vd);
+		double R = V * 2.0 / 3.0;
+		if (V >= Kph[5]) { R = Ratio[5]; }
+		else if (V >= Kph[0])
+		{
+			int32 k = 0;
+			while (V > Kph[k + 1]) { ++k; }
+			R = FMath::Lerp(Ratio[k], Ratio[k + 1], (V - Kph[k]) / (Kph[k + 1] - Kph[k]));
+		}
+		return R * FMath::Abs(ShiftCm);
+	}
+
 	double LeftTurnTaperRatio(int32 Vd)
 	{
 		// כרך 2 §7 — 1:10 below 80 km/h, 1:15 at or above.
@@ -104,6 +135,16 @@ namespace RoadNetStandards
 		return bToStop ? LerpBySpeed(Vd, kRightStop) : LerpBySpeed(Vd, kRight25);
 	}
 
+	double AccelLaneLengthCm(int32 Vd)
+	{
+		//                                  50     60     70     80     90     100 km/h
+		static constexpr double kAccel[6] = { 100.0, 100.0, 100.0, 140.0, 170.0, 210.0 }; // Table 6.5
+		return LerpBySpeed(Vd, kAccel) * 100.0;
+	}
+
+	// ponytail: the middle of the 1:20-1:35 band; the chapter gives no rule for picking within it.
+	double AccelLaneTaperRatio() { return 30.0; }
+
 	double GradeFactor(double GradePct, bool bUphill)
 	{
 		// Table 6.3. Below the first band there is no correction; above 6% the
@@ -138,24 +179,45 @@ namespace RoadNetStandards
 
 	FPaintSpec Paint(EMark Mark)
 	{
-		// Working values pending IS 934 — see the header. 801 carries the
-		// 3 m / 5 m the generator already drew, so nothing changes shape today.
+		// תקו"ה 2020 table 10 (801/809), table 4 (805), table 12 (808); urban column.
 		switch (Mark)
 		{
-		case EMark::LaneDivider:  return { 300.0, 500.0, 12.0 };
-		// 805 warns that a solid is coming, so it is the SAME line running at a
-		// higher frequency — that density is the whole signal.
-		case EMark::WarningDash:  return { 100.0, 100.0, 12.0 };
-		// 809 guides a driver through a junction, where speeds are low and the
-		// path is short: a shorter, tighter dash so a 20 m turn still reads as a
-		// dashed line rather than one or two marks.
-		case EMark::JunctionTurn: return { 100.0, 150.0, 12.0 };
-		// Arrows are glyphs, not ribbons; the dash fields are the repeat pitch
-		// along the lane, the width is the glyph's painted stroke.
-		case EMark::TurnArrow:    return { 500.0, 2500.0, 15.0 };
-		case EMark::LaneEndArrow: return { 400.0, 1200.0, 15.0 };
-		default:                  return { 300.0, 500.0, 12.0 };
+		case EMark::LaneDivider:         return { 100.0, 200.0, 10.0 };
+		case EMark::LaneDividerJunction: return { 100.0, 100.0, 10.0 };
+		case EMark::WarningDash:         return { 100.0,  50.0, 10.0 };
+		case EMark::ShortRects:          return { 100.0, 100.0, 30.0 };
+		case EMark::LongRects:           return { 300.0, 150.0, 30.0 };
+		case EMark::JunctionTurn:        return { 200.0, 100.0, 10.0 };
+		case EMark::JunctionThrough:     return { 100.0, 100.0, 10.0 };
+		// Glyphs, not ribbons: the dash field is the glyph length, the width its stem.
+		case EMark::TurnArrow:           return { 240.0,   0.0, 25.0 };
+		case EMark::LaneEndArrow:        return { 240.0, 300.0, 25.0 };
+		default:                         return { 100.0, 200.0, 10.0 };
 		}
+	}
+
+	void ArrowTailDistancesCm(int32 DesignKph, TArray<double>& Out)
+	{
+		// 813-814 table 1. Urban rows are 30 and 50 km/h; above that the
+		// non-urban rows 70 / 90 / 110 are the only figures the table gives.
+		Out.Reset();
+		if      (DesignKph <= 30) { Out = { 500.0, 1500.0, 2500.0, 3500.0 }; }
+		else if (DesignKph <= 50) { Out = { 500.0, 2500.0, 4500.0, 6500.0 }; }
+		else if (DesignKph <= 70) { Out = { 500.0, 2500.0, 4500.0, 6500.0, 8500.0 }; }
+		else if (DesignKph <= 90) { Out = { 500.0, 3000.0, 5500.0, 8000.0, 10500.0 }; }
+		else                      { Out = { 500.0, 3500.0, 6500.0, 9500.0, 12500.0 }; }
+	}
+
+	double WarningLineLengthCm(int32 DesignKph)
+	{
+		// 801-809 table 7: up to 50 km/h in urban areas 25 m, then per 10 km/h.
+		static const int32  kKph[] = { 50, 60, 70, 80, 90, 100, 110 };
+		static const double kLen[] = { 2500.0, 4500.0, 6000.0, 7000.0, 8000.0, 9000.0, 10000.0 };
+		for (int32 i = 0; i < UE_ARRAY_COUNT(kKph); ++i)
+		{
+			if (DesignKph <= kKph[i]) { return kLen[i]; }
+		}
+		return kLen[UE_ARRAY_COUNT(kLen) - 1];
 	}
 
 	bool SelfCheck(FString& OutReport)
@@ -182,7 +244,10 @@ namespace RoadNetStandards
 		const bool bExact =
 			FMath::IsNearlyEqual(DecelLengthM(70, false), 70.0) &&
 			FMath::IsNearlyEqual(DecelLengthM(70, true, true), 69.0) &&
-			FMath::IsNearlyEqual(DecelLengthM(70, true, false), 57.0);
+			FMath::IsNearlyEqual(DecelLengthM(70, true, false), 57.0) &&
+			FMath::IsNearlyEqual(AccelLaneLengthCm(80), 14000.0) &&
+			FMath::IsNearlyEqual(AccelLaneLengthCm(100), 21000.0) &&
+			FMath::IsNearlyEqual(AccelLaneLengthCm(50), 10000.0);
 
 		// Halfway between two entries gives the midpoint.
 		const bool bLerp = FMath::IsNearlyEqual(DecelLengthM(75, false), 82.5);
@@ -220,15 +285,29 @@ namespace RoadNetStandards
 		// Every paint spec is usable: positive width, and a dashed entry has a
 		// positive stride so the dash loop that walks it terminates.
 		bool bPaint = true;
-		for (const EMark M : { EMark::LaneDivider, EMark::WarningDash,
-			EMark::JunctionTurn, EMark::TurnArrow, EMark::LaneEndArrow })
+		for (const EMark M : { EMark::LaneDivider, EMark::LaneDividerJunction, EMark::WarningDash,
+			EMark::ShortRects, EMark::LongRects, EMark::JunctionTurn, EMark::JunctionThrough,
+			EMark::TurnArrow, EMark::LaneEndArrow })
 		{
 			const FPaintSpec S = Paint(M);
 			bPaint &= (S.WidthCm > 0.0) && (S.DashLenCm <= 0.0 || S.DashLenCm + S.GapLenCm > 0.0);
 		}
-		// 805 is the WARNING line: denser than the ordinary divider by design.
-		bPaint &= (Paint(EMark::WarningDash).DashLenCm + Paint(EMark::WarningDash).GapLenCm)
-			< (Paint(EMark::LaneDivider).DashLenCm + Paint(EMark::LaneDivider).GapLenCm);
+		auto Stride = [](EMark M) { return Paint(M).DashLenCm + Paint(M).GapLenCm; };
+		// 805 warns of an 803 and the approach 801 densifies: both denser than the section line.
+		bPaint &= Stride(EMark::WarningDash) < Stride(EMark::LaneDivider);
+		bPaint &= Stride(EMark::LaneDividerJunction) < Stride(EMark::LaneDivider);
+		// Table 1: the nearest arrow tail is 5 m from the stop line at every speed, and
+		// the list runs outward.
+		for (int32 V : { 30, 50, 70, 90, 110 })
+		{
+			TArray<double> D;
+			ArrowTailDistancesCm(V, D);
+			bPaint &= D.Num() >= 4 && FMath::IsNearlyEqual(D[0], 500.0);
+			for (int32 i = 1; i < D.Num(); ++i) { bPaint &= D[i] > D[i - 1]; }
+		}
+		bPaint &= FMath::IsNearlyEqual(WarningLineLengthCm(50), 2500.0)
+			&& FMath::IsNearlyEqual(WarningLineLengthCm(70), 6000.0)
+			&& WarningLineLengthCm(130) >= WarningLineLengthCm(110);
 
 		const bool bOk = bMono && bClamp && bExact && bLerp && bStopLonger && bGrade
 			&& bWorked && bFloor && bContains && bPaint;

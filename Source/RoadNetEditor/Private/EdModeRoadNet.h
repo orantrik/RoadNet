@@ -291,9 +291,10 @@ private:
 	// Curb Brush paint type (cycled with T while that tool is active).
 	ERoadNetCurbPaintType CurbBrushType = ERoadNetCurbPaintType::WhiteBlack;
 
-	// What the cursor ray last landed on. There is no "draw on terrain / draw on
-	// Cesium" switch: whichever surface is in front of the cursor wins, and this
-	// records which one so the HUD can say so (and warn when we had to guess).
+	// What the cursor ray last landed on. The OSM panel's Road Height Source
+	// (osm.RoadHeightSource) decides between landscape and Cesium; otherwise the
+	// surface in front of the cursor wins. This records which one so the HUD can
+	// say so (and warn when we had to guess).
 	enum class ECursorSurface : uint8
 	{
 		None,

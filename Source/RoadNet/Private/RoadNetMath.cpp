@@ -21,8 +21,9 @@ namespace RoadNetMath
 
 	FVector2D RightAxis(const FVector2D& Tangent)
 	{
-		// R = T x Z with Z up in a left-handed frame → (T.Y, -T.X).
-		return FVector2D(Tangent.Y, -Tangent.X);
+		// UE is left-handed (X forward, Y right, Z up): R = Z x T = (-T.Y, T.X),
+		// so +X travel has +Y on its right, the same side Cross2D(T, P) > 0 picks.
+		return FVector2D(-Tangent.Y, Tangent.X);
 	}
 
 	void CumulativeLength(const TArray<FVector>& Poly, TArray<double>& OutLen)
@@ -191,6 +192,154 @@ namespace RoadNetMath
 		{
 			Ring = MoveTemp(Out);
 		}
+		return Removed;
+	}
+
+	int32 FairBoundaryPolyline(TArray<FVector2D>& Pts, bool bClosed)
+	{
+		const int32 N = Pts.Num();
+		// A handful of points is an authored line, not a packed boundary.
+		if (N < 8) { return 0; }
+
+		constexpr double kWindowCm = 200.0;     // how far a "is this straight?" look reaches
+		constexpr double kNetStraightRad = 18.0 * PI / 180.0;
+		constexpr double kMaxMoveCm = 20.0;     // noise only; a bay or a fillet is not redrawn
+		constexpr double kCurveRad = 3.0 * PI / 180.0;
+		constexpr double kCornerRad = 20.0 * PI / 180.0;
+		constexpr double kCornerLegCm = 60.0;
+		constexpr double kStraightSpacingCm = 80.0;
+		constexpr double kCurveSpacingCm = 20.0;
+
+		auto At = [&](int32 i) -> int32
+		{
+			if (bClosed) { return (i % N + N) % N; }
+			return FMath::Clamp(i, 0, N - 1);
+		};
+		auto Leg = [&](int32 a, int32 b) { return FVector2D::Distance(Pts[At(a)], Pts[At(b)]); };
+
+		// Signed heading change at i. 0 when a leg is degenerate.
+		auto SignedTurn = [&](const TArray<FVector2D>& P, int32 i) -> double
+		{
+			const FVector2D U = P[At(i)] - P[At(i - 1)];
+			const FVector2D V = P[At(i + 1)] - P[At(i)];
+			const double Lu = U.Size(), Lv = V.Size();
+			if (Lu < 1e-3 || Lv < 1e-3) { return 0.0; }
+			return FMath::Atan2(U.X * V.Y - U.Y * V.X, FVector2D::DotProduct(U, V));
+		};
+
+		// Arc distance from i toward +dir, stopping at the window. Used to tell a
+		// straight-with-noise from a bend: noise alternates and the net turn
+		// cancels, a bend accumulates.
+		auto NetTurn = [&](int32 i) -> double
+		{
+			double Net = 0.0;
+			double Walk = 0.0;
+			for (int32 k = 0; k < N && Walk < kWindowCm; ++k)
+			{
+				const int32 j = i - k;
+				if (!bClosed && (j <= 0 || j >= N - 1)) { break; }
+				Net += SignedTurn(Pts, j);
+				Walk += Leg(j, j - 1);
+			}
+			Walk = 0.0;
+			for (int32 k = 1; k < N && Walk < kWindowCm; ++k)
+			{
+				const int32 j = i + k;
+				if (!bClosed && (j <= 0 || j >= N - 1)) { break; }
+				Net += SignedTurn(Pts, j);
+				Walk += Leg(j, j - 1);
+			}
+			return Net;
+		};
+
+		TArray<uint8> Bend;   // a real curve or corner: do not average it away
+		Bend.SetNumZeroed(N);
+		int32 Packed = 0;
+		for (int32 i = 0; i < N; ++i)
+		{
+			const bool bEnd = !bClosed && (i == 0 || i == N - 1);
+			const double Turn = FMath::Abs(SignedTurn(Pts, i));
+			const bool bCorner = Turn >= kCornerRad
+				&& Leg(i, i - 1) >= kCornerLegCm && Leg(i, i + 1) >= kCornerLegCm;
+			if (bEnd || bCorner || FMath::Abs(NetTurn(i)) >= kNetStraightRad) { Bend[i] = 1; }
+		}
+		const int32 Segs = bClosed ? N : N - 1;
+		for (int32 i = 0; i < Segs; ++i)
+		{
+			// Denser than a kerb stone: this is the packed boundary, not a sampled road.
+			if (Leg(i, i + 1) < 50.0) { ++Packed; }
+		}
+		// Nothing packed: the boundary already has room to behave.
+		if (Packed * 2 < N) { return 0; }
+
+		TArray<FVector2D> Sm = Pts;
+		for (int32 i = 0; i < N; ++i)
+		{
+			if (Bend[i]) { continue; }
+			FVector2D Acc = Pts[i];
+			double W = 1.0;
+			double Walk = 0.0;
+			for (int32 k = 1; k < N && Walk < kWindowCm; ++k)
+			{
+				const int32 j = i - k;
+				if (!bClosed && j < 0) { break; }
+				if (Bend[At(j)]) { break; }
+				Walk += Leg(i - k + 1, i - k);
+				if (Walk > kWindowCm) { break; }
+				Acc += Pts[At(j)];
+				W += 1.0;
+			}
+			Walk = 0.0;
+			for (int32 k = 1; k < N && Walk < kWindowCm; ++k)
+			{
+				const int32 j = i + k;
+				if (!bClosed && j >= N) { break; }
+				if (Bend[At(j)]) { break; }
+				Walk += Leg(i + k - 1, i + k);
+				if (Walk > kWindowCm) { break; }
+				Acc += Pts[At(j)];
+				W += 1.0;
+			}
+			FVector2D Avg = Acc / W;
+			const FVector2D D = Avg - Pts[i];
+			const double L = D.Size();
+			if (L > kMaxMoveCm) { Avg = Pts[i] + D * (kMaxMoveCm / L); }
+			Sm[i] = Avg;
+		}
+
+		// Resample. A straight run loses the packed knots; a bend keeps a point
+		// about every kerb stone so the fillet stays an arc of short stones.
+		TArray<int32> Keep;
+		Keep.Reserve(N);
+		const int32 Start = 0;
+		Keep.Add(Start);
+		for (int32 i = 1; i < (bClosed ? N : N - 1); ++i)
+		{
+			const double Turn = FMath::Abs(SignedTurn(Sm, i));
+			const double Spacing = (Bend[i] || Turn >= kCurveRad) ? kCurveSpacingCm : kStraightSpacingCm;
+			// A hard corner is kept even when it sits on the previous point.
+			// A bend that is only a fillet is kept once per kerb stone.
+			if ((Bend[i] && Turn >= kCornerRad)
+				|| FVector2D::Distance(Sm[Keep.Last()], Sm[i]) >= Spacing)
+			{
+				Keep.Add(i);
+			}
+		}
+		if (!bClosed && Keep.Last() != N - 1) { Keep.Add(N - 1); }
+		if (bClosed && Keep.Num() > 1)
+		{
+			const int32 Last = Keep.Last();
+			const double Turn = FMath::Abs(SignedTurn(Sm, Last));
+			const double Spacing = (Bend[Last] || Turn >= kCurveRad) ? kCurveSpacingCm : kStraightSpacingCm;
+			if (!Bend[Last] && FVector2D::Distance(Sm[Last], Sm[0]) < Spacing) { Keep.Pop(); }
+		}
+		if (Keep.Num() < (bClosed ? 3 : 2)) { return 0; }
+
+		TArray<FVector2D> Out;
+		Out.Reserve(Keep.Num());
+		for (int32 i : Keep) { Out.Add(Sm[i]); }
+		const int32 Removed = N - Out.Num();
+		Pts = MoveTemp(Out);
 		return Removed;
 	}
 

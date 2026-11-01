@@ -58,7 +58,8 @@ enum class ERoadNetJunctionPreset : uint8
 	StopLine,          // stop bar across each entering approach
 	StopAndCrosswalk,  // stop bar + zebra crosswalk
 	Signalized,        // stop + crosswalk + traffic-light placeholder meshes
-	GiveWay            // give-way (yield) dashed bar
+	GiveWay,           // give-way (yield) dashed bar
+	Auto               // תקו"ה 2020 per arm: 811 where both sides have sidewalks, 810 where a crosswalk or Regulation 64 justifies it
 };
 
 // Edge treatment for a central median strip.
@@ -83,7 +84,7 @@ struct ROADNET_API FRoadNetJunctionConfig
 	FVector2D Location = FVector2D::ZeroVector;
 
 	UPROPERTY()
-	ERoadNetJunctionPreset Preset = ERoadNetJunctionPreset::None;
+	ERoadNetJunctionPreset Preset = ERoadNetJunctionPreset::Auto;
 
 	// Raise curbed grass channelizing islands in this junction's unused corner
 	// areas (the pavement wedges between adjacent arms). Toggled per junction.
@@ -190,7 +191,11 @@ enum class ERoadNetTurnRole : uint8
 	Left,
 	Right,
 	UTurn,
-	None         // never paint a turn mark on this lane
+	None,        // never paint a turn mark on this lane
+	// Appended. A split's bear branch is a through-style arrow with this attribute,
+	// and an authored lane can be locked to that branch alone.
+	BearLeft,
+	BearRight
 };
 
 // Curb-brush paint type. Unpainted stones keep the CurbA/CurbB zebra.
@@ -210,6 +215,18 @@ enum class ERoadNetSide : uint8
 	Left,    // −lateral offset off the road frame's right axis
 	Right,   // +lateral offset
 	Center   // straddles the centerline (center-turn / median)
+};
+
+// What a junction widening was built for. Geometry is still "full width at the
+// junction, ramp to nothing over TaperCm"; the kind tells the lane graph which
+// virtual lane that width is.
+UENUM()
+enum class ERoadNetWideningKind : uint8
+{
+	Drop,      // surplus through lane carried out and tapered away
+	RightBay,  // added lane for right turns (kerb side when driving on the right)
+	LeftBay,   // added lane for left turns (centre side when driving on the right)
+	Gain       // through lane added at a seam: kerb side of the narrower road, tapered in toward the seam
 };
 
 // Which way traffic runs along a lane, relative to the road's own +arc
@@ -652,6 +669,53 @@ struct ROADNET_API FRoadNetLaneSpec
 		if (bSidewalkRight) { Out.Add(MakeSlot(ERoadNetLaneType::Sidewalk, SidewalkWidth)); }
 		RelayoutStack(Out);
 		return Out;
+	}
+};
+
+// ---- Lateral move of a road's cross-section near one end --------------------
+// Planned by junction channelization and applied by every stage that offsets
+// from the reference line (carriageway edges, median strip, paint, lane
+// centrelines), so they cannot disagree.
+//  - Squeeze: a median wider than the one it meets at a seam closes; both
+//    sides move toward PivotCm by AmountCm at the seam (803 rule ד, Table 4).
+//  - Shift: a far-side turn bay on a road whose median cannot give its whole
+//    width (כרך 2 §7.4.3 keeps 2.50 m); every offset at or beyond PivotCm on
+//    the Dir side moves over by the rest.
+struct FRoadNetLateralMove
+{
+	int32  Road = INDEX_NONE;
+	bool   bAtStart = true;
+	bool   bSqueeze = true;
+	double PivotCm = 0.0;
+	int32  Dir = 1;              // Shift only: +1 = +offset side
+	double AmountCm = 0.0;
+	double HoldCm = 0.0;         // full amount from the end for this long
+	double TaperCm = 0.0;        // then ramps to nothing over this
+
+	FORCEINLINE double AmountAt(double S, double Len) const
+	{
+		const double D = (bAtStart ? S : (Len - S)) - HoldCm;
+		if (D < 0.0) { return AmountCm; }
+		if (TaperCm <= 0.0 || D >= TaperCm) { return 0.0; }
+		return AmountCm * (1.0 - D / TaperCm);
+	}
+
+	FORCEINLINE double Apply(double Off, double S, double Len) const
+	{
+		const double A = AmountAt(S, Len);
+		if (A == 0.0) { return Off; }
+		if (bSqueeze) { return Off > PivotCm ? FMath::Max(PivotCm, Off - A) : FMath::Min(PivotCm, Off + A); }
+		// 20 cm slack keeps both strokes of an 803 on the centre line on the moving side.
+		return ((double)Dir * (Off - PivotCm) >= -20.0) ? Off + (double)Dir * A : Off;
+	}
+
+	static double ApplyAll(const TArray<FRoadNetLateralMove>& Moves, double Off, double S, double Len, bool bSqueezeOnly = false)
+	{
+		for (const FRoadNetLateralMove& M : Moves)
+		{
+			if (!bSqueezeOnly || M.bSqueeze) { Off = M.Apply(Off, S, Len); }
+		}
+		return Off;
 	}
 };
 
@@ -1116,6 +1180,21 @@ struct ROADNET_API FRoadDef
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Topology")
 	TArray<int64> NodeIds;
 
+	// Circulatory roadway (OSM junction=roundabout/circular, Clean Roundabout).
+	// Its nodes are entries and exits, never turn-lane approaches.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Topology")
+	bool bRoundabout = false;
+
+	// OSM turn:lanes tokens for traffic arriving at each end, left to right in
+	// that traffic's direction of travel. Empty means the tag was absent or
+	// dropped (a split's new end, a reversed pair, a parallel merge). Resolved
+	// by BuildLaneGraph; an authored lane TurnRole still wins.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Topology")
+	TArray<FString> ForwardTurnTokens;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Topology")
+	TArray<FString> BackwardTurnTokens;
+
 	// Authored/derived endpoint topology (§1.3). Multiple links per end support
 	// T/Y-junctions, splits, merges.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Topology")
@@ -1223,7 +1302,165 @@ struct ROADNET_API FRoadNetLaneConnection
 	bool bThrough = false;
 
 	// Graph classification of this movement (Through/Left/Right/UTurn). Auto
-	// is unused here — Emit always writes a concrete kind.
+	// is unused here — Emit always writes a concrete kind. A split branch stays
+	// Through and records the bear on Bear.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
 	ERoadNetTurnRole Kind = ERoadNetTurnRole::Through;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	ERoadNetTurnRole Bear = ERoadNetTurnRole::Auto;
+
+	// Quadratic control, or unused when bHermite (handles are the chord / 3).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	FVector Control = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	bool bHermite = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	bool bMerge = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	bool bFork = false;
+
+	// The from-lane is a bay or a carried-out lane. It has no index in
+	// ResolveLanes; VirtualCenterline is its geometry.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	bool bVirtualFrom = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	int32 FromVirtual = INDEX_NONE;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	TArray<FVector> VirtualCenterline;
+
+	// True when the edge runs along the arm (the carried lane rejoining), so it
+	// belongs to the arm's segment tile rather than the junction tile.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	bool bOnRoad = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RoadNet|Graph")
+	bool bToAtStart = false;
+
+	// Not reflected. Blueprint cannot hold a uint32, and this key is only
+	// compared in C++.
+	uint32 EdgeKey = 0;
+};
+
+// One vertex of the lane graph: a drivable lane at a junction mouth.
+// Not BlueprintType: the keys are uint32 hashes, which Blueprint cannot hold.
+// The PCG node reads them in C++ and writes int64 attributes.
+USTRUCT()
+struct ROADNET_API FRoadNetLaneNode
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	uint32 Key = 0;
+
+	UPROPERTY()
+	uint32 JointKey = 0;
+
+	UPROPERTY()
+	int32 TileX = 0;
+
+	UPROPERTY()
+	int32 TileY = 0;
+
+	UPROPERTY()
+	int32 Arm = INDEX_NONE;
+
+	UPROPERTY()
+	int32 KerbRank = 0;
+
+	// Index into URoadNetwork::Roads. INDEX_NONE when the lane has no road.
+	UPROPERTY()
+	int32 Road = INDEX_NONE;
+
+	UPROPERTY()
+	bool bEntering = true;
+
+	UPROPERTY()
+	bool bVirtual = false;
+
+	UPROPERTY()
+	bool bCenterTurn = false;
+
+	// Leaving centre-turn lanes and terminal arms are absent. A node with this
+	// set may legally have in-degree 0 (a bay) or is not checked.
+	UPROPERTY()
+	bool bDegreeExempt = false;
+
+	UPROPERTY()
+	FVector Position = FVector::ZeroVector;
+
+	UPROPERTY()
+	FVector Tangent = FVector::ForwardVector;
+};
+
+// One directed connection. Successors are this edge list, not a parallel array,
+// so a node with none is explicit. Not BlueprintType, for the same reason as
+// FRoadNetLaneNode.
+USTRUCT()
+struct ROADNET_API FRoadNetLaneEdge
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	uint32 Key = 0;
+
+	UPROPERTY()
+	uint32 FromKey = 0;
+
+	UPROPERTY()
+	uint32 ToKey = 0;
+
+	UPROPERTY()
+	ERoadNetTurnRole Kind = ERoadNetTurnRole::Through;
+
+	UPROPERTY()
+	ERoadNetTurnRole Bear = ERoadNetTurnRole::Auto;
+
+	UPROPERTY()
+	bool bMerge = false;
+
+	UPROPERTY()
+	bool bFork = false;
+
+	UPROPERTY()
+	bool bOnRoad = false;
+
+	UPROPERTY()
+	FVector P0 = FVector::ZeroVector;
+
+	UPROPERTY()
+	FVector Control = FVector::ZeroVector;
+
+	UPROPERTY()
+	FVector P1 = FVector::ZeroVector;
+
+	UPROPERTY()
+	bool bHermite = false;
+};
+
+// The lane graph from the last rebuild. Transient: a full rebuild replaces it,
+// a windowed rebuild drops joints in the dirty tiles and re-adds them.
+USTRUCT()
+struct ROADNET_API FRoadNetLaneGraph
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TArray<FRoadNetLaneNode> Nodes;
+
+	UPROPERTY()
+	TArray<FRoadNetLaneEdge> Edges;
+
+	// Through movements that still lose a lane inside the junction and merge.
+	UPROPERTY()
+	int32 Reductions = 0;
+
+	// I7–I10. Reported, never repaired.
+	UPROPERTY()
+	TArray<FString> Reports;
 };

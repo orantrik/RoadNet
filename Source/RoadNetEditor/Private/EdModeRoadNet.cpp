@@ -62,10 +62,29 @@ namespace
 	const FColor     kColorGhostCurb   = FColor(255, 255, 255);
 	const FColor     kColorGhostLane   = FColor(215, 228, 245);
 	const FColor     kColorGhostCentre = FColor(255, 210, 40);
-	const FColor     kColorEditPt = FColor(120, 180, 255);
 	const FColor     kColorEditLine = FColor(90, 120, 160);
 	const FColor     kColorOsmLine = FColor(230, 150, 60);   // imported roads (selectable for lane edits)
-	const FColor     kColorOsmPt = FColor(255, 170, 70);     // imported road points (shown with "edit all points")
+	const FColor     kColorHandle = FColor(255, 170, 70);    // editable road point handles (multi point)
+	const FColor     kColorMainPt = FColor(120, 180, 255);   // start/end handles (main points)
+
+	bool CVarOn(const TCHAR* Name)
+	{
+		const IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(Name);
+		return !CV || CV->GetInt() != 0;
+	}
+	bool MultiPointMode() { return CVarOn(TEXT("roadnet.DrawMultiPoint")); }
+	bool DrapeMode()      { return CVarOn(TEXT("roadnet.DrawDrape")); }
+	bool SmoothMode()
+	{
+		const IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(TEXT("roadnet.DrawSmooth"));
+		return CV && CV->GetInt() != 0;
+	}
+
+	// Main points: only a road's start and end are handles.
+	bool IsHandlePoint(const FRoadDef& Rd, int32 i)
+	{
+		return MultiPointMode() || i == 0 || i == Rd.Ref.Num() - 1;
+	}
 	const FColor     kColorZoneGraph = FColor(190, 90, 255); // roads flagged for a ZoneGraph spline
 
 	const TCHAR* PresetName(ERoadNetJunctionPreset P)
@@ -76,6 +95,7 @@ namespace
 		case ERoadNetJunctionPreset::StopAndCrosswalk: return TEXT("Stop + crosswalk");
 		case ERoadNetJunctionPreset::Signalized:       return TEXT("Signalized (stop + crosswalk + lights)");
 		case ERoadNetJunctionPreset::GiveWay:          return TEXT("Give way");
+		case ERoadNetJunctionPreset::Auto:             return TEXT("Auto (per arm, takoh 2020)");
 		default:                                       return TEXT("None");
 		}
 	}
@@ -88,6 +108,7 @@ namespace
 		case ERoadNetJunctionPreset::StopAndCrosswalk: return FColor(255, 160, 60);
 		case ERoadNetJunctionPreset::Signalized:       return FColor(80, 220, 120);
 		case ERoadNetJunctionPreset::GiveWay:          return FColor(255, 230, 60);
+		case ERoadNetJunctionPreset::Auto:             return FColor(120, 190, 255);
 		default:                                       return FColor(150, 150, 160); // None
 		}
 	}
@@ -549,14 +570,14 @@ bool FEdModeRoadNet::RefFrameAt(int32 RoadIdx, double ArcCm, FVector& OutPoint, 
 			const double T = FMath::Clamp((ArcCm - Acc) / Seg, 0.0, 1.0);
 			OutPoint = FMath::Lerp(Ref[i], Ref[i + 1], T);
 			const FVector2D Tan = (FVector2D(Ref[i + 1].X, Ref[i + 1].Y) - FVector2D(Ref[i].X, Ref[i].Y)).GetSafeNormal();
-			OutRight = FVector2D(Tan.Y, -Tan.X);   // +right of travel (matches RoadNetMath::RightAxis)
+			OutRight = RoadNetMath::RightAxis(Tan);
 			return true;
 		}
 		Acc += Seg;
 	}
 	OutPoint = Ref.Last();
 	const FVector2D Tan = (FVector2D(Ref.Last().X, Ref.Last().Y) - FVector2D(Ref[Ref.Num() - 2].X, Ref[Ref.Num() - 2].Y)).GetSafeNormal();
-	OutRight = FVector2D(Tan.Y, -Tan.X);
+	OutRight = RoadNetMath::RightAxis(Tan);
 	return true;
 }
 
@@ -598,7 +619,7 @@ bool FEdModeRoadNet::ProjectToEdgeOffset(int32 RoadIdx, const FVector& W, double
 		{
 			BestD2 = D2;
 			const FVector2D Tan = AB.GetSafeNormal();
-			const FVector2D Rt(Tan.Y, -Tan.X);
+			const FVector2D Rt = RoadNetMath::RightAxis(Tan);
 			OutOffset = FVector2D::DotProduct(Q - P, Rt);
 			OutArc = Acc + FMath::Sqrt(Len2) * T;
 		}
@@ -752,16 +773,56 @@ bool FEdModeRoadNet::GetSelectionCentroid(FVector& OutPos) const
 	return true;
 }
 
+static bool TerrainZAt(UWorld* World, const FVector& P, double& OutZ);
+
 void FEdModeRoadNet::MoveSelectedPoints(const FVector& Delta)
 {
 	URoadNetwork* Net = GetNetwork();
 	if (!Net || SelPoints.Num() == 0) { return; }
 	const TArray<FRoadDef>& Roads = Net->GetRoads();
+	const bool bStretch = !MultiPointMode();
+	const bool bDrape = DrapeMode();
 	for (const FIntPoint& S : SelPoints)
 	{
-		if (Roads.IsValidIndex(S.X) && Roads[S.X].Ref.IsValidIndex(S.Y))
+		if (!Roads.IsValidIndex(S.X) || !Roads[S.X].Ref.IsValidIndex(S.Y)) { continue; }
+		const TArray<FVector>& Ref = Roads[S.X].Ref;
+		const int32 N = Ref.Num();
+		// Main points: the road behind a dragged end follows it, by less the
+		// further along the road, and not at all at the other end.
+		if (bStretch && N > 2 && (S.Y == 0 || S.Y == N - 1))
 		{
-			Net->MoveRoadPoint(S.X, S.Y, Roads[S.X].Ref[S.Y] + Delta);   // rebuild on release
+			TArray<double> Arc;
+			RoadNetMath::CumulativeLength(Ref, Arc);
+			const double L = FMath::Max(1.0, Arc.Last());
+			for (int32 i = 1; i < N - 1; ++i)
+			{
+				const double W = (S.Y == 0) ? 1.0 - Arc[i] / L : Arc[i] / L;
+				FVector D = Delta * W;
+				if (bDrape) { D.Z = 0.0; }   // re-draped on release
+				Net->MoveRoadPoint(S.X, i, Ref[i] + D);
+			}
+		}
+		Net->MoveRoadPoint(S.X, S.Y, Ref[S.Y] + Delta);   // rebuild on release
+	}
+}
+
+// Main points + drape: a road stretched by its end goes back onto the terrain.
+static void DrapeStretchedRoads(URoadNetwork* Net, const TArray<FIntPoint>& Sel, UWorld* World)
+{
+	if (!Net || MultiPointMode() || !DrapeMode()) { return; }
+	const TArray<FRoadDef>& Roads = Net->GetRoads();
+	TSet<int32> Done;
+	for (const FIntPoint& S : Sel)
+	{
+		if (!Roads.IsValidIndex(S.X) || Done.Contains(S.X)) { continue; }
+		const int32 N = Roads[S.X].Ref.Num();
+		if (S.Y != 0 && S.Y != N - 1) { continue; }
+		Done.Add(S.X);
+		for (int32 i = 0; i < N; ++i)
+		{
+			const FVector P = Roads[S.X].Ref[i];
+			double Z = 0.0;
+			if (TerrainZAt(World, P, Z)) { Net->MoveRoadPoint(S.X, i, FVector(P.X, P.Y, Z)); }
 		}
 	}
 }
@@ -823,6 +884,7 @@ void FEdModeRoadNet::SelectPointsInMarquee(FEditorViewportClient* ViewportClient
 		if (!PointsAreEditable(Rd)) { continue; }
 		for (int32 i = 0; i < Rd.Ref.Num(); ++i)
 		{
+			if (!IsHandlePoint(Rd, i)) { continue; }
 			FVector2D Px;
 			if (!View->WorldToPixel(Rd.Ref[i], Px)) { continue; } // behind camera
 			if (Px.X >= MinX && Px.X <= MaxX && Px.Y >= MinY && Px.Y <= MaxY)
@@ -892,6 +954,7 @@ bool FEdModeRoadNet::TrySelectUnderCursor(FEditorViewportClient* ViewportClient,
 		{
 			for (int32 i = 0; i < Rd.Ref.Num(); ++i)
 			{
+				if (!IsHandlePoint(Rd, i)) { continue; }
 				const double D2 = FVector::DistSquaredXY(Hit, Rd.Ref[i]);
 				if (D2 < BestPtD2) { BestPtD2 = D2; PtRoad = r; PtIdx = i; }
 			}
@@ -967,6 +1030,65 @@ static bool ActorClassIsNamed(const AActor* A, const TCHAR* ClassName)
 	return false;
 }
 
+// The OSM panel's Road Height Source (osm.RoadHeightSource, owned by OSMRoadCore and
+// read by name — RoadNetEditor links no OSM module): 0 = landscape only, 1 = Cesium
+// mesh only, 2 = landscape, then Cesium where there is no landscape. -1 when the CVar
+// does not exist (RoadNet without OSMRoadCore): whichever surface is met first.
+static int32 RoadHeightSourceMode()
+{
+	const IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(TEXT("osm.RoadHeightSource"));
+	return CV ? FMath::Clamp(CV->GetInt(), 0, 2) : -1;
+}
+
+// Terrain height straight below/above P, on the surface Road Height Source names.
+// Anything else the ray meets first - road meshes, buildings, props, and the surface
+// the mode excludes - is stepped through.
+static bool TerrainZAt(UWorld* World, const FVector& P, double& OutZ)
+{
+	if (!World) { return false; }
+	const int32 Mode = RoadHeightSourceMode();
+	const FVector Top(P.X, P.Y, P.Z + 1.0e6);
+	const FVector Bottom(P.X, P.Y, P.Z - 1.0e6);
+	bool bCesiumSeen = false;      // mode 2: kept in case no landscape turns up underneath
+	double CesiumZ = 0.0;
+	for (int32 Pass = 0; Pass < 2; ++Pass)
+	{
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(RoadNetDrape), /*bTraceComplex*/true);
+		for (int32 Step = 0; Step < 32; ++Step)
+		{
+			FHitResult Hit;
+			const bool bHit = Pass == 0
+				? World->LineTraceSingleByChannel(Hit, Top, Bottom, ECC_Visibility, Params)
+				: World->LineTraceSingleByObjectType(Hit, Top, Bottom,
+					FCollisionObjectQueryParams(FCollisionObjectQueryParams::AllStaticObjects), Params);
+			if (!bHit) { break; }
+			AActor* A = Hit.GetActor();
+			if (ActorClassIsNamed(A, TEXT("LandscapeProxy")) && Mode != 1)
+			{
+				OutZ = Hit.Location.Z;
+				return true;
+			}
+			if (ActorClassIsNamed(A, TEXT("Cesium3DTileset")))
+			{
+				if (Mode == 1 || Mode == -1)
+				{
+					OutZ = Hit.Location.Z;
+					return true;
+				}
+				if (Mode == 2 && !bCesiumSeen) { bCesiumSeen = true; CesiumZ = Hit.Location.Z; }
+			}
+			if (!A) { break; }
+			Params.AddIgnoredActor(A);
+		}
+	}
+	if (bCesiumSeen)
+	{
+		OutZ = CesiumZ;
+		return true;
+	}
+	return false;
+}
+
 bool FEdModeRoadNet::LineTraceCursor(FEditorViewportClient* ViewportClient, FVector& OutHit) const
 {
 	if (!ViewportClient) { return false; }
@@ -989,20 +1111,36 @@ bool FEdModeRoadNet::LineTraceCursor(FEditorViewportClient* ViewportClient, FVec
 
 	const FVector End = Origin + Dir * 1.0e7;
 
-	// Whatever surface is physically nearest the cursor wins — landscape, Cesium
-	// tile or an existing mesh — so there is no mode for the user to get wrong.
+	// The surface nearest the cursor wins — landscape, Cesium tile or an existing
+	// mesh — except the one Road Height Source rules out (landscape only steps
+	// through Cesium tiles, Cesium only steps through the landscape), so the click
+	// lands where the road will be draped.
 	// bTraceComplex because both landscapes and Cesium tiles only have
 	// per-triangle collision; a simple-shape query would miss them entirely.
+	const int32 Mode = RoadHeightSourceMode();
+	auto Excluded = [Mode](const AActor* A)
+	{
+		return (Mode == 0 && ActorClassIsNamed(A, TEXT("Cesium3DTileset")))
+			|| (Mode == 1 && ActorClassIsNamed(A, TEXT("LandscapeProxy")));
+	};
 	FHitResult Hit;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(RoadNetDraw), /*bTraceComplex*/true);
-	bool bHit = World->LineTraceSingleByChannel(Hit, Origin, End, ECC_Visibility, Params);
-	if (!bHit)
+	bool bHit = false;
+	for (int32 Step = 0; Step < 32; ++Step)
 	{
-		// Cesium sets its tile components to ignore the Visibility channel in some
-		// configurations while still carrying physics geometry, so retry as an
-		// object query before falling back to guessing at a plane.
-		bHit = World->LineTraceSingleByObjectType(Hit, Origin, End,
-			FCollisionObjectQueryParams(FCollisionObjectQueryParams::AllStaticObjects), Params);
+		bHit = World->LineTraceSingleByChannel(Hit, Origin, End, ECC_Visibility, Params);
+		if (!bHit)
+		{
+			// Cesium sets its tile components to ignore the Visibility channel in some
+			// configurations while still carrying physics geometry, so retry as an
+			// object query before falling back to guessing at a plane.
+			bHit = World->LineTraceSingleByObjectType(Hit, Origin, End,
+				FCollisionObjectQueryParams(FCollisionObjectQueryParams::AllStaticObjects), Params);
+		}
+		AActor* HitActor = bHit ? Hit.GetActor() : nullptr;
+		if (!HitActor || !Excluded(HitActor)) { break; }
+		Params.AddIgnoredActor(HitActor);
+		bHit = false;
 	}
 	if (bHit)
 	{
@@ -1137,7 +1275,20 @@ bool FEdModeRoadNet::HandleClick(FEditorViewportClient* InViewportClient, HHitPr
 			FVector Hit;
 			if (LineTraceCursor(InViewportClient, Hit))
 			{
-				DraftPoints.Add(ResolveCursorPoint(Hit));
+				FVector P = ResolveCursorPoint(Hit);
+				const IConsoleVariable* DrapeCV = IConsoleManager::Get().FindConsoleVariable(TEXT("roadnet.DrawDrape"));
+				double GroundZ = 0.0;
+				if (!bSnapActive && (!DrapeCV || DrapeCV->GetInt() != 0) && TerrainZAt(GetWorld(), P, GroundZ))
+				{
+					if (FMath::Abs(GroundZ - P.Z) > 100.0)
+					{
+						UE_LOG(LogRoadNet, Log,
+							TEXT("[RoadNet] Draw: the cursor hit surface kind %d ('%s') at Z %.0f; the terrain under it is at Z %.0f, so the point takes the terrain."),
+							(int32)LastCursorSurface, *LastCursorActor, P.Z, GroundZ);
+					}
+					P.Z = GroundZ;
+				}
+				DraftPoints.Add(P);
 				// Fixed-click primitives commit automatically on their last anchor:
 				// Roundabout/Curve = 2 clicks (centre/start + radius/end), FreeCurve
 				// = 3 clicks (origin + destination + apex that sets the bow).
@@ -1623,6 +1774,7 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 							{
 								for (int32 i = 0; i < Rd.Ref.Num(); ++i)
 								{
+									if (!IsHandlePoint(Rd, i)) { continue; }
 									const double D2 = FVector::DistSquaredXY(Hit, Rd.Ref[i]);
 									if (D2 < BestPtD2) { BestPtD2 = D2; PtRoad = r; PtIdx = i; }
 								}
@@ -1973,8 +2125,10 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 						(Role == ERoadNetTurnRole::Through) ? TEXT("Through") :
 						(Role == ERoadNetTurnRole::Left)    ? TEXT("Left") :
 						(Role == ERoadNetTurnRole::Right)   ? TEXT("Right") :
-						(Role == ERoadNetTurnRole::UTurn)   ? TEXT("U-turn") :
-						(Role == ERoadNetTurnRole::None)    ? TEXT("None") : TEXT("Auto");
+						(Role == ERoadNetTurnRole::UTurn)     ? TEXT("U-turn") :
+						(Role == ERoadNetTurnRole::None)      ? TEXT("None") :
+						(Role == ERoadNetTurnRole::BearLeft)  ? TEXT("Bear left") :
+						(Role == ERoadNetTurnRole::BearRight) ? TEXT("Bear right") : TEXT("Auto");
 					GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
 						FString::Printf(TEXT("RoadNet: lane turn role = %s"), Name));
 				}
@@ -2512,14 +2666,13 @@ bool FEdModeRoadNet::InputKey(FEditorViewportClient* ViewportClient, FViewport* 
 				{
 					// An edge handle is picked, so size the walk AT THAT POINT
 					// rather than resizing the whole road. bSelEdgeRight names the
-					// +offset side, which is the side bSidewalkLeft controls (see
-					// the tile emitter's EmitSide calls).
+					// +offset side, which is the side bSidewalkRight controls.
 					TArray<FRoadNetEdgeKnot> Profile;
 					Net->GetOuterEdgeForDisplay(Target,
 						bSelEdgeRight ? ERoadNetSide::Right : ERoadNetSide::Left, Profile);
 					if (Profile.IsValidIndex(SelEdgeKnot))
 					{
-						const ERoadNetSide WalkSide = bSelEdgeRight ? ERoadNetSide::Left : ERoadNetSide::Right;
+						const ERoadNetSide WalkSide = bSelEdgeRight ? ERoadNetSide::Right : ERoadNetSide::Left;
 						const float NewW = Net->AdjustSidewalkWidthAt(
 							Target, WalkSide, Profile[SelEdgeKnot].Distance, Step);
 						Msg = FString::Printf(
@@ -2615,13 +2768,13 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 				}
 
 				// Per-point handles (Points tool only): hand-drawn roads always,
-				// imported roads only while "edit all points" (P) is on. Imported
-				// handles use a warmer tint so it's clear which points came from OSM.
+				// imported roads only while "edit all points" (P) is on.
 				if (Tool == ERoadNetDrawTool::Points && PointsAreEditable(Road))
 				{
-					const FColor PtCol = bHand ? kColorEditPt : kColorOsmPt;
+					const FColor PtCol = MultiPointMode() ? kColorHandle : kColorMainPt;
 					for (int32 i = 0; i < Road.Ref.Num(); ++i)
 					{
+						if (!IsHandlePoint(Road, i)) { continue; }
 						const bool bSel = IsPointSelected(r, i) || bWholeRoadSel;
 						PDI->SetHitProxy(new HRoadNetPointProxy(r, i));
 						PDI->DrawPoint(Road.Ref[i], bSel ? kColorSnap : PtCol,
@@ -2849,6 +3002,12 @@ void FEdModeRoadNet::Render(const FSceneView* View, FViewport* Viewport, FPrimit
 	{
 		Preview = DraftPoints;
 		if (DraftPoints.Num() > 0 && bHasHover) { Preview.Add(HoverPoint); }
+		if (SmoothMode() && Preview.Num() >= 3)
+		{
+			TArray<FVector> Curve;
+			RoadNetMath::SmoothG2Spline(Preview, 200.0, Curve);
+			Preview = MoveTemp(Curve);
+		}
 	}
 
 	// Anchor dots so placed clicks stay visible over the ghost.
@@ -3022,9 +3181,25 @@ bool FEdModeRoadNet::EndTracking(FEditorViewportClient* InViewportClient, FViewp
 			// Scope the rebuild to the roads the drag actually reshaped: the point
 			// selection (may span several roads) plus the selected road (covers a
 			// segment-drag and the Edge-tool handle drag). Empty → full rebuild.
+			DrapeStretchedRoads(Net, SelPoints, GetWorld());
 			TArray<int32> Moved;
 			for (const FIntPoint& S : SelPoints) { Moved.AddUnique(S.X); }
 			if (SelRoad != INDEX_NONE) { Moved.AddUnique(SelRoad); }
+
+			// A point dropped onto another road's point or centreline welds there into one
+			// junction point; only the dragged roads seed it. A weld can split or trim roads,
+			// which invalidates the point indices, so the selection goes and the rebuild is full.
+			TArray<FGuid> Dragged;
+			for (int32 r : Moved) { if (Net->GetRoads().IsValidIndex(r)) { Dragged.Add(Net->GetRoads()[r].Id); } }
+			const int32 RoadsBefore = Net->NumRoads();
+			const bool bWelded = Dragged.Num() > 0
+				&& (Net->WeldJunctionPoints(URoadNetwork::JunctionWeldRadiusCm(), &Dragged) > 0
+					|| Net->NumRoads() != RoadsBefore);
+			if (bWelded)
+			{
+				SelPoints.Reset();
+				Moved.Reset();
+			}
 			Net->Rebuild(Moved);   // windowed when Moved is non-empty
 		}
 		if (GEditor) { GEditor->EndTransaction(); }
@@ -3240,6 +3415,46 @@ void FEdModeRoadNet::FinalizeDraft()
 	URoadNetwork* Net = Actor->GetNetwork();
 	if (!Net) { DraftPoints.Reset(); return; }
 
+	// Every span longer than the network's point spacing gets in-between points,
+	// so the middle of a drawn road has handles to drag. With drape on they sit
+	// on the terrain; the end points keep the clicked height they snapped to.
+	{
+		const double Spacing = FMath::Max(50.0, Net->PolylineDensityCm);
+		if (Shape == ERoadNetDrawShape::Freehand && SmoothMode() && Ref.Num() >= 3)
+		{
+			TArray<FVector> Curve;
+			RoadNetMath::SmoothG2Spline(Ref, Spacing, Curve);
+			if (Curve.Num() >= 2) { Ref = MoveTemp(Curve); }
+		}
+		TArray<FVector> Dense;
+		Dense.Reserve(Ref.Num());
+		Dense.Add(Ref[0]);
+		for (int32 i = 1; i < Ref.Num(); ++i)
+		{
+			const FVector A = Ref[i - 1];
+			const FVector B = Ref[i];
+			const int32 N = FMath::CeilToInt(FVector2D::Distance(FVector2D(A), FVector2D(B)) / Spacing);
+			for (int32 k = 1; k < N; ++k) { Dense.Add(FMath::Lerp(A, B, (double)k / N)); }
+			Dense.Add(B);
+		}
+		Ref = MoveTemp(Dense);
+
+		const IConsoleVariable* DrapeCV = IConsoleManager::Get().FindConsoleVariable(TEXT("roadnet.DrawDrape"));
+		if (!DrapeCV || DrapeCV->GetInt() != 0)
+		{
+			const bool bRing = Shape == ERoadNetDrawShape::Roundabout;
+			const int32 First = bRing ? 0 : 1;
+			const int32 Last  = bRing ? Ref.Num() - 1 : Ref.Num() - 2;
+			int32 Draped = 0;
+			for (int32 i = First; i <= Last; ++i)
+			{
+				double Z;
+				if (TerrainZAt(GetWorld(), Ref[i], Z)) { Ref[i].Z = Z; ++Draped; }
+			}
+			UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw: draped %d of %d points on the terrain."), Draped, Ref.Num());
+		}
+	}
+
 	const FScopedTransaction Transaction(LOCTEXT("RoadNetDrawRoad", "Draw RoadNet Road"));
 	Actor->Modify();
 	Net->Modify();   // roads live on the network sub-object; capture it for undo
@@ -3248,6 +3463,7 @@ void FEdModeRoadNet::FinalizeDraft()
 	R.Source = ERoadNetSource::HandDrawn;
 	R.Class  = Actor->DraftClass;
 	R.Ref    = MoveTemp(Ref);
+	R.bRoundabout = Shape == ERoadNetDrawShape::Roundabout;
 
 	FRoadNetLaneSpec& L = R.Lanes;
 	L.bOneway          = Actor->bDraftOneway;
@@ -3265,11 +3481,22 @@ void FEdModeRoadNet::FinalizeDraft()
 			(float)FVector2D::Distance(C, FVector2D(DraftPoints[1].X, DraftPoints[1].Y)),
 			R.Lanes.HalfWidthCm() * 2.f);
 	}
+	// A road drawn up to another road joins it at ONE point: its ends, and the road it
+	// ends on (split there), weld within the junction weld radius. Only this road seeds
+	// the weld, so junctions elsewhere are left exactly as they were.
+	bool bWelded = false;
+	if (Net->GetRoads().IsValidIndex(NewRoad))
+	{
+		const TArray<FGuid> Drawn = { Net->GetRoads()[NewRoad].Id };
+		const int32 RoadsBefore = Net->NumRoads();
+		bWelded = Net->WeldJunctionPoints(URoadNetwork::JunctionWeldRadiusCm(), &Drawn) > 0
+			|| Net->NumRoads() != RoadsBefore;
+	}
 	// Windowed: a freshly drawn road only dirties its own footprint (its window
-	// picks up any roads it connects to at a junction). Falls back to full if the
-	// index is somehow invalid.
-	if (NewRoad != INDEX_NONE) { Net->Rebuild(MakeArrayView(&NewRoad, 1)); }
-	else                       { Net->Rebuild(); }
+	// picks up any roads it connects to at a junction). A weld may have split the
+	// road it joined, so that rebuilds in full; so does an invalid index.
+	if (NewRoad != INDEX_NONE && !bWelded) { Net->Rebuild(MakeArrayView(&NewRoad, 1)); }
+	else                                   { Net->Rebuild(); }
 
 	UE_LOG(LogRoadNet, Log, TEXT("[RoadNet] Draw: committed a hand-drawn road (shape %d) with %d points."),
 		(int32)Shape, R.Ref.Num());

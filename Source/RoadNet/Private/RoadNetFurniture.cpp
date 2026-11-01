@@ -47,6 +47,38 @@ void URoadNetwork::BuildFurniture(FRoadNetRebuildContext& Ctx) const
 		for (int32 RoadIdx : Ctx.Zones[z]) { RoadZone.Add(RoadIdx, z); }
 	}
 
+	// Junction clearance: nothing within FurnitureJunctionClearanceCm of the EDGE of a
+	// junction of three or more arms. The edge is the joint pushed out past its widest
+	// arm's carriageway + sidewalk — measured from the joint point alone, a wide
+	// junction's corners would already sit past the clearance and nothing would move.
+	// Seams and dead ends are not junctions, so straight joins and cul-de-sacs keep theirs.
+	struct FJunctionDisc { FVector2D Centre; double RadiusSq; };
+	TArray<FJunctionDisc> JunctionDiscs;
+	if (FurnitureJunctionClearanceCm > 0.f)
+	{
+		for (const FRoadNetJoint& J : Ctx.Joints)
+		{
+			if (J.Arms.Num() < 3) { continue; }
+			double EdgeCm = 0.0;
+			for (const FRoadNetJointArm& Arm : J.Arms)
+			{
+				const double Walk = Roads.IsValidIndex(Arm.Road) ? (double)Roads[Arm.Road].Lanes.MaxSidewalkWidth() : 0.0;
+				EdgeCm = FMath::Max(EdgeCm, Arm.HalfWidthCm + Walk);
+			}
+			const double R = EdgeCm + (double)FurnitureJunctionClearanceCm;
+			JunctionDiscs.Add({ J.Location, R * R });
+		}
+	}
+	auto NearJunction = [&JunctionDiscs](const FVector& Loc) -> bool
+	{
+		const FVector2D Q(Loc.X, Loc.Y);
+		for (const FJunctionDisc& D : JunctionDiscs)
+		{
+			if (FVector2D::DistSquared(Q, D.Centre) < D.RadiusSq) { return true; }
+		}
+		return false;
+	};
+
 	for (int32 ti = 0; ti < FurnitureTypes.Num(); ++ti)
 	{
 		const FRoadNetFurnitureType& FT = FurnitureTypes[ti];
@@ -87,6 +119,8 @@ void URoadNetwork::BuildFurniture(FRoadNetRebuildContext& Ctx) const
 
 				for (const RoadNetCurbs::FCurbInstance& CI : Insts)
 				{
+					// The rail stops short of the junction instead of wrapping its corner.
+					if (NearJunction(CI.Location)) { continue; }
 					// Bake the piece length into the X scale so CommitFurniture can
 					// stretch one tile to span this kerb chunk (gapless on curves).
 					const float YawDeg = CI.YawDeg + FT.YawOffsetDeg;
@@ -120,16 +154,14 @@ void URoadNetwork::BuildFurniture(FRoadNetRebuildContext& Ctx) const
 			const double Half = (double)LS.HalfWidthCm();
 
 			// Furniture only follows SIDEWALKS, never a bare carriageway edge, so
-			// nothing lands in the middle of / beside a walkless road. Geometry
-			// mapping (see BuildSurfaceUnion): the +RightAxis side is driven by
-			// bSidewalkLeft, the −RightAxis side by bSidewalkRight. Combine that
-			// with the type's own side selection (bRight = +RightAxis side here).
+			// nothing lands in the middle of / beside a walkless road. The
+			// +RightAxis side is the right of travel along the reference line.
 			// Max, not the uniform width: this only asks "is there a walk at all".
 			// Placement is guarded exactly by the sidewalk polygons below, which
 			// already carry the per-point width.
 			const bool bHasWalk = (LS.MaxSidewalkWidth() > 0.0);
-			const bool bDoPlus  = FT.bRight && bHasWalk && LS.bSidewalkLeft;   // +RightAxis
-			const bool bDoMinus = FT.bLeft  && bHasWalk && LS.bSidewalkRight;  // −RightAxis
+			const bool bDoPlus  = FT.bRight && bHasWalk && LS.bSidewalkRight;  // +RightAxis
+			const bool bDoMinus = FT.bLeft  && bHasWalk && LS.bSidewalkLeft;   // −RightAxis
 			if (!bDoPlus && !bDoMinus) { continue; }
 
 			// Sidewalk band(s) of this road's zone — the hard placement guard.
@@ -172,6 +204,7 @@ void URoadNetwork::BuildFurniture(FRoadNetRebuildContext& Ctx) const
 					// HARD GUARD: skip anything that isn't actually on the sidewalk
 					// (carriageway, junction gap, or past the walk's outer edge).
 					if (!OnSidewalk(Loc)) { return; }
+					if (NearJunction(Loc)) { return; }
 
 					// Spaced items FACE the road: forward (+X) points inward toward
 					// the carriageway (−outward normal), so a bench's front looks at
@@ -294,7 +327,6 @@ void URoadNetwork::CommitFurniture(FRoadNetRebuildContext& Ctx)
 				if (!Tile) { continue; }
 
 				FActorSpawnParameters SP;
-				SP.ObjectFlags |= RF_Transient;
 				SP.Owner = Tile;
 				SP.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 				if (AActor* Child = World->SpawnActor<AActor>(BPClass, X, SP))

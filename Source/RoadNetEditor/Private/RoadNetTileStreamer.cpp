@@ -2,8 +2,8 @@
 //
 // THE PROBLEM THIS SOLVES
 // A city import commits tens of thousands of ARoadNetTileActor primitives. They
-// are RF_Transient authoring output, so World Partition will not stream them —
-// WP only streams saved (OFPA) actors. Every tile therefore keeps a live render
+// are not spatially loaded (world-space geometry on an origin pivot), so World
+// Partition keeps all of them resident. Every tile therefore keeps a live render
 // proxy no matter where the camera is, and each proxy holds GPU resource views.
 // Past ~1,000,000 live views D3D12 cannot grow the descriptor heap and the
 // editor dies with "Hit D3D12 device limits on descriptors".

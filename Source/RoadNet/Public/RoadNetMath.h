@@ -17,8 +17,7 @@ namespace RoadNetMath
 	// back to a unit +X if degenerate.
 	ROADNET_API FVector2D TangentAt(const TArray<FVector>& Poly, int32 Index);
 
-	// Right axis R = normalize(T x Z) in 2-D → rotate tangent -90° (UE LH, Z up):
-	// R = (T.Y, -T.X).
+	// Right axis R = Z x T in 2-D (UE LH: X forward, Y right, Z up): R = (-T.Y, T.X).
 	ROADNET_API FVector2D RightAxis(const FVector2D& Tangent);
 
 	// ---- §10.3 Arc-length --------------------------------------------------
@@ -81,6 +80,17 @@ namespace RoadNetMath
 	// unchanged. Returns how many vertices were removed.
 	ROADNET_API int32 CleanPolygonRing(TArray<FVector2D>& Ring,
 		double MinSpacingCm, double CollinearTolCm);
+
+	// Fair a sidewalk outer edge or a kerb chain. Packed vertices (a boolean
+	// boundary often has one every few centimetres) zigzag, and a skirt or a
+	// kerb stone follows every zig. A run whose net turn over a short window is
+	// straight gets averaged onto that straight and then resampled; a run that
+	// keeps turning (a kerb return, a bend) is left on its curve and only
+	// stops being packed tighter than a kerb stone. A real corner — a sharp
+	// turn with long legs — never moves. Open chains keep both ends.
+	// Returns how many vertices were removed. Too few points, or a chain that
+	// is not packed, is left unchanged.
+	ROADNET_API int32 FairBoundaryPolyline(TArray<FVector2D>& Pts, bool bClosed);
 
 
 	// ---- §10.4 Offset ------------------------------------------------------

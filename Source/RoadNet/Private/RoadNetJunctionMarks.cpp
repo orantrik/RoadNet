@@ -30,7 +30,7 @@ namespace RoadNetJunctionMarks
 		// like one painted away from a junction.
 		constexpr double kZebraSetbackCm  = 50.0;   // junction boundary -> zebra near edge
 		constexpr double kBarOffsetCm     = 60.0;   // zebra far edge    -> stop bar centre
-		constexpr double kBarHalfThickCm  = 25.0;   // half the bar's thickness along travel
+		constexpr double kBarHalfThickCm  = 15.0;   // 810: 30 cm thick along travel
 
 		double ZebraLengthCm()
 		{
@@ -64,7 +64,7 @@ namespace RoadNetJunctionMarks
 		if (!U.Normalize()) { U = FVector2D(1, 0); }
 		const FVector2D Lateral(U.Y, -U.X);
 
-		constexpr double kStripeHalf = 25.0, kPitch = 90.0;
+		constexpr double kStripeHalf = 25.0, kPitch = 100.0;   // 811: 50 bar, 50 gap
 		const double Half = FMath::Max(50.0, HalfWidthCm);
 		const double Depth = FMath::Max(50.0, DepthCm);
 		for (double Off = -Half; Off <= Half + 1.0; Off += kPitch)
@@ -79,7 +79,7 @@ namespace RoadNetJunctionMarks
 		FVector2D U = Travel;
 		if (!U.Normalize()) { U = FVector2D(1, 0); }
 		FVector2D L = Lateral;
-		if (!L.Normalize()) { L = FVector2D(U.Y, -U.X); }
+		if (!L.Normalize()) { L = FVector2D(-U.Y, U.X); }
 
 		const double Mid  = 0.5 * (HiCm + LoCm);
 		const double Span = 0.5 * (HiCm - LoCm);
@@ -98,6 +98,13 @@ namespace RoadNetJunctionMarks
 		return kZebraSetbackCm + ZebraLengthCm() + kBarOffsetCm + kBarHalfThickCm;
 	}
 
+	double StopBarOffsetCm(bool bCrosswalk)
+	{
+		return bCrosswalk ? kZebraSetbackCm + ZebraLengthCm() + kBarOffsetCm : 0.0;
+	}
+
+	double StopBarHalfThickCm() { return kBarHalfThickCm; }
+
 	void BuildJoint(
 		const FVector2D& Center, double CenterZ,
 		const TArray<FApproach>& Approaches,
@@ -107,22 +114,25 @@ namespace RoadNetJunctionMarks
 		TArray<FSignal>& OutSignals)
 	{
 		if (Preset == ERoadNetJunctionPreset::None) { return; }
-		const bool bStop  = (Preset == ERoadNetJunctionPreset::StopLine
+		const bool bAuto  = (Preset == ERoadNetJunctionPreset::Auto);
+		const bool bStopP = (Preset == ERoadNetJunctionPreset::StopLine
 			|| Preset == ERoadNetJunctionPreset::StopAndCrosswalk
 			|| Preset == ERoadNetJunctionPreset::Signalized);
-		const bool bCross = (Preset == ERoadNetJunctionPreset::StopAndCrosswalk
+		const bool bCrossP = (Preset == ERoadNetJunctionPreset::StopAndCrosswalk
 			|| Preset == ERoadNetJunctionPreset::Signalized);
 		const bool bSig   = (Preset == ERoadNetJunctionPreset::Signalized);
 		const bool bYield = (Preset == ERoadNetJunctionPreset::GiveWay);
 
 		for (const FApproach& Ap : Approaches)
 		{
+			const bool bStop  = bAuto ? Ap.bStopLine  : bStopP;
+			const bool bCross = bAuto ? Ap.bCrosswalk : bCrossP;
 			const double Half = FMath::Max(50.0, Ap.HalfWidthCm);
 			FVector2D Out = Ap.Outward;
 			if (!Out.Normalize()) { Out = FVector2D(1, 0); }
 			const FVector2D StopP = Ap.StopPos;
 			const FVector2D Din(-Out.X, -Out.Y);          // inbound (toward junction)
-			const FVector2D Rin(Din.Y, -Din.X);           // right of inbound
+			const FVector2D Rin(-Din.Y, Din.X);           // right of inbound
 
 			// Where the entering carriageway actually is, as an interval along Rin.
 			// Fallback rule: traffic enters on the right of the inbound direction
@@ -143,9 +153,7 @@ namespace RoadNetJunctionMarks
 			// stopped car never stands on the stripes; with no crossing there is
 			// nothing to clear and it stays on the junction boundary.
 			const double Zebra = ZebraLengthCm();
-			const FVector2D BarP = bCross
-				? StopP + Out * (kZebraSetbackCm + Zebra + kBarOffsetCm)
-				: StopP;
+			const FVector2D BarP = StopP + Out * StopBarOffsetCm(bCross);
 
 			// Nothing enters this arm — a one-way exit. No bar, no give-way dashes,
 			// no signal head: there is no traffic here to stop. The zebra below still
@@ -168,7 +176,10 @@ namespace RoadNetJunctionMarks
 			// Zebra crosswalk against the junction boundary, INSIDE the stop bar.
 			if (bCross)
 			{
-				EmitZebra(StopP + Out * (kZebraSetbackCm + Zebra * 0.5), Out, Half, Zebra, OutWhite);
+				const double Lo = (Ap.SurfHiCm > Ap.SurfLoCm) ? Ap.SurfLoCm : -Half;
+				const double Hi = (Ap.SurfHiCm > Ap.SurfLoCm) ? Ap.SurfHiCm : Half;
+				EmitZebra(StopP + Out * (kZebraSetbackCm + Zebra * 0.5) + Rin * (0.5 * (Lo + Hi)),
+					Out, 0.5 * (Hi - Lo), Zebra, OutWhite);
 			}
 
 			// Placeholder signal at the near corner on the entering side, facing

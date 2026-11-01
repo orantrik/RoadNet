@@ -1,5 +1,6 @@
 // RoadNetCurbs.cpp — kerb-line instance placement (see RoadNetCurbs.h).
 #include "RoadNetCurbs.h"
+#include "RoadNetMath.h"
 #include "Algo/Reverse.h"
 
 using namespace UE::Geometry;
@@ -33,13 +34,10 @@ namespace RoadNetCurbs
 		// Walk a chained kerb run (>=2 points) and append pieces. Points are
 		// pre-oriented so the sidewalk is on the LEFT of travel.
 		//
-		// Constant length on straights, deform only at corners: pieces are tiled
-		// at EXACTLY SpacingCm (the standard kerb length) by ARC LENGTH — cutting
-		// segments mid-way instead of ending at boundary vertices — so every
-		// straight stone is the same size (mesh scale 1, no stretch). A piece is
-		// cut SHORT only where the boundary bends away from the piece's start
-		// heading before a full standard length, so the mesh compresses to follow
-		// the arc just at corners/curves.
+		// Constant length on straights, short stones on a corner radius: pieces
+		// are tiled at EXACTLY SpacingCm (the standard kerb length) by ARC LENGTH
+		// on a straight, and cut as soon as the heading turns, so a fillet is a
+		// chain of scaled-down stones instead of two full stones meeting at a kink.
 		void EmitRun(const TArray<FVector2D>& Pts,
 			const FCenterlineHeightField& Height, double SpacingCm, double ZLiftCm,
 			TArray<FCurbInstance>& Out)
@@ -56,7 +54,7 @@ namespace RoadNetCurbs
 			if (Total < 1.0) { return; }
 
 			const double StdLenCm = FMath::Max(20.0, SpacingCm);   // standard piece length
-			constexpr double kMaxPieceTurnRad = 0.20;              // ~11.5° → cut on curves
+			constexpr double kMaxPieceTurnRad = 0.08;              // ~4.6°: two arc steps of a 16/rad fillet
 
 			// Pieces are cut on the PLAN shape only. A kerb stone is a rigid
 			// precast block: a layer sets it to the grade and lets the joints take
@@ -96,11 +94,15 @@ namespace RoadNetCurbs
 				// grade (seat at mean height, pitch over its horizontal length).
 				const double Zs = Height.SampleHeight(A.X, A.Y, Fallback) + ZLiftCm;
 				const double Ze = Height.SampleHeight(B.X, B.Y, Fallback) + ZLiftCm;
+				// No street is steeper than 20%; a stone that would be is reading a
+				// height step, and tilting it to that step lifts it off the kerb line.
+				const double MaxRise = 0.2 * L;
+				const double Rise = FMath::Clamp(Ze - Zs, -MaxRise, MaxRise);
 
 				FCurbInstance CI;
 				CI.Location = FVector(M.X, M.Y, 0.5 * (Zs + Ze));
 				CI.YawDeg   = (float)FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X));
-				CI.PitchDeg = (float)FMath::RadiansToDegrees(FMath::Atan2(Ze - Zs, L));
+				CI.PitchDeg = (float)FMath::RadiansToDegrees(FMath::Atan2(Rise, L));
 				CI.LengthCm = (float)L;
 				Out.Add(CI);
 			};
@@ -180,6 +182,9 @@ namespace RoadNetCurbs
 				// If the sidewalk is on the right of the run's travel, reverse so
 				// it lands on the left (mesh +Y) consistently.
 				if (SwLeft[Edges[0]] == 0) { Algo::Reverse(Pts); }
+				// The boundary a boolean leaves behind is packed every few
+				// centimetres and zigzags. Stones follow that zigzag and stack.
+				RoadNetMath::FairBoundaryPolyline(Pts, /*bClosed*/false);
 				EmitRun(Pts, Height, SpacingCm, ZLiftCm, Out);
 			};
 

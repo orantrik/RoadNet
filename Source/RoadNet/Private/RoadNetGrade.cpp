@@ -3,10 +3,10 @@
 //
 // Standard road-design model (FAO §3.1.3): the road runs a TANGENT GRADE
 // between vertical points of intersection, and each VPI is rounded by a
-// vertical curve. Here the junctions are the VPIs, so between two junctions
-// the centreline is a straight line in (arc length, Z) — no sag, no terrain
-// following — and every junction sits on a flat plate with a smooth grade
-// transition on each approach.
+// vertical curve. The junctions are VPIs, each on a flat plate with a smooth
+// grade transition on each approach. Where the ground between two junctions
+// strays from their chord by more than the span's budget, VPIs are added on
+// the ground (no plate), so a long road follows the hills it crosses.
 //
 // Runs after BuildCurves/BuildCrossings and before the deform-corridor
 // snapshot, so the terrain conform and the mesh see the SAME reconciled Z.
@@ -22,20 +22,20 @@
 // ---- tuning (mirrored on the OSM control panel) ---------------------------
 static TAutoConsoleVariable<float> CVarRoadNetStraightSpanM(
 	TEXT("roadnet.StraightSpanM"),
-	150.0f,
-	TEXT("Junction span length (m) at or below which the road is a DEAD STRAIGHT grade between junctions. Longer spans are allowed to bow toward the terrain, ramping up to roadnet.MaxChordDeviationM. Default 150."),
+	50.0f,
+	TEXT("Junction span length (m) at or below which the road is a DEAD STRAIGHT grade between junctions. Longer spans are allowed to bow toward the terrain, ramping up to roadnet.MaxChordDeviationM. Default 50."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarRoadNetMaxChordDeviationM(
 	TEXT("roadnet.MaxChordDeviationM"),
-	3.0f,
-	TEXT("Maximum height (m) a long span may deviate from the straight chord between its two junctions, so a long link can still follow rolling ground. Reached at 3x roadnet.StraightSpanM. Default 3."),
+	0.5f,
+	TEXT("Maximum height (m) a long span may deviate from the straight chord between its two junctions, so a long link can still follow rolling ground. Reached at 3x roadnet.StraightSpanM. Ground further off the chord than this splits the span at a grade point on the ground (pieces no shorter than roadnet.StraightSpanM). Default 0.5."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarRoadNetMaxJunctionRelaxCm(
 	TEXT("roadnet.MaxJunctionRelaxCm"),
-	300.0f,
-	TEXT("How far (cm) a junction may be pulled BELOW its highest arriving road so straight chords do not turn one noisy drape sample into a network-wide berm. 0 disables the relaxation. Default 300."),
+	10.0f,
+	TEXT("How far (cm) a junction may be pulled BELOW its highest arriving road so straight chords do not turn one noisy drape sample into a network-wide berm. 0 disables the relaxation. Default 10."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarRoadNetVerticalCurveKM(
@@ -269,12 +269,20 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	// chord is legal. This deliberately may exceed RelaxCm — a junction sitting
 	// further from its §8.5 base level is a blemish, a cliff is a defect.
 	int32 ChordViolations = 0, ChordUnfixable = 0;
+	// Two junctions whose own ground levels are further apart than the cap
+	// allows sit on a hill steeper than the cap: the road climbs it with the
+	// ground, so only the part of the gap the relaxation added is negotiated.
+	auto AllowedDz = [&](const FGradeLink& L)
+	{
+		const double Len = 1.0 / FMath::Max(L.Weight, 1e-9);
+		return FMath::Clamp(FMath::Abs(JointBase[L.Jb] - JointBase[L.Ja]),
+			MaxSlope * Len, FMath::Max(MaxSlope, kMaxLongitudinalTan) * Len);
+	};
 	if (Links.Num() > 0)
 	{
 		for (const FGradeLink& L : Links)
 		{
-			const double Len = 1.0 / FMath::Max(L.Weight, 1e-9);
-			if (FMath::Abs(JointZ[L.Jb] - JointZ[L.Ja]) > MaxSlope * Len + 1e-3)
+			if (FMath::Abs(JointZ[L.Jb] - JointZ[L.Ja]) > AllowedDz(L) + 1e-3)
 			{
 				++ChordViolations;
 			}
@@ -287,8 +295,7 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 			bool bAny = false;
 			for (const FGradeLink& L : Links)
 			{
-				const double Len   = 1.0 / FMath::Max(L.Weight, 1e-9);
-				const double MaxDz = MaxSlope * Len;
+				const double MaxDz = AllowedDz(L);
 				const double dZ    = JointZ[L.Jb] - JointZ[L.Ja];   // + when Jb is higher
 				if (FMath::Abs(dZ) <= MaxDz + 1e-3)
 				{
@@ -315,8 +322,7 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 		}
 		for (const FGradeLink& L : Links)
 		{
-			const double Len = 1.0 / FMath::Max(L.Weight, 1e-9);
-			if (FMath::Abs(JointZ[L.Jb] - JointZ[L.Ja]) > MaxSlope * Len + 1e-3)
+			if (FMath::Abs(JointZ[L.Jb] - JointZ[L.Ja]) > AllowedDz(L) + 1e-3)
 			{
 				++ChordUnfixable;
 			}
@@ -356,7 +362,7 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	// -----------------------------------------------------------------------
 	// 4. Per-road profile: chord -> budget -> grade cap -> plate + curve.
 	// -----------------------------------------------------------------------
-	int32 RoadsAligned = 0, SteepChords = 0, BudgetBreaks = 0, RelaxEscapes = 0;
+	int32 RoadsAligned = 0, SteepChords = 0, BudgetBreaks = 0, RelaxEscapes = 0, GradePoints = 0;
 	// "A high junction meeting a low road": every anchor whose junction level sits
 	// clear of the ground the road would otherwise lie on. Counted so the pass can
 	// say how many it found and ramped, and warned about individually only when
@@ -377,6 +383,8 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	// arc-length table so the tie can re-run the grade clamp afterwards.
 	TMap<int32, TBitArray<>>     TieProtected;
 	TMap<int32, TArray<double>>  TieArcS;
+	TMap<int32, TArray<double>>  TieSlopeCap;
+	double SteepGroundCm = 0.0;
 
 	for (TPair<int32, FRoadCurves>& KV : Ctx.Curves)
 	{
@@ -491,6 +499,87 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 		Anchors.Append(MidAnchors);
 		Anchors.Emplace(Len, EndAnchorZ(JEnd, EndCrossZ, C.Sampled.Last().Z));
 
+		// ---- grade points where the ground leaves the chord ------------------
+		// One chord per junction span only fits ground that is nearly straight.
+		// Over a hill the budget clamp held the road within MaxDev of the line
+		// between its ends and the conform cut a trench through the hill. Where
+		// the smoothed ground strays from a span's chord by more than that
+		// span's budget, the span is split at the worst point (a PVI on the
+		// ground), recursively, never into pieces shorter than StraightCm.
+		TArray<double> Ground;
+		TArray<double> SlopeCap;   // per sample: the cap, or the ground's own grade where that is steeper
+		Ground.SetNumUninitialized(N);
+		SlopeCap.SetNumUninitialized(N);
+		{
+			const double Win = 0.25 * StraightCm;
+			int32 Lo = 0, Hi = 0;
+			double Sum = 0.0;
+			for (int32 i = 0; i < N; ++i)
+			{
+				while (Hi < N && S[Hi] <= S[i] + Win) { Sum += C.Sampled[Hi++].Z; }
+				while (S[Lo] < S[i] - Win)            { Sum -= C.Sampled[Lo++].Z; }
+				Ground[i] = Sum / (double)(Hi - Lo);
+			}
+			// The cap removes drape noise. Ground that really climbs steeper than
+			// the cap keeps its grade, or the road sinks into the hill — up to
+			// kMaxLongitudinalTan: a cliff is not a road, the road cuts it.
+			Lo = 0; Hi = 0;
+			for (int32 i = 0; i < N; ++i)
+			{
+				while (Hi + 1 < N && S[Hi + 1] <= S[i] + Win) { ++Hi; }
+				while (S[Lo] < S[i] - Win)                    { ++Lo; }
+				const double dS = S[FMath::Max(Hi, i)] - S[FMath::Min(Lo, i)];
+				const double Grade = dS > 1.0 ? FMath::Abs(Ground[FMath::Max(Hi, i)] - Ground[FMath::Min(Lo, i)]) / dS : 0.0;
+				SlopeCap[i] = FMath::Clamp(Grade, MaxSlope, FMath::Max(MaxSlope, kMaxLongitudinalTan));
+				if (i > 0 && SlopeCap[i] > MaxSlope) { SteepGroundCm += S[i] - S[i - 1]; }
+			}
+		}
+		auto CapBetween = [&SlopeCap](int32 a, int32 b) { return FMath::Max(SlopeCap[a], SlopeCap[b]); };
+		TieSlopeCap.Add(RoadIdx, SlopeCap);
+
+		TArray<bool> IsGradePoint;
+		{
+			TArray<TPair<double, double>> GradePts;
+			TArray<TTuple<double, double, double, double>> Work;
+			for (int32 ai = 0; ai + 1 < Anchors.Num(); ++ai)
+			{
+				Work.Emplace(Anchors[ai].Key, Anchors[ai].Value, Anchors[ai + 1].Key, Anchors[ai + 1].Value);
+			}
+			while (Work.Num() > 0)
+			{
+				const TTuple<double, double, double, double> W = Work.Pop(EAllowShrinking::No);
+				const double Sa = W.Get<0>(), Za = W.Get<1>(), Sb = W.Get<2>(), Zb = W.Get<3>();
+				const double L  = Sb - Sa;
+				if (L < 2.0 * StraightCm) { continue; }
+				const double Budget = MaxDevCm * FMath::Clamp((L - StraightCm) / (2.0 * StraightCm), 0.0, 1.0);
+				int32  Worst = INDEX_NONE;
+				double WorstDev = Budget + 1.0;
+				for (int32 i = 0; i < N; ++i)
+				{
+					if (S[i] < Sa + StraightCm || S[i] > Sb - StraightCm) { continue; }
+					const double Dev = FMath::Abs(Ground[i] - FMath::Lerp(Za, Zb, (S[i] - Sa) / L));
+					if (Dev > WorstDev) { WorstDev = Dev; Worst = i; }
+				}
+				if (Worst == INDEX_NONE) { continue; }
+				GradePts.Emplace(S[Worst], Ground[Worst]);
+				Work.Emplace(Sa, Za, S[Worst], Ground[Worst]);
+				Work.Emplace(S[Worst], Ground[Worst], Sb, Zb);
+			}
+			GradePts.Sort([](const TPair<double, double>& A, const TPair<double, double>& B) { return A.Key < B.Key; });
+			GradePoints += GradePts.Num();
+
+			TArray<TPair<double, double>> Merged;
+			Merged.Reserve(Anchors.Num() + GradePts.Num());
+			int32 g = 0;
+			for (const TPair<double, double>& A : Anchors)
+			{
+				while (g < GradePts.Num() && GradePts[g].Key < A.Key) { Merged.Add(GradePts[g++]); IsGradePoint.Add(true); }
+				Merged.Add(A);
+				IsGradePoint.Add(false);
+			}
+			Anchors = MoveTemp(Merged);
+		}
+
 		// ---- straight chord with a span-scaled deviation budget --------------
 		// Budget(L) = MaxDev * clamp((L - Straight) / (2*Straight), 0, 1)
 		// A span of Straight or less gets Budget 0, which IS the straight chord;
@@ -513,11 +602,12 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 
 		// ---- pin anchors, then cap the local grade ---------------------------
 		TBitArray<> Pinned(false, N);
-		for (const TPair<double, double>& A : Anchors)
+		for (int32 ai = 0; ai < Anchors.Num(); ++ai)
 		{
-			const int32 Ai = NearestIdx(A.Key);
+			if (IsGradePoint[ai]) { continue; }   // ground, not a junction: the cap may move it
+			const int32 Ai = NearestIdx(Anchors[ai].Key);
 			Pinned[Ai] = true;
-			Z[Ai]      = A.Value;
+			Z[Ai]      = Anchors[ai].Value;
 		}
 
 		// Only bites on spans long enough to have kept some terrain shape; on a
@@ -527,14 +617,14 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 			for (int32 i = 1; i < N; ++i)
 			{
 				if (Pinned[i]) { continue; }
-				const double dS = FMath::Max(1.0, S[i] - S[i - 1]);
-				Z[i] = FMath::Clamp(Z[i], Z[i - 1] - MaxSlope * dS, Z[i - 1] + MaxSlope * dS);
+				const double Cap = CapBetween(i - 1, i) * FMath::Max(1.0, S[i] - S[i - 1]);
+				Z[i] = FMath::Clamp(Z[i], Z[i - 1] - Cap, Z[i - 1] + Cap);
 			}
 			for (int32 i = N - 2; i >= 0; --i)
 			{
 				if (Pinned[i]) { continue; }
-				const double dS = FMath::Max(1.0, S[i + 1] - S[i]);
-				Z[i] = FMath::Clamp(Z[i], Z[i + 1] - MaxSlope * dS, Z[i + 1] + MaxSlope * dS);
+				const double Cap = CapBetween(i, i + 1) * FMath::Max(1.0, S[i + 1] - S[i]);
+				Z[i] = FMath::Clamp(Z[i], Z[i + 1] - Cap, Z[i + 1] + Cap);
 			}
 		}
 
@@ -571,6 +661,28 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 		{
 			const double Sa = Anchors[ai].Key;
 			const double Za = Anchors[ai].Value;
+
+			// A grade point is a crest or sag, not a junction: no plate, just an
+			// equal-tangent parabola joining the two grades, centred on it and
+			// kept clear of the neighbouring anchors' own curves (each of those
+			// reaches at most half way).
+			if (IsGradePoint[ai])
+			{
+				const double Gap = FMath::Min(Sa - Anchors[ai - 1].Key, Anchors[ai + 1].Key - Sa);
+				const double Zv  = TangentAt(Sa);
+				const double gIn  = (Zv - TangentAt(Sa - 0.5 * Gap)) / (0.5 * Gap);
+				const double gOut = (TangentAt(Sa + 0.5 * Gap) - Zv) / (0.5 * Gap);
+				const double h = FMath::Min(0.5 * CurveKCm * FMath::Abs(gOut - gIn) * 100.0, 0.45 * Gap);
+				Reach[ai] = h;
+				if (h <= 1.0) { continue; }
+				for (int32 i = 0; i < N; ++i)
+				{
+					const double x = S[i] - (Sa - h);
+					if (x < 0.0 || x > 2.0 * h) { continue; }
+					Z[i] = Zv - gIn * h + gIn * x + (gOut - gIn) * x * x / (4.0 * h);
+				}
+				continue;
+			}
 
 			// How far this junction rides above (or below) the ground the road
 			// would otherwise lie on. C.Sampled still holds the raw drape here —
@@ -656,7 +768,7 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 				if (Pinned[i]) { Prot[i] = true; continue; }
 				for (int32 ai = 0; ai < Anchors.Num(); ++ai)
 				{
-					if (FMath::Abs(S[i] - Anchors[ai].Key) <= Reach[ai])
+					if (!IsGradePoint[ai] && FMath::Abs(S[i] - Anchors[ai].Key) <= Reach[ai])
 					{
 						Prot[i] = true;
 						break;
@@ -670,16 +782,26 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 		// ---- self-check: the profile must be its chord to within its budget ---
 		for (int32 ai = 0; ai + 1 < Anchors.Num(); ++ai)
 		{
-			const double Sa = Anchors[ai].Key,     Za = Anchors[ai].Value;
-			const double Sb = Anchors[ai + 1].Key, Zb = Anchors[ai + 1].Value;
+			// A grade point sits wherever the cap let the ground pull it, so its
+			// end of the chord is the profile's own level there.
+			const bool bGround = IsGradePoint[ai] || IsGradePoint[ai + 1];
+			const double Sa = Anchors[ai].Key;
+			const double Sb = Anchors[ai + 1].Key;
+			const double Za = IsGradePoint[ai]     ? Tangent[NearestIdx(Sa)] : Anchors[ai].Value;
+			const double Zb = IsGradePoint[ai + 1] ? Tangent[NearestIdx(Sb)] : Anchors[ai + 1].Value;
 			const double L  = FMath::Max(1.0, Sb - Sa);
-			const double ChordGrade = FMath::Abs(Zb - Za) / L;
+			const double ChordGrade  = FMath::Abs(Zb - Za) / L;
+			const double GroundGrade = FMath::Abs(Ground[NearestIdx(Sb)] - Ground[NearestIdx(Sa)]) / L;
 			if (ChordGrade > MaxSlope + 1e-4)
 			{
-				++SteepChords;
-				UE_LOG(LogRoadNet, Warning,
-					TEXT("[RoadNet][GRADE] road %d span %.0f-%.0f m: junctions differ by %.2f m over %.0f m = %.1f%%, past the %.1f%% cap. No profile beats a straight line between two fixed junctions — lower a junction instead."),
-					RoadIdx, Sa / 100.0, Sb / 100.0, (Zb - Za) / 100.0, L / 100.0, ChordGrade * 100.0, MaxSlope * 100.0);
+				// Only a chord steeper than the ground under it is the junctions' doing.
+				if (!bGround && ChordGrade > GroundGrade + 1e-4)
+				{
+					++SteepChords;
+					UE_LOG(LogRoadNet, Warning,
+						TEXT("[RoadNet][GRADE] road %d span %.0f-%.0f m: junctions differ by %.2f m over %.0f m = %.1f%%, past the %.1f%% cap. No profile beats a straight line between two fixed junctions — lower a junction instead."),
+						RoadIdx, Sa / 100.0, Sb / 100.0, (Zb - Za) / 100.0, L / 100.0, ChordGrade * 100.0, MaxSlope * 100.0);
+				}
 				continue;
 			}
 			const double Budget = MaxDevCm * FMath::Clamp((L - StraightCm) / (2.0 * StraightCm), 0.0, 1.0);
@@ -815,21 +937,23 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 			{
 				const TArray<double>* SPtr = TieArcS.Find(KV.Key);
 				const TBitArray<>* Prot = TieProtected.Find(KV.Key);
+				const TArray<double>* CapPtr = TieSlopeCap.Find(KV.Key);
 				TArray<FVector>& P = KV.Value.Sampled;
 				const int32 N = P.Num();
-				if (!SPtr || !Prot || SPtr->Num() != N) { continue; }
+				if (!SPtr || !Prot || !CapPtr || SPtr->Num() != N || CapPtr->Num() != N) { continue; }
 				const TArray<double>& S = *SPtr;
+				const TArray<double>& Cap = *CapPtr;
 				for (int32 i = 1; i < N; ++i)
 				{
 					if ((*Prot)[i]) { continue; }
-					const double dS = FMath::Max(1.0, S[i] - S[i - 1]);
-					P[i].Z = FMath::Clamp(P[i].Z, P[i - 1].Z - MaxSlope * dS, P[i - 1].Z + MaxSlope * dS);
+					const double dZ = FMath::Max(Cap[i - 1], Cap[i]) * FMath::Max(1.0, S[i] - S[i - 1]);
+					P[i].Z = FMath::Clamp(P[i].Z, P[i - 1].Z - dZ, P[i - 1].Z + dZ);
 				}
 				for (int32 i = N - 2; i >= 0; --i)
 				{
 					if ((*Prot)[i]) { continue; }
-					const double dS = FMath::Max(1.0, S[i + 1] - S[i]);
-					P[i].Z = FMath::Clamp(P[i].Z, P[i + 1].Z - MaxSlope * dS, P[i + 1].Z + MaxSlope * dS);
+					const double dZ = FMath::Max(Cap[i], Cap[i + 1]) * FMath::Max(1.0, S[i + 1] - S[i]);
+					P[i].Z = FMath::Clamp(P[i].Z, P[i + 1].Z - dZ, P[i + 1].Z + dZ);
 				}
 			}
 		};
@@ -998,9 +1122,9 @@ void URoadNetwork::BuildVerticalAlignment(FRoadNetRebuildContext& Ctx) const
 	}
 
 	UE_LOG(LogRoadNet, Log,
-		TEXT("[RoadNet][GRADE] aligned %d road(s) over %d junction(s) | straight span %.0f m, chord budget %.1f m, relax %.0f cm, curve %.1f m/%% | %d steep chord(s), %d budget break(s), %d relax escape(s), %d over-graded junction(s) | %d junction(s) sit clear of their road's ground and were ramped, %d of those too tight to ramp fully | %d steep chord(s) negotiated (%d unfixable) | %d lateral tie(s) at %.1f%%, %d left after solve | %d rogue knot(s) pulled to their spline's median"),
+		TEXT("[RoadNet][GRADE] aligned %d road(s) over %d junction(s) | straight span %.0f m, chord budget %.1f m, relax %.0f cm, curve %.1f m/%% | %d grade point(s) on the ground, %.0f m on ground steeper than the %.0f%% cap (kept the ground's grade) | %d steep chord(s), %d budget break(s), %d relax escape(s), %d over-graded junction(s) | %d junction(s) sit clear of their road's ground and were ramped, %d of those too tight to ramp fully | %d steep chord(s) negotiated (%d unfixable) | %d lateral tie(s) at %.1f%%, %d left after solve | %d rogue knot(s) pulled to their spline's median"),
 		RoadsAligned, NumJoints, StraightCm / 100.0, MaxDevCm / 100.0, RelaxCm, CurveKCm / 100.0,
-		SteepChords, BudgetBreaks, RelaxEscapes, SteepJunctions, StepsRamped, StepsTooTight,
+		GradePoints, SteepGroundCm / 100.0, MaxSlope * 100.0, SteepChords, BudgetBreaks, RelaxEscapes, SteepJunctions, StepsRamped, StepsTooTight,
 		ChordViolations, ChordUnfixable, TieViolations, TanLat * 100.0, TieRemaining, RogueKnots);
 
 	// Snapshot for RoadNet.SlopeSelfCheck: the last rebuild's residual defects.

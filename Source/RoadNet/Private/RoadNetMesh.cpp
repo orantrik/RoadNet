@@ -62,6 +62,15 @@ static TAutoConsoleVariable<int32> CVarRoadNetDrawAngleDeg(
 	TEXT("Curve-shape arc angle in degrees (how far the road bends between the two clicks). Typical: 90, 45, 25."),
 	ECVF_Default);
 
+// Backs the panel's "Drape on landscape" checkbox for drawn roads.
+static TAutoConsoleVariable<int32> CVarRoadNetDrawSmooth(TEXT("roadnet.DrawSmooth"), 0, TEXT("Freehand draw: 0 = straight lines between the clicked points (default). 1 = a smooth curve (natural cubic spline) through every clicked point."), ECVF_Default);
+static TAutoConsoleVariable<int32> CVarRoadNetDrawMultiPoint(TEXT("roadnet.DrawMultiPoint"), 1, TEXT("1 = every point of a road is a handle (orange, default). 0 = main points: only each road's start and end are handles (blue), and dragging one stretches the road behind it."), ECVF_Default);
+static TAutoConsoleVariable<int32> CVarRoadNetDrawDrape(
+	TEXT("roadnet.DrawDrape"),
+	1,
+	TEXT("1 = a drawn road's in-between points take the landscape height under them (default). 0 = heights run straight between the clicked points."),
+	ECVF_Default);
+
 // Automatic turn arrows off the lane graph. ON by default: arrows are now
 // anchored on each approach's STOP LINE (URoadNetwork::CommitLaneMarks reads
 // Ctx.ApproachStops), which is what LOT"M 813 asks for — the arrow marks the
@@ -325,13 +334,18 @@ namespace RoadNetMesh
 		for (const FRoadHit& Hh : Hits) { Zmax = FMath::Max(Zmax, Hh.Z); }
 
 		const double Tau = FMath::Max(1.0, (double)CVarRoadNetHeightTauCm.GetValueOnAnyThread());
-		double SumW = 0.0, SumWZ = 0.0;
+		// Each road's say fades to zero at the blend radius. Without the fade a higher
+		// road took over at full strength the moment it came within range: a step of
+		// the whole height difference on a ring around every junction.
+		double SumW = 0.0, SumWZ = 0.0, NearD2 = TNumericLimits<double>::Max(), NearZ = Zmax;
 		for (const FRoadHit& Hh : Hits)
 		{
-			const double W = (1.0 / (Hh.D2 + Soft2)) * FMath::Exp((Hh.Z - Zmax) / Tau);
+			const double Fade = 1.0 - FMath::SmoothStep(0.5 * BlendCm, BlendCm, FMath::Sqrt(Hh.D2));
+			const double W = Fade * (1.0 / (Hh.D2 + Soft2)) * FMath::Exp((Hh.Z - Zmax) / Tau);
 			SumW += W; SumWZ += W * Hh.Z;
+			if (Hh.D2 < NearD2) { NearD2 = Hh.D2; NearZ = Hh.Z; }
 		}
-		return (SumW > 0.0) ? (SumWZ / SumW) : Zmax;
+		return (SumW > 0.0) ? (SumWZ / SumW) : NearZ;
 	}
 
 	double FirstCenterlineZ(const TArray<const TArray<FVector>*>& CenterLines)
@@ -511,11 +525,26 @@ namespace RoadNetMesh
 		// constraints returns garbage. Packed-cluster removal belongs upstream,
 		// on the latent polylines, where a removal can be checked against the
 		// plan — never on triangulation input.
+		// Heights are sampled only at ring vertices, and the collinear drop is
+		// planar: a road straight in plan but graded over a crest would keep just
+		// its end vertices and mesh as one flat chord under its kerbs. Re-insert
+		// points on the cleaned edges (on the edge, so the boundary is unchanged).
 		auto CleanRing = [](const FPolygon2d& In) -> FPolygon2d
 		{
+			constexpr double MaxEdgeCm = 400.0;
 			TArray<FVector2D> V(In.GetVertices());
 			RoadNetMath::CleanPolygonRing(V, /*MinSpacingCm*/1.0, /*CollinearTolCm*/1.5);
-			return FPolygon2d(V);
+			TArray<FVector2D> Dense;
+			Dense.Reserve(V.Num());
+			for (int32 i = 0; i < V.Num(); ++i)
+			{
+				const FVector2D& A = V[i];
+				const FVector2D& B = V[(i + 1) % V.Num()];
+				Dense.Add(A);
+				const int32 N = FMath::CeilToInt(FVector2D::Distance(A, B) / MaxEdgeCm);
+				for (int32 k = 1; k < N; ++k) { Dense.Add(FMath::Lerp(A, B, (double)k / N)); }
+			}
+			return FPolygon2d(Dense);
 		};
 
 		for (const FGeneralPolygon2d& GPSrc : Polys)
@@ -532,8 +561,15 @@ namespace RoadNetMesh
 			// ponytail: Contains is O(ring size) per triangle; fine at tile-chopped polygon sizes.
 			TConstrainedDelaunay2<double> CDT;
 			CDT.Add(GP);
+			// The points CleanRing re-inserts are collinear only to rounding, so the
+			// triangulator can span three of them with a triangle of no plan area: its
+			// normal lies flat at a random sign. Real triangles here are far larger,
+			// since the ring keeps no knot within 1.5 cm of its neighbours' line.
+			constexpr double kMinTwiceAreaCm2 = 0.01;
 			CDT.Triangulate([&GP](const TArray<FVector2d>& V, const FIndex3i& T)
 			{
+				const FVector2d AB = V[T.B] - V[T.A], AC = V[T.C] - V[T.A];
+				if (FMath::Abs(AB.X * AC.Y - AB.Y * AC.X) < kMinTwiceAreaCm2) { return false; }
 				return GP.Contains((V[T.A] + V[T.B] + V[T.C]) / 3.0);
 			});
 			const TArray<FVector2d>& Verts2D = CDT.Vertices;

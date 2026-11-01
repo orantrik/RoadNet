@@ -165,7 +165,7 @@ void URoadNetwork::BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const
 			// Self-check: the inclave only exists if BuildCurves actually bulged
 			// the carriageway edge here. Fails loudly if the two ever disagree.
 			{
-				const TArray<FVector>& Edge = (Sign > 0.0) ? C->LeftEdge : C->RightEdge;
+				const TArray<FVector>& Edge = (Sign > 0.0) ? C->RightEdge : C->LeftEdge;
 				if (Edge.Num() == P.Num())
 				{
 					const double Smid = 0.5 * (S0 + S1);
@@ -218,7 +218,10 @@ void URoadNetwork::BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const
 			{
 				FVector2D Base, Tan; double BaseZ = 0.0;
 				SampleWin(S, Base, Tan, BaseZ);
-				const FVector2D Nout(Tan.Y * Sign, -Tan.X * Sign); // outward normal (side-aware)
+				// Same side as the bay ribbon: OffsetPolyline treats +offset as RightAxis,
+				// and Sign is +1 on the right kerb. (Tan.Y, -Tan.X) is the opposite
+				// axis, which put the stall lines and the cars across the road.
+				const FVector2D Nout = RoadNetMath::RightAxis(Tan) * Sign;
 				// Inner edge point (at the carriageway edge) and the divider dir.
 				const FVector2D Inner = Base + Nout * Half;
 				const FVector2D Fwd = Tan; // along-kerb (for the angled slant)
@@ -245,7 +248,7 @@ void URoadNetwork::BuildStandardParkingBays(FRoadNetRebuildContext& Ctx) const
 				{
 					FVector2D Base, Tan; double BaseZ = 0.0;
 					SampleWin(S + 0.5 * AlongSpacing, Base, Tan, BaseZ);
-					const FVector2D Nout(Tan.Y * Sign, -Tan.X * Sign);
+					const FVector2D Nout = RoadNetMath::RightAxis(Tan) * Sign;
 					const FVector2D Inner = Base + Nout * Half;
 					const FVector2D Dir = (Nout * SinT + Tan * CosT).GetSafeNormal();
 

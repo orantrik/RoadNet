@@ -35,6 +35,12 @@ class ROADNET_API ARoadNetTileActor : public AActor
 public:
 	ARoadNetTileActor();
 
+	// On every tile and every actor it spawns. Tiles are saved with the level so
+	// the roads survive a reload and a cook, but they are still DERIVED output:
+	// a rebuild owns them, a conversion may throw them away whole, and a
+	// georeference re-origin must not carry them (the roads they came from stay).
+	static const FName GeneratedTag;
+
 	// Which grid cell this tile represents, and the cell size it was built with
 	// (cm). OwningNetworkId ties the tile to a specific URoadNetwork so multiple
 	// networks in one level don't collide when the registry is rebuilt on load.
@@ -98,8 +104,9 @@ public:
 	// pixel-for-pixel — this costs no visual fidelity, it only stops paying for
 	// tiles that are kilometres away.
 	//
-	// World Partition cannot do this job for us here: these tiles are RF_Transient
-	// authoring output, and WP only streams saved (OFPA) actors.
+	// World Partition cannot do this job for us here: tiles are not spatially
+	// loaded (their geometry is world-space on an origin pivot), so WP keeps
+	// every one of them resident.
 	void SetStreamedIn(bool bIn);
 	bool IsStreamedIn() const { return bStreamedIn; }
 

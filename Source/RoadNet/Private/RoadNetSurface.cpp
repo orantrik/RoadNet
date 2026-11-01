@@ -86,14 +86,14 @@ namespace RoadNetSurface
 	{
 		if (e <= 0.0 || Io.Num() == 0) { return; }
 		TArray<FGeneralPolygon2d> Closed;
-		// The arc-density arguments are NOT optional in practice. Clipper's default
-		// steps-per-radian is, in the engine's own words, "extremely large", so a
-		// round join emits thousands of vertices where tens will do. Every other
-		// Round offset in this plugin already passes these two.
+		// The cap of 16 steps per radian is what bounds the vertex count. Do not
+		// also scale the default down: Clipper's default is relative to the
+		// polygon's bounds, and at 1e-3 a junction patch got under one step per
+		// radian, so every 90° corner came out as a single 45° chamfer.
 		if (PolygonsOffsets(
 				+e, -e, Io, Closed, /*bCopyInputOnFailure*/true,
 				/*MiterLimit*/2.0, Join, EPolygonOffsetEndType::Polygon,
-				/*MaxStepsPerRadian*/16.0, /*DefaultStepsPerRadianScale*/1.0e-3))
+				/*MaxStepsPerRadian*/16.0, /*DefaultStepsPerRadianScale*/1.0))
 		{
 			Io = MoveTemp(Closed);
 		}
@@ -532,6 +532,35 @@ namespace RoadNetSurface
 		{
 			if (FMath::Abs(GP.GetOuter().SignedArea()) >= 1.0) { Out.Add(MoveTemp(GP)); }
 		}
+		return Out.Num() > 0;
+	}
+
+	bool BuildOffsetStrip(const TArray<FVector>& Center, const TArray<double>& LoOffs, const TArray<double>& HiOffs,
+		bool bRoundEnds, TArray<FGeneralPolygon2d>& Out)
+	{
+		Out.Reset();
+		if (Center.Num() < 2 || LoOffs.Num() != Center.Num() || HiOffs.Num() != Center.Num()) { return false; }
+		TArray<FVector> Lo, Hi;
+		RoadNetMath::OffsetPolylineVariable(Center, LoOffs, Lo);
+		RoadNetMath::OffsetPolylineVariable(Center, HiOffs, Hi);
+		TArray<FGeneralPolygon2d> Parts;
+		FGeneralPolygon2d Strip;
+		if (!CloseRibbon(Lo, Hi, Strip)) { return false; }
+		Parts.Add(MoveTemp(Strip));
+		if (bRoundEnds)
+		{
+			for (const int32 i : { 0, Center.Num() - 1 })
+			{
+				const FVector2D A(Lo[i].X, Lo[i].Y), B(Hi[i].X, Hi[i].Y);
+				const double R = 0.5 * FVector2D::Distance(A, B);
+				if (R < 5.0) { continue; }
+				FGeneralPolygon2d Nose;
+				MakeDisc(0.5 * (A + B), R, 24, Nose);
+				Parts.Add(MoveTemp(Nose));
+			}
+		}
+		if (!PolygonsUnion(Parts, Out, /*bCopyInputOnFailure*/true)) { return false; }
+		Out.RemoveAll([](const FGeneralPolygon2d& GP) { return FMath::Abs(GP.GetOuter().SignedArea()) < 1.0; });
 		return Out.Num() > 0;
 	}
 

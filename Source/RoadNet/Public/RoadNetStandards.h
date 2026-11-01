@@ -36,6 +36,31 @@ namespace RoadNetStandards
 	// full width (§5.2.1).
 	ROADNET_API double LaneDropTaperLengthCm(int32 Vd, double LaneWidthCm);
 
+	// Table 5.1 `l` (cm): how long a lane carried out of a junction stays at full
+	// width before its taper starts, for an exit with no acceleration lane (4 s
+	// column; RoadNet builds none). Design speeds below 80 use the 80 km/h row.
+	ROADNET_API double LaneDropHoldLengthCm(int32 Vd);
+
+	// Open-road taper (cm) where the lane count changes away from any junction,
+	// כרך 1 §3.9: merge (lane drop) L_M = 0.6·V·W, diverge (lane gain) L_D = 0.4·V·W
+	// with V in km/h and W in m. Junctions use LaneDropTaperLengthCm instead.
+	ROADNET_API double OpenRoadTaperLengthCm(int32 Vd, double LaneWidthCm, bool bMerge);
+
+	// Length (cm) over which the lane lines move sideways by ShiftCm where the
+	// lane count changes: תקו"ה 803 rule ד, Table 4, L = (L/W)·W.
+	ROADNET_API double LaneCountShiftLengthCm(int32 Vd, double ShiftCm);
+
+	// כרך 2 §7.4.3: a left-turn lane cut into the median leaves at least 2.50 m of it.
+	inline double MedianKeptAtLeftTurnCm() { return 250.0; }
+
+	// Full acceleration lane (cm), כרך 2 Table 6.5: L from 25 km/h at the
+	// main road's design speed, measured to where the closing taper starts.
+	// The table starts at 70 km/h; slower roads use that row.
+	ROADNET_API double AccelLaneLengthCm(int32 Vd);
+
+	// Closing taper of an acceleration lane, the N in 1:N (§6.4.2ב: 1:20-1:35).
+	ROADNET_API double AccelLaneTaperRatio();
+
 	// ---- left-turn lanes (Chapter 7) --------------------------------------
 
 	// Taper ratio (the N in 1:N) for widening into a left-turn lane: 1:10 below
@@ -119,21 +144,22 @@ namespace RoadNetStandards
 	ROADNET_API double TurnLaneExtentCm(int32 Vd, bool bRightTurn, double GradePct,
 		double LaneWidthCm, double* OutParallelCm = nullptr);
 
-	// ---- road-surface markings (LOT"M לוח התמרורים, part 8: 801-821) -------
+	// ---- road-surface markings (תקו"ה 2020 chapter 8: 801-821) --------------
 	//
-	// The LOT"M fixes shape, colour and MEANING; it delegates dimensions to
-	// Israeli Standard 934 («אופן הסימון ... יהיה בהתאם לת"י 934»), which we do
-	// not have. So the dash/gap/width numbers below are working values chosen to
-	// match what the generator already drew, kept per marking number rather than
-	// shared through two globals — the point of the table is that when IS 934
-	// arrives, one entry changes and nothing else does.
+	// Urban column of תקו"ה 2020 tables 4, 10, 12 (docs/research/takoh2020_full.txt,
+	// PDF pages 27-30 and 377-379). The generator has no urban / non-urban flag,
+	// so every road takes the urban figures.
 	enum class EMark : int32
 	{
-		LaneDivider   = 801,   // קו קטעים — dashed white lane / centre line
-		WarningDash   = 805,   // dense dashes warning a double solid is starting
-		JunctionTurn  = 809,   // קו קטעים, פניה בצומת — dashed turn guide
-		TurnArrow     = 813,   // חצים — permitted directions of travel in the lane
-		LaneEndArrow  = 814,   // diagonal arrows where a lane is about to end
+		LaneDivider         = 801,    // 801 continuing lane between junctions: 100:200
+		LaneDividerJunction = 8010,   // 801 continuing lane approaching a junction: 100:100
+		WarningDash         = 805,    // 805 dense dashes before an 803: 100:50
+		ShortRects          = 808,    // 808 short rectangles, lane changing purpose: 100x30 @ 100:100
+		LongRects           = 8080,   // 808 long rectangles, accel / decel / merge lanes: 300x30 @ 300:150
+		JunctionTurn        = 809,    // 809 turn lane in a junction: 200:100
+		JunctionThrough     = 8090,   // 809 continuing lane in a junction: 100:100
+		TurnArrow           = 813,    // 813 arrows: only the width (fig. 6 stem) is used
+		LaneEndArrow        = 814,    // 814 diagonal arrows: 3 per cluster, 300 apart
 	};
 
 	// Paint geometry for one marking. DashLenCm <= 0 means a solid line.
@@ -144,6 +170,19 @@ namespace RoadNetStandards
 		double WidthCm   = 12.0;
 	};
 	ROADNET_API FPaintSpec Paint(EMark Mark);
+
+	// 813-814 table 1: distances (cm) from the stop line to each arrow's TAIL,
+	// nearest first, by design speed.
+	ROADNET_API void ArrowTailDistancesCm(int32 DesignKph, TArray<double>& Out);
+
+	// 801-809 table 7: length (cm) of the 805 warning section before an 803.
+	ROADNET_API double WarningLineLengthCm(int32 DesignKph);
+
+	// 801-809 table 13, urban: length of an 808 section on a lane changing purpose.
+	constexpr double RectSectionLengthCm() { return 5000.0; }
+
+	// 801-809 rule 803: 803 sections closer than this are joined into one.
+	constexpr double DoubleSolidJoinGapCm() { return 15000.0; }
 
 	// ---- helpers -----------------------------------------------------------
 

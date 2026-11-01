@@ -9,9 +9,17 @@
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInterface.h"
 
+const FName ARoadNetTileActor::GeneratedTag(TEXT("RoadNetGenerated"));
+
 ARoadNetTileActor::ARoadNetTileActor()
 {
 	PrimaryActorTick.bCanEverTick = false;
+	Tags.Add(GeneratedTag);
+	// Geometry is world-space on an origin pivot, so World Partition would bin
+	// every tile into the origin cell and stream the roads out with it.
+#if WITH_EDITORONLY_DATA
+	bIsSpatiallyLoaded = false;
+#endif
 	USceneComponent* Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	// Root MUST be Static: the mesh/HISM layers we attach are Static, and a Static
 	// child cannot attach to a Movable parent (attach aborts). Splines are Movable,
@@ -161,7 +169,13 @@ UDecalComponent* ARoadNetTileActor::AddRoadDecal(UMaterialInterface* Material, c
 
 void ARoadNetTileActor::TrackChildActor(AActor* Child)
 {
-	if (Child) { ChildActors.Add(Child); }
+	if (!Child) { return; }
+	Child->Tags.AddUnique(GeneratedTag);
+	// Attached to a tile that is never streamed, so it must not be either.
+#if WITH_EDITOR
+	if (Child->CanChangeIsSpatiallyLoadedFlag()) { Child->SetIsSpatiallyLoaded(false); }
+#endif
+	ChildActors.Add(Child);
 }
 
 void ARoadNetTileActor::ClearForRebuild()
