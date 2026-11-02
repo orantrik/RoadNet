@@ -2673,7 +2673,7 @@ int32 URoadNetwork::RebucketCurbPaint()
 	EnsureTileRegistry();
 
 	UStaticMesh* Mesh = CurbMesh ? CurbMesh.Get() : nullptr;
-	if (!Mesh) { Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/PCG/Assets/Meshes/SM_Curb2.SM_Curb2")); }
+	if (!Mesh) { Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Template_01/Meshes/PCG/Assets/Meshes/SM_Curb2.SM_Curb2")); }
 	if (!Mesh) { Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")); }
 	if (!Mesh) { return 0; }
 
@@ -9463,7 +9463,7 @@ UStaticMesh* URoadNetwork::ResolveCurbMesh()
 
 	// Default to the PCG kerb kit mesh; fall back to an engine cube only if that
 	// asset can't be found, so the kerb line is always visible.
-	UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/PCG/Assets/Meshes/SM_Curb2.SM_Curb2"));
+	UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Template_01/Meshes/PCG/Assets/Meshes/SM_Curb2.SM_Curb2"));
 	if (!Mesh)
 	{
 		Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
@@ -10609,12 +10609,12 @@ UStaticMesh* URoadNetwork::ResolveMarkMesh(ERoadNetMarkKind Kind, TMap<FName, US
 	// hook, so the assigned mesh always wins there. Fill it in if you decide.
 	struct FSlot { const TCHAR* Key; const TCHAR* Stencil; };
 	static const FSlot kSlots[] = {
-		{ TEXT("ArrowThrough"),      TEXT("/Game/OSM/Stencils/Arrow_Straight.Arrow_Straight") },
-		{ TEXT("ArrowLeft"),         TEXT("/Game/OSM/Stencils/Arrow_Left.Arrow_Left") },
-		{ TEXT("ArrowRight"),        TEXT("/Game/OSM/Stencils/Arrow_Right.Arrow_Right") },
-		{ TEXT("ArrowUTurn"),        TEXT("/Game/OSM/Stencils/Arrow_Turn.Arrow_Turn") },
-		{ TEXT("ArrowThroughLeft"),  TEXT("/Game/OSM/Stencils/Arrow_Straight_Left.Arrow_Straight_Left") },
-		{ TEXT("ArrowThroughRight"), TEXT("/Game/OSM/Stencils/Arrow_Straight_Right.Arrow_Straight_Right") },
+		{ TEXT("ArrowThrough"),      TEXT("/Game/Template_01/Meshes/OSM/Stencils/Arrow_Straight.Arrow_Straight") },
+		{ TEXT("ArrowLeft"),         TEXT("/Game/Template_01/Meshes/OSM/Stencils/Arrow_Left.Arrow_Left") },
+		{ TEXT("ArrowRight"),        TEXT("/Game/Template_01/Meshes/OSM/Stencils/Arrow_Right.Arrow_Right") },
+		{ TEXT("ArrowUTurn"),        TEXT("/Game/Template_01/Meshes/OSM/Stencils/Arrow_Turn.Arrow_Turn") },
+		{ TEXT("ArrowThroughLeft"),  TEXT("/Game/Template_01/Meshes/OSM/Stencils/Arrow_Straight_Left.Arrow_Straight_Left") },
+		{ TEXT("ArrowThroughRight"), TEXT("/Game/Template_01/Meshes/OSM/Stencils/Arrow_Straight_Right.Arrow_Straight_Right") },
 		{ TEXT("ArrowLeftRight"),    nullptr },
 	};
 	static_assert(UE_ARRAY_COUNT(kSlots) == (int32)ERoadNetMarkKind::LeftRight + 1,
